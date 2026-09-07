@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Crowbarr · Subtitles, automatically</title>
+  <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="visually-hidden-focusable skip-link" href="#main">Skip to content</a>
+  <header class="app-header border-bottom">
+    <div class="container-xxl d-flex align-items-center gap-4 py-3">
+      <a class="brand d-flex align-items-center gap-2 text-decoration-none" href="/" aria-label="Crowbarr home">
+        <img src="/static/mark.svg" alt="" width="30" height="30"><span>Crowbarr</span>
+      </a>
+      <nav id="navigation" class="d-flex gap-1" aria-label="Main navigation" hidden>
+        <button class="nav-button active" data-view="activity" aria-current="page">Activity</button>
+        <button class="nav-button" data-view="settings">Settings</button>
+      </nav>
+      <span id="service-state" class="small text-secondary ms-auto">Subtitle automation</span>
+      <button id="logout" class="btn btn-sm btn-outline-secondary" hidden>Sign out</button>
+    </div>
+  </header>
+  <main id="main" class="container-xxl py-4 py-lg-5">
+    <div id="message" class="alert" role="status" hidden></div>
+    <section id="login-view" class="login-panel mx-auto">
+      <h1 class="h3 mb-2">Welcome to Crowbarr</h1>
+      <p class="text-secondary mb-4">Automatic subtitles for your media library. Sign in to connect your folders and services.</p>
+      <form id="login-form">
+        <label for="api-key" class="form-label">Crowbarr API key</label>
+        <input id="api-key" type="password" class="form-control" autocomplete="current-password" required aria-describedby="key-help">
+        <p id="key-help" class="form-text mt-2">Use the key you configured, or read <code>/config/admin-token</code> inside your Crowbarr container.</p>
+        <button type="submit" class="btn btn-primary mt-2">Sign in</button>
+      </form>
+      <p class="small text-secondary mt-5">Your media stays on your server. Models download on first use.</p>
+    </section>
+
+    <section id="activity-view" hidden>
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+        <div><h1 class="h3 mb-2">Library activity</h1><p id="activity-subtitle" class="text-secondary mb-0">Checking the subtitle queue…</p></div>
+        <div class="d-flex gap-2"><button id="pause" class="btn btn-outline-secondary">Pause queue</button><button id="scan" class="btn btn-primary">Check libraries</button></div>
+      </div>
+      <div id="setup-callout" class="alert alert-light border d-flex flex-wrap align-items-center justify-content-between gap-3" hidden>
+        <div><strong>Connect your first library</strong><p class="mb-0 text-secondary">Choose the media folders Crowbarr should watch. New files will be picked up automatically.</p></div>
+        <button class="btn btn-primary" data-view="settings">Open settings</button>
+      </div>
+      <div id="notices" aria-live="polite"></div>
+      <div id="integration-status" class="d-flex flex-wrap gap-3 small mb-3" aria-live="polite"></div>
+      <div class="queue-toolbar d-flex flex-wrap justify-content-between align-items-center gap-3 border-top border-bottom py-3">
+        <div id="queue-summary" class="d-flex flex-wrap gap-3 small" aria-live="polite"></div>
+        <div class="d-flex align-items-center gap-2"><label for="filter" class="small text-secondary">Show</label><select id="filter" class="form-select form-select-sm"><option value="all">All activity</option><option value="active">In progress</option><option value="completed">Completed</option><option value="unchanged">Audit passed · unchanged</option><option value="attention">Needs attention</option></select></div>
+      </div>
+      <div class="table-responsive">
+        <table class="table align-middle activity-table mb-0">
+          <caption class="visually-hidden">The 100 most recently updated subtitle jobs</caption>
+          <thead><tr><th scope="col">Media</th><th scope="col">Status</th><th scope="col">Source</th><th scope="col">Updated</th><th scope="col" aria-label="Actions"></th></tr></thead>
+          <tbody id="jobs"></tbody>
+        </table>
+      </div>
+      <div id="empty-queue" class="empty-state text-center py-5" hidden><h2 class="h5">Nothing in the queue yet</h2><p class="text-secondary mb-0">Crowbarr will show new media and subtitle updates here after its next library check.</p></div>
+      <p class="small text-secondary mt-3">Showing the latest 100 jobs. Originals are preserved. Existing subtitles are audited first. Repairs require measured improvement; uncertain results are withheld.</p>
+      <section id="job-detail" class="border rounded-3 p-4 mt-4" tabindex="-1" hidden>
+        <div class="d-flex justify-content-between gap-3"><h2 id="detail-title" class="h5 text-break"></h2><button id="close-detail" class="btn btn-sm btn-outline-secondary align-self-start">Close</button></div>
+        <p id="detail-path" class="small text-secondary text-break"></p>
+        <p id="detail-description"></p><dl id="detail-stats" class="row small"></dl><div id="detail-audit"></div><ul id="detail-issues" class="small mb-0"></ul>
+      </section>
+    </section>
+
+    <section id="settings-view" hidden>
+      <h1 class="h3 mb-2">Settings</h1>
+      <p class="text-secondary mb-4">Connect once. Crowbarr watches for new media and subtitle changes.</p>
+      <form id="settings-form">
+        <section class="settings-section row g-4 border-top py-4">
+          <div class="col-lg-4"><h2 class="h5">Media managers</h2><p class="text-secondary small">Sonarr and Radarr supply the library: imported files, monitoring preferences, and upgrades. With either connected, only files in their catalogs are processed.</p><p class="text-secondary small">Map paths if the containers see different folders. Save before testing. Leave a saved key blank to keep it; clear the URL to disconnect. Bazarr checks and Plex refreshes are optional.</p></div>
+          <div class="col-lg-8" id="connections"></div>
+        </section>
+        <section class="settings-section row g-4 border-top py-4">
+          <div class="col-lg-4"><h2 class="h5">Media folders</h2><p class="text-secondary small">These folders authorize media access. Without Sonarr or Radarr, Crowbarr discovers videos by scanning them directly.</p></div>
+          <div class="col-lg-8">
+            <label for="roots" class="form-label">Watched folders</label><textarea id="roots" name="roots" class="form-control" rows="3" placeholder="/media/tv&#10;/media/movies" aria-describedby="roots-help"></textarea>
+            <div id="roots-help" class="form-text">One absolute folder per line. Paths already defined by a Sonarr/Radarr mapping need not be repeated. Crowbarr needs permission to write subtitles beside each video.</div>
+            <div class="row g-3 mt-1"><div class="col-sm-6"><label for="scan_seconds" class="form-label">Check every (seconds)</label><input class="form-control" id="scan_seconds" name="scan_seconds" type="number" min="10" max="86400" required></div><div class="col-sm-6"><label for="subtitle_wait_minutes" class="form-label">Wait for Bazarr (minutes)</label><input class="form-control" id="subtitle_wait_minutes" name="subtitle_wait_minutes" type="number" min="0" max="10080" required></div></div>
+            <p class="form-text mt-2">If no authored subtitle arrives within this window, Crowbarr checks embedded subtitles, then transcribes. A later download starts a new job.</p>
+          </div>
+        </section>
+        <section class="settings-section row g-4 border-top py-4">
+          <div class="col-lg-4"><h2 class="h5">Speech processing</h2><p class="text-secondary small">One file at a time. English audio and subtitles are supported in this first release.</p></div>
+          <div class="col-lg-8"><div class="row g-3">
+            <div class="col-sm-6"><label class="form-label" for="model">Whisper model</label><select class="form-select" id="model" name="model"><option value="tiny">Tiny · lowest resource use</option><option value="base">Base</option><option value="small">Small · balanced</option><option value="medium">Medium</option><option value="large-v3">Large v3</option><option value="large-v3-turbo">Large v3 turbo</option></select></div>
+            <div class="col-sm-6"><label class="form-label" for="device">Processor</label><select class="form-select" id="device" name="device"><option value="cpu">CPU</option><option value="cuda">NVIDIA GPU (CUDA)</option></select></div>
+            <div class="col-sm-6"><label class="form-label" for="compute_type">Precision</label><select class="form-select" id="compute_type" name="compute_type"><option value="int8">INT8 · lower memory</option><option value="float32">FP32</option><option value="int8_float16">INT8 / FP16 · GPU only</option><option value="float16">FP16 · GPU only</option></select></div>
+            <div class="col-sm-6"><label class="form-label" for="cpu_threads">CPU threads</label><input class="form-control" id="cpu_threads" name="cpu_threads" type="number" min="1" max="64" required></div>
+          </div><p class="form-text mt-2">GPU processing needs the CUDA image and NVIDIA container support. Smaller models trade recognition accuracy for lower resource use.</p>
+          <div class="form-check mt-3"><input class="form-check-input" type="checkbox" id="allow_untagged_audio" name="allow_untagged_audio"><label class="form-check-label" for="allow_untagged_audio">Try audio tracks without a language tag</label></div>
+          <div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="allow_untagged_subtitles" name="allow_untagged_subtitles"><label class="form-check-label" for="allow_untagged_subtitles">Use untagged SRT files as English subtitles</label></div>
+          </div>
+        </section>
+        
+        <section class="settings-section row g-4 border-top py-4">
+          <div class="col-lg-4"><h2 class="h5">Import events</h2><p class="text-secondary small">Optional hooks make discovery faster. Scheduled checks cover missed events automatically.</p></div>
+          <div class="col-lg-8"><p>In Sonarr or Radarr, add a <strong>Webhook</strong> connection for imports, upgrades, renames, and deletions.</p><p class="small mb-2">Use a Crowbarr address reachable from that service:</p><code class="d-block text-break mb-2">http://crowbarr:8449/api/hooks/sonarr</code><code class="d-block text-break mb-3">http://crowbarr:8449/api/hooks/radarr</code><p class="small text-secondary mb-0">Username: <code>crowbarr</code>. Password: your Crowbarr API key. Events trigger a fresh API sync; scheduled syncs cover missed events. Bazarr downloads are discovered beside the imported media.</p></div>
+        </section>
+        <div class="border-top pt-4 d-flex gap-3 align-items-center"><button type="submit" class="btn btn-primary">Save settings</button><span id="save-state" class="small text-secondary" role="status"></span></div>
+      </form>
+    </section>
+  </main>
+  <footer class="container-xxl py-4 small text-secondary border-top d-flex flex-wrap justify-content-between gap-2"><span>Crowbarr <span id="version">0.3.0</span> · Preview release</span><span>Human text. Audio-grounded timing.</span></footer>
+</body>
+</html>

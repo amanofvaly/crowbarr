@@ -1,0 +1,38 @@
+:root { --brand: #245b50; --surface: #f7f8fa; }
+body { background: var(--surface); color: #222930; }
+[hidden] { display: none !important; }
+.app-header { background: #fff; }
+.brand { color: #222930; font-size: 1.25rem; font-weight: 700; letter-spacing: -.025em; }
+.container-xxl { max-width: 1220px; }
+.nav-button { background: transparent; border: 0; border-radius: .375rem; color: #58616b; padding: .45rem .8rem; font-size: .9rem; }
+.nav-button:hover { background: #edf0f2; }
+.nav-button.active { background: #e5eeeb; color: #1d4b41; font-weight: 600; }
+.btn-primary { --bs-btn-bg: var(--brand); --bs-btn-border-color: var(--brand); --bs-btn-hover-bg: #1b463d; --bs-btn-hover-border-color: #1b463d; --bs-btn-active-bg: #173d35; --bs-btn-active-border-color: #173d35; --bs-btn-disabled-bg: #52746d; --bs-btn-disabled-border-color: #52746d; }
+.btn { font-weight: 500; }
+.login-panel { max-width: 440px; padding: 3rem 0 5rem; }
+.activity-table { --bs-table-bg: transparent; font-size: .875rem; }
+.activity-table th { color: #65707b; font-weight: 500; font-size: .75rem; padding: .8rem; }
+.activity-table td { padding: 1rem .8rem; }
+.media-title { font-weight: 600; overflow-wrap: anywhere; }
+.media-cell { min-width: 200px; max-width: 520px; }
+.job-note { font-size: .78rem; color: #66717b; margin-top: .25rem; }
+.badge { font-weight: 500; padding: .4em .65em; }
+.queue-toolbar .form-select { width: auto; }
+.settings-section p { max-width: 65ch; }
+.form-label { font-size: .875rem; font-weight: 500; }
+.form-text { color: #626c76; }
+.connection-row + .connection-row { border-top: 1px solid var(--bs-border-color); padding-top: 1.25rem; margin-top: 1.25rem; }
+:focus-visible { outline: 3px solid #477bba; outline-offset: 3px; }
+.form-control:focus, .form-select:focus { border-color: #477bba; box-shadow: 0 0 0 .2rem #477bba26; }
+::selection { background: #c8dfd7; color: #173d35; }
+input, textarea { caret-color: var(--brand); }
+.skip-link { position: absolute; z-index: 10; background: white; padding: 1rem; }
+.text-secondary { color: #626c76 !important; }
+#detail-stats dt { font-weight: 500; }
+@media (max-width: 575px) {
+  .app-header .container-xxl { gap: .75rem !important; flex-wrap: wrap; }
+  #service-state { display: none; }
+  #navigation { margin-left: auto; }
+  .login-panel { padding: 1.5rem 0 3rem; }
+  .activity-table td, .activity-table th { padding-left: .4rem; padding-right: .4rem; }
+}

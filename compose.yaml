@@ -1,0 +1,23 @@
+services:
+  crowbarr:
+    platform: linux/amd64
+    build: .
+    image: crowbarr:local
+    container_name: crowbarr
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${CROWBARR_BIND:-127.0.0.1}:8449:8449"
+    environment:
+      CROWBARR_API_KEY: "${CROWBARR_API_KEY:-}"
+    volumes:
+      - ${CONFIG_PATH:-./data}:/config
+      - ${MEDIA_PATH:?Set MEDIA_PATH in .env}:/media
+    cpus: "${CPU_LIMIT:-2}"
+    mem_limit: ${MEMORY_LIMIT:-4g}
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

@@ -1,0 +1,13 @@
+services:
+  crowbarr:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: crowbarr:local-cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

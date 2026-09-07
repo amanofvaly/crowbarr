@@ -1,0 +1,278 @@
+"use strict";
+const $ = (id) => document.getElementById(id);
+let token = sessionStorage.getItem("crowbarr-token") || "";
+let configuration = null;
+let snapshot = null;
+let activeView = "activity";
+let polling = false;
+const states = {
+  waiting: ["Waiting for subtitle", "text-bg-light"], queued: ["Queued", "text-bg-light"],
+  retry: ["Retry scheduled", "text-bg-warning"], processing: ["Processing", "text-bg-primary"],
+  unchanged: ["Audit passed · unchanged", "text-bg-success"],
+  completed: ["Completed", "text-bg-success"], review: ["Needs attention", "text-bg-warning"],
+  failed: ["Failed", "text-bg-danger"], superseded: ["Replaced", "text-bg-light"],
+};
+function element(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+function message(text, error = false) {
+  $("message").textContent = text;
+  $("message").className = `alert ${error ? "alert-danger" : "alert-success"}`;
+  $("message").hidden = !text;
+}
+async function api(path, method = "GET", data) {
+  const response = await fetch(`/api${path}`, {
+    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: data === undefined ? undefined : JSON.stringify(data),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    if (response.status === 401) signOut();
+    throw new Error(typeof result.detail === "string" ? result.detail : "The request could not be completed.");
+  }
+  return result;
+}
+function view(name) {
+  activeView = name;
+  $("activity-view").hidden = name !== "activity";
+  $("settings-view").hidden = name !== "settings";
+  document.querySelectorAll(".nav-button").forEach(button => {
+    button.classList.toggle("active", button.dataset.view === name);
+    if (button.dataset.view === name) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+}
+function signOut() {
+  token = "";
+  sessionStorage.removeItem("crowbarr-token");
+  ["activity-view", "settings-view", "navigation", "logout"].forEach(id => $(id).hidden = true);
+  $("login-view").hidden = false;
+  $("service-state").textContent = "Subtitle automation";
+}
+function relativeTime(value) {
+  const seconds = Math.round(Date.now() / 1000 - value);
+  if (seconds < 60) return "Just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return new Date(value * 1000).toLocaleDateString();
+}
+function renderJobs() {
+  if (!snapshot) return;
+  $("jobs").replaceChildren();
+  const filter = $("filter").value;
+  const jobs = snapshot.jobs.filter(job => filter === "all" || job.state === filter ||
+    (filter === "active" && ["waiting", "queued", "processing", "retry"].includes(job.state)) ||
+    (filter === "attention" && ["review", "failed"].includes(job.state)));
+  for (const job of jobs) {
+    const row = element("tr");
+    const media = element("td", undefined, "media-cell");
+    media.append(element("div", job.title, "media-title"));
+    let note = job.state === "processing" ? job.stage : job.error;
+    if (job.state === "waiting") note = `Eligible ${new Date(job.ready * 1000).toLocaleString()}`;
+    if (note) media.append(element("div", note, "job-note"));
+    if (job.manager) media.append(element("div", job.manager === "sonarr" ? "Sonarr" : "Radarr", "job-note"));
+    const status = element("td");
+    const [label, color] = states[job.state] || [job.state, "text-bg-light"];
+    status.append(element("span", label, `badge ${color}`));
+    const source = job.report ? (job.report.mode === "hybrid" ? "Authored + audio" : "Generated") :
+      (job.source ? "Authored SRT" : "Embedded / audio");
+    row.append(media, status, element("td", source, "text-secondary"), element("td", relativeTime(job.updated), "text-secondary text-nowrap"));
+    const actions = element("td", undefined, "text-end");
+    const details = element("button", "Details", "btn btn-sm btn-outline-secondary");
+    details.addEventListener("click", () => showDetails(job));
+    actions.append(details);
+    if (["failed", "review"].includes(job.state)) {
+      const retry = element("button", "Retry", "btn btn-sm btn-outline-secondary ms-2");
+      retry.addEventListener("click", () => action(retry, () => api(`/jobs/${job.id}/retry`, "POST")));
+      actions.append(retry);
+    }
+    row.append(actions);
+    $("jobs").append(row);
+  }
+  $("empty-queue").hidden = jobs.length > 0;
+  $("empty-queue").querySelector("h2").textContent = filter === "all" ? "Nothing in the queue yet" : "No matching jobs";
+}
+function showDetails(job) {
+  $("job-detail").hidden = false;
+  $("detail-title").textContent = job.title;
+  $("detail-path").textContent = job.media;
+  $("detail-description").textContent = job.error || (job.state === "completed" ?
+    "A separate Crowbarr subtitle was saved. Your original subtitle is unchanged." : job.stage || "Waiting for processing.");
+  $("detail-stats").replaceChildren();
+  $("detail-issues").replaceChildren();
+  $("detail-audit").replaceChildren();
+  if (job.report) {
+    const report = job.report;
+    const stats = [["Output cues", report.output_cues], ["Authored cues matched", `${report.preserved_cues} / ${report.source_cues}`],
+      ["Recognized words outside authored cues", `${Math.round(report.generated_word_ratio * 100)}%`], ["Whisper model", report.model]];
+    if (report.audit) {
+      const {before, after, improved} = report.audit;
+      const seconds = value => value == null ? "Insufficient evidence" : `${value.toFixed(2)} s`;
+      stats.push(["Audit result", before.decision === "pass" ? "Passed — original retained" : before.decision === "repair" ? "Timing problem detected" : "Inconclusive"],
+        ["Confident cue coverage", `${before.supported_cues} / ${before.total_cues}`],
+        ["Original p95 boundary difference", seconds(before.p95_error_seconds)]);
+      if (after) stats.push(["Candidate p95 boundary difference", seconds(after.p95_error_seconds)],
+        ["Improvement check", improved ? "Passed" : "Failed"]);
+      $("detail-audit").append(element("p", before.reason, "small"));
+      const evidence = element("details", undefined, "small mb-3");
+      evidence.append(element("summary", "Largest original timing differences (up to 10 cues)"));
+      const list = element("ul", undefined, "mt-2");
+      for (const item of [...before.evidence].sort((a,b) => b.error_seconds-a.error_seconds).slice(0,10)) {
+        list.append(element("li", `Cue ${item.cue}: start ${item.start_delta_seconds.toFixed(2)} s, end ${item.end_delta_seconds.toFixed(2)} s relative to recognized speech.`));
+      }
+      evidence.append(list);
+      const download = element("button", "Download full audit report", "btn btn-sm btn-outline-secondary mb-3");
+      download.type = "button";
+      download.addEventListener("click", () => {
+        const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], {type:"application/json"}));
+        const link = element("a"); link.href = url; link.download = `crowbarr-audit-${job.id}.json`;
+        link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
+      $("detail-audit").append(evidence, download);
+    }
+    for (const [key, value] of stats) $("detail-stats").append(element("dt", key, "col-sm-4"), element("dd", String(value), "col-sm-8"));
+    for (const issue of report.issues || []) $("detail-issues").append(element("li", issue));
+    $("detail-issues").append(element("li", report.note, "text-secondary"));
+  }
+  $("job-detail").focus({ preventScroll: true });
+  $("job-detail").scrollIntoView({ block: "nearest" });
+}
+async function refresh() {
+  if (!token || polling) return;
+  polling = true;
+  try {
+    snapshot = await api("/status");
+    $("version").textContent = snapshot.version;
+    $("service-state").textContent = snapshot.paused ? "Queue paused" : snapshot.configured ? (snapshot.discovery_mode === "arr" ? "Following arr libraries" : "Watching folders") : "Setup needed";
+    $("activity-subtitle").textContent = snapshot.last_scan ?
+      `${snapshot.media_count} media files found · Last checked ${relativeTime(snapshot.last_scan)}` : "Your library will be checked automatically.";
+    $("setup-callout").hidden = snapshot.configured;
+    $("pause").textContent = snapshot.paused ? "Resume queue" : "Pause queue";
+    $("notices").replaceChildren();
+    for (const notice of snapshot.notices) $("notices").append(element("div", notice.message, "alert alert-warning small"));
+    if (!snapshot.ffmpeg) $("notices").append(element("div", "FFmpeg or ffprobe is missing. Install both before processing media.", "alert alert-warning small"));
+    $("integration-status").replaceChildren();
+    for (const name of snapshot.providers || []) {
+      const sync = (snapshot.integrations || []).find(item => item.provider === name);
+      const label = name === "sonarr" ? "Sonarr" : "Radarr";
+      $("integration-status").append(element("span", !sync ? `${label}: first sync pending` :
+        sync.healthy ? `${label}: ${sync.file_count} eligible files · synced ${relativeTime(sync.last_success)}` :
+        `${label}: sync unavailable · new jobs held`, sync?.healthy ? "text-secondary" : "text-warning-emphasis"));
+    }
+    $("queue-summary").replaceChildren();
+    const counts = snapshot.counts;
+    const summary = [["Queued", (counts.queued || 0) + (counts.waiting || 0) + (counts.retry || 0)],
+      ["Processing", counts.processing || 0], ["Completed", counts.completed || 0],
+      ["Audit passed · unchanged", counts.unchanged || 0],
+      ["Need attention", (counts.review || 0) + (counts.failed || 0)]];
+    for (const [label, value] of summary) {
+      const span = element("span", undefined, "text-secondary");
+      span.append(element("strong", String(value), "text-body me-1"), document.createTextNode(label));
+      $("queue-summary").append(span);
+    }
+    renderJobs();
+  } catch (error) { message(error.message, true); }
+  finally { polling = false; }
+}
+function fillSettings(settings) {
+  configuration = settings;
+  for (const field of $("settings-form").elements) {
+    if (!field.name || !(field.name in settings)) continue;
+    if (field.type === "checkbox") field.checked = settings[field.name];
+    else field.value = field.name === "roots" ? settings.roots.join("\n") : settings[field.name];
+  }
+  $("connections").replaceChildren();
+  for (const name of ["sonarr", "radarr", "bazarr", "plex"]) {
+    const group = element("div", undefined, "connection-row");
+    group.append(element("h3", name[0].toUpperCase() + name.slice(1), "h6 mb-3"));
+    const fields = element("div", undefined, "row g-3");
+    for (const [key, label, type] of [["url", "Service URL", "url"], ["api_key", name === "plex" ? "Plex token" : "API key", "password"]]) {
+      const column = element("div", undefined, "col-sm-6");
+      const inputLabel = element("label", label, "form-label");
+      const input = element("input", undefined, "form-control");
+      input.id = `${name}-${key}`; input.name = input.id; input.type = type; input.autocomplete = "off";
+      inputLabel.htmlFor = input.id;
+      input.value = key === "url" ? settings[name].url : "";
+      if (key === "api_key" && settings[name].has_api_key) input.placeholder = "Saved · leave blank to keep";
+      column.append(inputLabel, input); fields.append(column);
+    }
+    const test = element("button", "Test saved connection", "btn btn-sm btn-outline-secondary mt-3");
+    test.type = "button";
+    test.addEventListener("click", () => action(test, () => api(`/connections/${name}/test`, "POST")));
+    group.append(fields);
+    if (["sonarr", "radarr"].includes(name)) {
+      const mappingLabel = element("label", "Path mappings", "form-label mt-3");
+      const mappings = element("textarea", undefined, "form-control");
+      mappings.id = `${name}-mappings`; mappings.rows = 2;
+      mappings.placeholder = name === "sonarr" ? "/tv => /media/tv" : "/movies => /media/movies";
+      mappings.value = (settings[name].mappings || []).map(m => `${m.remote} => ${m.local}`).join("\n");
+      mappingLabel.htmlFor = mappings.id;
+      const help = element("div", "One mapping per line: path in the media manager => path inside Crowbarr. Leave blank when paths are identical.", "form-text");
+      help.id = `${name}-mapping-help`; mappings.setAttribute("aria-describedby", help.id);
+      const check = element("div", undefined, "form-check mt-3");
+      const input = element("input", undefined, "form-check-input");
+      input.type = "checkbox"; input.id = `${name}-monitored`; input.checked = settings[name].monitored_only !== false;
+      const label = element("label", name === "sonarr" ? "Only monitored series and episodes" : "Only monitored movies", "form-check-label");
+      label.htmlFor = input.id; check.append(input, label);
+      group.append(mappingLabel, mappings, help, check);
+    }
+    group.append(test); $("connections").append(group);
+  }
+}
+async function action(button, callback) {
+  button.disabled = true;
+  try { const result = await callback(); if (result?.message) message(result.message); await refresh(); }
+  catch (error) { message(error.message, true); }
+  finally { button.disabled = false; }
+}
+async function enter() {
+  const settings = await api("/settings");
+  fillSettings(settings);
+  sessionStorage.setItem("crowbarr-token", token);
+  $("api-key").value = "";
+  $("login-view").hidden = true;
+  $("navigation").hidden = false;
+  $("logout").hidden = false;
+  message(""); view(activeView); await refresh();
+}
+$("login-form").addEventListener("submit", async event => {
+  event.preventDefault(); token = $("api-key").value.trim();
+  await action(event.submitter, enter);
+});
+$("settings-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const payload = structuredClone(configuration);
+  for (const field of $("settings-form").elements) {
+    if (!field.name || !(field.name in payload)) continue;
+    payload[field.name] = field.type === "checkbox" ? field.checked : field.type === "number" ? Number(field.value) : field.value;
+  }
+  payload.roots = $("roots").value.split("\n").map(value => value.trim()).filter(Boolean);
+  for (const name of ["sonarr", "radarr", "bazarr", "plex"]) {
+    payload[name] = { url: $(`${name}-url`).value.trim(), api_key: $(`${name}-api_key`).value.trim() };
+    if (["sonarr", "radarr"].includes(name)) {
+      const lines = $(`${name}-mappings`).value.split("\n").map(line => line.trim()).filter(Boolean);
+      if (lines.some(line => line.split("=>").length !== 2 || line.split("=>").some(part => !part.trim()))) {
+        message(`Check ${name} mappings: each line must contain remote path => local path.`, true);
+        $(`${name}-mappings`).focus(); return;
+      }
+      payload[name].mappings = lines.map(line => {const [remote, local] = line.split("=>").map(part => part.trim()); return {remote, local};});
+      payload[name].monitored_only = $(`${name}-monitored`).checked;
+    }
+  }
+  await action(event.submitter, async () => {
+    fillSettings(await api("/settings", "PUT", payload));
+    $("save-state").textContent = "Saved. Library check requested.";
+    return { message: "Settings saved." };
+  });
+});
+document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => view(button.dataset.view)));
+$("logout").addEventListener("click", signOut);
+$("pause").addEventListener("click", event => action(event.currentTarget, () => api("/pause", "POST")));
+$("scan").addEventListener("click", event => action(event.currentTarget, () => api("/scan", "POST")));
+$("filter").addEventListener("change", renderJobs);
+$("close-detail").addEventListener("click", () => $("job-detail").hidden = true);
+if (token) enter().catch(error => message(error.message, true));
+setInterval(refresh, 5000);
