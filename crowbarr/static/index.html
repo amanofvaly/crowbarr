@@ -115,7 +115,11 @@
         
         <section class="settings-section row g-4 border-top py-4">
           <div class="col-lg-4"><h2 class="h5">Import events</h2><p class="text-secondary small">Optional hooks make discovery faster. Scheduled checks cover missed events automatically.</p></div>
-          <div class="col-lg-8"><p>In Sonarr or Radarr, add a <strong>Webhook</strong> connection for imports, upgrades, renames, and deletions.</p><p class="small mb-2">Use a Crowbarr address reachable from that service:</p><code class="d-block text-break mb-2">http://crowbarr:8449/api/hooks/sonarr</code><code class="d-block text-break mb-3">http://crowbarr:8449/api/hooks/radarr</code><p class="small text-secondary mb-0">Username: <code>crowbarr</code>. Password: your Crowbarr API key. Events trigger a fresh API sync; scheduled syncs cover missed events. Bazarr downloads are discovered beside the imported media.</p></div>
+          <div class="col-lg-8">
+            <label for="machine-api-key" class="form-label">Crowbarr API key</label>
+            <div class="input-group mb-2"><input id="machine-api-key" class="form-control" type="password" readonly autocomplete="off" aria-describedby="machine-key-help"><button id="toggle-api-key" type="button" class="btn btn-outline-secondary" aria-pressed="false">Show key</button></div>
+            <p id="machine-key-help" class="form-text mb-3">Copy this key into your media apps. Your dashboard password is separate.</p>
+            <p>In Sonarr or Radarr, add a <strong>Webhook</strong> connection for imports, upgrades, renames, and deletions.</p><p class="small mb-2">Use a Crowbarr address reachable from that service:</p><code class="d-block text-break mb-2">http://crowbarr:8449/api/hooks/sonarr</code><code class="d-block text-break mb-3">http://crowbarr:8449/api/hooks/radarr</code><p class="small text-secondary mb-0">Username: <code>crowbarr</code>. Password: your Crowbarr API key. Events trigger a fresh API sync; scheduled syncs cover missed events. Bazarr downloads are discovered beside the imported media.</p></div>
         </section>
         <div class="border-top pt-4 d-flex gap-3 align-items-center"><button type="submit" class="btn btn-primary">Save settings</button><span id="save-state" class="small text-secondary" role="status"></span></div>
       </form>

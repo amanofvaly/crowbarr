@@ -1,6 +1,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-let token = "";
+let authenticated = false;
+let sessionRevision = 0;
 let configuration = null;
 let snapshot = null;
 let activeView = "activity";
@@ -25,12 +26,12 @@ function message(text, error = false) {
 }
 async function api(path, method = "GET", data) {
   const response = await fetch(`/api${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { "Content-Type": "application/json" },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
   const result = await response.json();
   if (!response.ok) {
-    if (response.status === 401) signOut();
+    if (response.status === 401) endSession();
     throw new Error(typeof result.detail === "string" ? result.detail : "The request could not be completed.");
   }
   return result;
@@ -45,13 +46,26 @@ function view(name) {
     else button.removeAttribute("aria-current");
   });
 }
-function signOut() {
-  token = "";
-  fetch("/api/session", { method: "DELETE" }).catch(() => {});
+function endSession() {
+  authenticated = false;
+  sessionRevision += 1;
+  snapshot = null;
+  $("machine-api-key").value = "";
+  $("machine-api-key").type = "password";
+  $("toggle-api-key").textContent = "Show key";
+  $("toggle-api-key").setAttribute("aria-pressed", "false");
+  $("jobs").replaceChildren();
   ["activity-view", "settings-view", "navigation", "logout"].forEach(id => $(id).hidden = true);
   $("login-view").hidden = false;
   $("service-state").textContent = "Subtitle automation";
   showLogin();
+}
+async function signOut() {
+  await action($("logout"), async () => {
+    const response = await fetch("/api/session", { method: "DELETE" });
+    if (!response.ok) throw new Error("Could not sign out. Please try again.");
+    endSession();
+  });
 }
 function relativeTime(value) {
   const seconds = Math.round(Date.now() / 1000 - value);
@@ -122,7 +136,7 @@ function showDetails(job) {
     if (report.candidate) {
       const download = element("button", "Download review subtitle", "btn btn-sm btn-outline-primary mb-3");
       download.addEventListener("click", () => action(download, async () => {
-        const response = await fetch(`/api/jobs/${job.id}/candidate`, {headers: {"X-Api-Key": token}});
+        const response = await fetch(`/api/jobs/${job.id}/candidate`);
         if (!response.ok) throw new Error("Candidate is unavailable");
         const url = URL.createObjectURL(await response.blob());
         const link = element("a"); link.href = url; link.download = `crowbarr-${job.id}.srt`; link.click();
@@ -177,10 +191,13 @@ function showDetails(job) {
   $("job-detail").scrollIntoView({ block: "nearest" });
 }
 async function refresh() {
-  if (!token || polling) return;
+  if (!authenticated || polling) return;
+  const revision = sessionRevision;
   polling = true;
   try {
-    snapshot = await api("/status");
+    const status = await api("/status");
+    if (!authenticated || revision !== sessionRevision) return;
+    snapshot = status;
     $("version").textContent = snapshot.version;
     const resource = snapshot.resources || {};
     $("resource-state").textContent = [resource.gpu || "CPU runtime", resource.ram_available_mb != null ? `${resource.ram_available_mb} MB RAM headroom${resource.zfs_arc_reclaimable_mb ? " (including " + resource.zfs_arc_reclaimable_mb + " MB reclaimable ZFS ARC)" : ""}` : "", resource.vram_free_mb != null ? `${resource.vram_free_mb} / ${resource.vram_total_mb} MB GPU memory free` : "", snapshot.wait_reason || ""].filter(Boolean).join(" · ");
@@ -212,11 +229,17 @@ async function refresh() {
       $("queue-summary").append(span);
     }
     renderJobs();
-  } catch (error) { message(error.message, true); }
+  } catch (error) {
+    if (authenticated && revision === sessionRevision) {
+      $("activity-subtitle").textContent = "Queue update failed. Retrying automatically…";
+      message(error.message, true);
+    }
+  }
   finally { polling = false; }
 }
 function fillSettings(settings) {
   configuration = settings;
+  $("machine-api-key").value = settings.api_key || "";
   for (const field of $("settings-form").elements) {
     if (!field.name || !(field.name in settings)) continue;
     if (field.type === "checkbox") field.checked = settings[field.name];
@@ -269,6 +292,8 @@ async function action(button, callback) {
 async function enter() {
   const settings = await api("/settings");
   fillSettings(settings);
+  authenticated = true;
+  sessionRevision += 1;
   $("password").value = "";
   $("login-view").hidden = true;
   $("navigation").hidden = false;
@@ -334,6 +359,12 @@ $("settings-form").addEventListener("submit", async event => {
 });
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => view(button.dataset.view)));
 $("logout").addEventListener("click", signOut);
+$("toggle-api-key").addEventListener("click", event => {
+  const reveal = $("machine-api-key").type === "password";
+  $("machine-api-key").type = reveal ? "text" : "password";
+  event.currentTarget.textContent = reveal ? "Hide key" : "Show key";
+  event.currentTarget.setAttribute("aria-pressed", String(reveal));
+});
 $("pause").addEventListener("click", event => action(event.currentTarget, () => api("/pause", "POST")));
 $("scan").addEventListener("click", event => action(event.currentTarget, () => api("/scan", "POST")));
 let searchTimer = null;

@@ -119,6 +119,15 @@ class Database:
         priority = {"manual": 100, "import": 80, "bazarr": 60, "retry": 40, "backlog": 0}[origin]
         now = time.time()
         with self.connect() as db:
+            # A provider arrival changes the signature, not the user's reason for
+            # waiting. Carry pending import/manual priority into its replacement.
+            pending = db.execute(
+                "SELECT origin,priority FROM jobs WHERE media=? "
+                "AND state IN ('waiting','queued','retry','processing') "
+                "ORDER BY priority DESC LIMIT 1", (media,)
+            ).fetchone()
+            if pending and pending["priority"] > priority:
+                origin, priority = pending["origin"], pending["priority"]
             db.execute(
                 "UPDATE jobs SET state='superseded',updated=? WHERE media=? AND signature!=? "
                 "AND state IN ('waiting','queued','retry')",

@@ -126,3 +126,31 @@ def test_a_shift_that_broadly_worsens_timing_is_still_rejected():
     # "Repairing" by shifting the wrong way must not be accepted.
     worse, _ = fixture(8)
     assert not improved(before, audit(worse, words, 8))
+
+
+def test_a_feature_length_subtitle_is_not_rejected_for_being_long():
+    """A percentage floor must not demand more evidence just because a film has more cues.
+
+    Mirrors a real feature film: most caption text is present in the audio, but short
+    repeated lines cannot form unique anchors, so coverage stays low while the token
+    ratio stays high.
+    """
+    words, cues, clock = [], [], 0.0
+    for index in range(60):  # anchorable phrases spread across the runtime
+        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
+        start = clock
+        for token in phrase:
+            words.append(Word(clock, clock + 0.4, token, 0.95))
+            clock += 0.5
+        cues.append(Cue(start, clock - 0.1, " ".join(phrase)))
+        for _ in range(10):  # short repeated interjections between the phrases
+            words.append(Word(clock, clock + 0.3, "yeah", 0.95))
+            cues.append(Cue(clock, clock + 0.3, "Yeah."))
+            clock += 0.9
+
+    result = audit(cues, words, clock)
+    assert result["matched_token_ratio"] > 0.65
+    assert result["supported_cues"] >= 2 * result["required_anchors"]
+    assert result["dialogue_coverage"] < 0.1
+    # Plenty of distributed anchors: the percentage floor must not veto it.
+    assert result["decision"] != "inconclusive"

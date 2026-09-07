@@ -199,7 +199,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             db.invalidate_sync()
         store.save(settings)
         service.scan_event.set()
-        return store.public()
+        return {**store.public(), "api_key": store.token}
 
     @app.post("/api/scan", dependencies=[Depends(authenticate)], status_code=202)
     def trigger_scan():
@@ -251,17 +251,22 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     @app.get("/api/media", dependencies=[Depends(authenticate)])
     def media(q: str = "", limit: int = 20):
         """Search the managed library so the dashboard can request work on a title."""
-        term = f"%{q.strip()}%"
+        terms = ["%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+                 for word in q.split()]
+        if not terms:
+            return {"results": []}
+        path_match = " AND ".join("path LIKE ? ESCAPE '!'" for _ in terms)
+        media_match = " AND ".join("media LIKE ? ESCAPE '!'" for _ in terms)
         with db.connect() as connection:
             rows = connection.execute(
-                "SELECT path, title FROM managed_media WHERE path LIKE ? ORDER BY path LIMIT ?",
-                (term, max(1, min(limit, 50))),
+                f"SELECT path, title FROM managed_media WHERE {path_match} ORDER BY path LIMIT ?",
+                (*terms, max(1, min(limit, 50))),
             ).fetchall()
             if not rows:
                 rows = connection.execute(
-                    "SELECT DISTINCT media AS path, media AS title FROM jobs WHERE media LIKE ? "
+                    f"SELECT DISTINCT media AS path, media AS title FROM jobs WHERE {media_match} "
                     "ORDER BY media LIMIT ?",
-                    (term, max(1, min(limit, 50))),
+                    (*terms, max(1, min(limit, 50))),
                 ).fetchall()
         return {
             "results": [
