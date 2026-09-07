@@ -82,6 +82,29 @@ class ArrClient:
             raise ValueError("Unexpected arr API response; expected a list of records")
         return data
 
+    def event_files(self, payload: dict) -> list[ManagedFile]:
+        """Fetch only the imported item; never trust webhook paths or monitoring flags."""
+        kind = "series" if self.provider == "sonarr" else "movie"
+        item_id = int(payload.get(kind, {}).get("id", 0))
+        if item_id <= 0:
+            raise ValueError("Import event needs a managed item ID")
+        response = self.client.get(self.connection.url + f"/api/v3/{kind}/{item_id}")
+        response.raise_for_status()
+        item = response.json()
+        if self.connection.monitored_only and not item.get("monitored"):
+            return []
+        if self.provider == "radarr":
+            return [self._file(item, item["movieFile"])] if item.get("hasFile") else []
+        file_id = int(payload.get("episodeFile", {}).get("id", 0))
+        files = self.get_list("episodefile", seriesId=item_id)
+        episodes = self.get_list("episode", seriesId=item_id)
+        eligible = {
+            e.get("episodeFileId")
+            for e in episodes
+            if e.get("hasFile") and (e.get("monitored") or not self.connection.monitored_only)
+        }
+        return [self._file(item, f) for f in files if f["id"] in eligible and f["id"] == file_id]
+
     def catalog(self) -> list[ManagedFile]:
         return self._sonarr() if self.provider == "sonarr" else self._radarr()
 

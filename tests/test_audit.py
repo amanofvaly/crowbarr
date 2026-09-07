@@ -108,3 +108,21 @@ def test_backend_numpy_scalars_produce_serializable_evidence():
         word.probability = np.float32(word.probability)
     result = json.loads(json.dumps(audit(cues, words, 8), allow_nan=False))
     assert result["decision"] == "pass"
+
+
+def test_a_correct_shift_is_accepted_despite_a_few_mismatched_anchors():
+    """Real anchors scatter; a handful always regress when a true offset is removed."""
+    cues, words = fixture(4)
+    before = audit(cues, words, 8)
+    assert before["decision"] == "repair"
+    corrected, _ = fixture()
+    after = audit(corrected, words, 8)
+    assert improved(before, after)
+
+
+def test_a_shift_that_broadly_worsens_timing_is_still_rejected():
+    cues, words = fixture(4)
+    before = audit(cues, words, 8)
+    # "Repairing" by shifting the wrong way must not be accepted.
+    worse, _ = fixture(8)
+    assert not improved(before, audit(worse, words, 8))

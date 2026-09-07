@@ -28,18 +28,21 @@
   <main id="main" class="container-xxl py-4 py-lg-5">
     <div id="message" class="alert" role="status" hidden></div>
     <section id="login-view" class="login-panel mx-auto">
-      <h1 class="h3 mb-2">Welcome to Crowbarr</h1>
-      <p class="text-secondary mb-4">Automatic subtitles for your media library. Sign in to connect your folders and services.</p>
+      <h1 id="login-heading" class="h3 mb-2">Welcome to Crowbarr</h1>
+      <p id="login-intro" class="text-secondary mb-4">Automatic subtitles for your media library. Sign in to connect your folders and services.</p>
       <form id="login-form">
-        <label for="api-key" class="form-label">Crowbarr API key</label>
-        <input id="api-key" type="password" class="form-control" autocomplete="current-password" required aria-describedby="key-help">
-        <p id="key-help" class="form-text mt-2">Use the key you configured, or read <code>/config/admin-token</code> inside your Crowbarr container.</p>
-        <button type="submit" class="btn btn-primary mt-2">Sign in</button>
+        <label for="username" class="form-label">Username</label>
+        <input id="username" name="username" class="form-control mb-3" autocomplete="username" required>
+        <label for="password" class="form-label">Password</label>
+        <input id="password" name="password" type="password" class="form-control" required aria-describedby="key-help">
+        <p id="key-help" class="form-text mt-2">Choose any username and password. This is only for this dashboard.</p>
+        <button type="submit" class="btn btn-primary mt-2" id="login-submit">Sign in</button>
       </form>
       <p class="small text-secondary mt-5">Your media stays on your server. Models download on first use.</p>
     </section>
 
     <section id="activity-view" hidden>
+      <p id="resource-state" class="small text-secondary" role="status"></p>
       <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
         <div><h1 class="h3 mb-2">Library activity</h1><p id="activity-subtitle" class="text-secondary mb-0">Checking the subtitle queue…</p></div>
         <div class="d-flex gap-2"><button id="pause" class="btn btn-outline-secondary">Pause queue</button><button id="scan" class="btn btn-primary">Check libraries</button></div>
@@ -49,6 +52,16 @@
         <button class="btn btn-primary" data-view="settings">Open settings</button>
       </div>
       <div id="notices" aria-live="polite"></div>
+      <div class="border rounded-3 p-3 mb-3">
+        <label for="media-search" class="form-label mb-1">Request work on a title</label>
+        <div class="input-group">
+          <input id="media-search" class="form-control" type="search" autocomplete="off"
+                 placeholder="Search your library by name, e.g. Sopranos S02E06"
+                 aria-describedby="media-search-help">
+        </div>
+        <div id="media-search-help" class="form-text">Audit checks the existing subtitle and repairs it only if the audio shows it is out of sync. Generate ignores any existing subtitle and transcribes the audio from scratch. Both run ahead of the background queue.</div>
+        <ul id="media-results" class="list-group list-group-flush mt-2"></ul>
+      </div>
       <div id="integration-status" class="d-flex flex-wrap gap-3 small mb-3" aria-live="polite"></div>
       <div class="queue-toolbar d-flex flex-wrap justify-content-between align-items-center gap-3 border-top border-bottom py-3">
         <div id="queue-summary" class="d-flex flex-wrap gap-3 small" aria-live="polite"></div>
@@ -56,13 +69,13 @@
       </div>
       <div class="table-responsive">
         <table class="table align-middle activity-table mb-0">
-          <caption class="visually-hidden">The 100 most recently updated subtitle jobs</caption>
+          <caption class="visually-hidden">The active job, what runs next, and recent results</caption>
           <thead><tr><th scope="col">Media</th><th scope="col">Status</th><th scope="col">Source</th><th scope="col">Updated</th><th scope="col" aria-label="Actions"></th></tr></thead>
           <tbody id="jobs"></tbody>
         </table>
       </div>
       <div id="empty-queue" class="empty-state text-center py-5" hidden><h2 class="h5">Nothing in the queue yet</h2><p class="text-secondary mb-0">Crowbarr will show new media and subtitle updates here after its next library check.</p></div>
-      <p class="small text-secondary mt-3">Showing the latest 100 jobs. Originals are preserved. Existing subtitles are audited first. Repairs require measured improvement; uncertain results are withheld.</p>
+      <p class="small text-secondary mt-3">Showing the active job, the next few queued, and recent results. Originals are preserved. Existing subtitles are audited first. Repairs require measured improvement; uncertain results are withheld.</p>
       <section id="job-detail" class="border rounded-3 p-4 mt-4" tabindex="-1" hidden>
         <div class="d-flex justify-content-between gap-3"><h2 id="detail-title" class="h5 text-break"></h2><button id="close-detail" class="btn btn-sm btn-outline-secondary align-self-start">Close</button></div>
         <p id="detail-path" class="small text-secondary text-break"></p>
@@ -74,7 +87,7 @@
       <h1 class="h3 mb-2">Settings</h1>
       <p class="text-secondary mb-4">Connect once. Crowbarr watches for new media and subtitle changes.</p>
       <form id="settings-form">
-        <section class="settings-section row g-4 border-top py-4">
+<section class="settings-section row g-4 border-top py-4"><div class="col-lg-4"><h2 class="h5">Resource scheduling</h2><p class="small text-secondary">One inference job at a time. Manual and import jobs bypass background cooldown, quiet hours and budget. Memory limits still apply. Equal quiet hours disable the window.</p></div><div class="col-lg-8"><div class="row g-3"><div class="col-sm-6"><label class="form-label" for="min_free_ram_mb">Minimum available RAM (MB)</label><input class="form-control" id="min_free_ram_mb" name="min_free_ram_mb" type="number" min="128" max="262144" step="1" required></div><div class="col-sm-6"><label class="form-label" for="min_free_vram_mb">Minimum free GPU memory (MB)</label><input class="form-control" id="min_free_vram_mb" name="min_free_vram_mb" type="number" min="128" max="262144" step="1" required></div><div class="col-sm-6"><label class="form-label" for="backlog_cooldown_seconds">Background cooldown (seconds)</label><input class="form-control" id="backlog_cooldown_seconds" name="backlog_cooldown_seconds" type="number" min="0" max="86400" step="1" required></div><div class="col-sm-6"><label class="form-label" for="background_budget_minutes">Background budget per hour (minutes)</label><input class="form-control" id="background_budget_minutes" name="background_budget_minutes" type="number" min="1" max="60" step="1" required></div><div class="col-sm-6"><label class="form-label" for="max_cpu_load">Maximum background CPU load (0–1)</label><input class="form-control" id="max_cpu_load" name="max_cpu_load" type="number" min="0.1" max="4" step="0.1" required></div><div class="col-sm-6"><label class="form-label" for="quiet_hour_start">Quiet hours start (server hour)</label><input class="form-control" id="quiet_hour_start" name="quiet_hour_start" type="number" min="0" max="23" step="1" required></div><div class="col-sm-6"><label class="form-label" for="quiet_hour_end">Quiet hours end (server hour)</label><input class="form-control" id="quiet_hour_end" name="quiet_hour_end" type="number" min="0" max="23" step="1" required></div></div><div class="form-check mt-3"><input class="form-check-input" type="checkbox" id="defer_during_plex" name="defer_during_plex"><label class="form-check-label" for="defer_during_plex">Defer background jobs while Plex is playing</label></div><div class="form-check mt-3"><input class="form-check-input" type="checkbox" id="cpu_fallback" name="cpu_fallback"><label class="form-check-label" for="cpu_fallback">Use CPU if CUDA initialization fails</label></div><div class="form-check mt-3"><input class="form-check-input" type="checkbox" id="refine_generated" name="refine_generated"><label class="form-check-label" for="refine_generated">Refine generated timings with optional WhisperX (requires extra memory and installation)</label></div></div></section>        <section class="settings-section row g-4 border-top py-4">
           <div class="col-lg-4"><h2 class="h5">Media managers</h2><p class="text-secondary small">Sonarr and Radarr supply the library: imported files, monitoring preferences, and upgrades. With either connected, only files in their catalogs are processed.</p><p class="text-secondary small">Map paths if the containers see different folders. Save before testing. Leave a saved key blank to keep it; clear the URL to disconnect. Bazarr checks and Plex refreshes are optional.</p></div>
           <div class="col-lg-8" id="connections"></div>
         </section>

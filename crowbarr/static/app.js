@@ -1,6 +1,6 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-let token = sessionStorage.getItem("crowbarr-token") || "";
+let token = "";
 let configuration = null;
 let snapshot = null;
 let activeView = "activity";
@@ -47,10 +47,11 @@ function view(name) {
 }
 function signOut() {
   token = "";
-  sessionStorage.removeItem("crowbarr-token");
+  fetch("/api/session", { method: "DELETE" }).catch(() => {});
   ["activity-view", "settings-view", "navigation", "logout"].forEach(id => $(id).hidden = true);
   $("login-view").hidden = false;
   $("service-state").textContent = "Subtitle automation";
+  showLogin();
 }
 function relativeTime(value) {
   const seconds = Math.round(Date.now() / 1000 - value);
@@ -84,6 +85,18 @@ function renderJobs() {
     const details = element("button", "Details", "btn btn-sm btn-outline-secondary");
     details.addEventListener("click", () => showDetails(job));
     actions.append(details);
+    if (["waiting", "queued", "retry"].includes(job.state)) {
+      const promote = element("button", "Process next", "btn btn-sm btn-outline-primary ms-2");
+      promote.addEventListener("click", () => action(promote, () => api(`/jobs/${job.id}/promote`, "POST")));
+      actions.append(promote);
+    }
+    if (["waiting", "queued", "retry", "processing"].includes(job.state)) {
+      const cancel = element("button", job.cancel_requested ? "Stopping…" : "Cancel", "btn btn-sm btn-outline-danger ms-2");
+      cancel.disabled = Boolean(job.cancel_requested);
+      cancel.addEventListener("click", () => action(cancel, () => api(`/jobs/${job.id}/cancel`, "POST")));
+      actions.append(cancel);
+    }
+    media.append(element("div", `${job.origin || "backlog"} · priority ${job.priority || 0}`, "job-note"));
     if (["failed", "review"].includes(job.state)) {
       const retry = element("button", "Retry", "btn btn-sm btn-outline-secondary ms-2");
       retry.addEventListener("click", () => action(retry, () => api(`/jobs/${job.id}/retry`, "POST")));
@@ -106,6 +119,28 @@ function showDetails(job) {
   $("detail-audit").replaceChildren();
   if (job.report) {
     const report = job.report;
+    if (report.candidate) {
+      const download = element("button", "Download review subtitle", "btn btn-sm btn-outline-primary mb-3");
+      download.addEventListener("click", () => action(download, async () => {
+        const response = await fetch(`/api/jobs/${job.id}/candidate`, {headers: {"X-Api-Key": token}});
+        if (!response.ok) throw new Error("Candidate is unavailable");
+        const url = URL.createObjectURL(await response.blob());
+        const link = element("a"); link.href = url; link.download = `crowbarr-${job.id}.srt`; link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }));
+      $("detail-audit").append(download);
+      if (job.state === "review") {
+        const approval = element("div", undefined, "mb-3");
+        const check = element("input", undefined, "form-check-input me-2"); check.type = "checkbox"; check.id = "review-confirm";
+        const label = element("label", "I reviewed the candidate against the video", "form-check-label"); label.htmlFor = check.id;
+        const publish = element("button", "Publish reviewed candidate", "btn btn-sm btn-outline-primary d-block mt-2"); publish.disabled = true;
+        check.addEventListener("change", () => publish.disabled = !check.checked);
+        publish.addEventListener("click", () => action(publish, () => api(`/jobs/${job.id}/approve`, "POST")));
+        approval.append(check,label,publish); $("detail-audit").append(approval);
+      }
+    }
+    if (report.plex_delivery) $("detail-audit").append(element("p", `Plex delivery: ${report.plex_delivery.state}${report.plex_delivery.stream ? " · stream " + report.plex_delivery.stream.id + " · " + report.plex_delivery.stream.language : ""}${report.plex_delivery.reason ? " · " + report.plex_delivery.reason : ""}`, "small"));
+    if (report.runtime) $("detail-audit").append(element("p", `Inference: ${report.runtime.backend} · ${report.runtime.compute_type || ""}${report.runtime.fallback_reason ? " · " + report.runtime.fallback_reason : ""}`, "small"));
     const stats = [["Output cues", report.output_cues], ["Authored cues matched", `${report.preserved_cues} / ${report.source_cues}`],
       ["Recognized words outside authored cues", `${Math.round(report.generated_word_ratio * 100)}%`], ["Whisper model", report.model]];
     if (report.audit) {
@@ -147,6 +182,8 @@ async function refresh() {
   try {
     snapshot = await api("/status");
     $("version").textContent = snapshot.version;
+    const resource = snapshot.resources || {};
+    $("resource-state").textContent = [resource.gpu || "CPU runtime", resource.ram_available_mb != null ? `${resource.ram_available_mb} MB RAM headroom${resource.zfs_arc_reclaimable_mb ? " (including " + resource.zfs_arc_reclaimable_mb + " MB reclaimable ZFS ARC)" : ""}` : "", resource.vram_free_mb != null ? `${resource.vram_free_mb} / ${resource.vram_total_mb} MB GPU memory free` : "", snapshot.wait_reason || ""].filter(Boolean).join(" · ");
     $("service-state").textContent = snapshot.paused ? "Queue paused" : snapshot.configured ? (snapshot.discovery_mode === "arr" ? "Following arr libraries" : "Watching folders") : "Setup needed";
     $("activity-subtitle").textContent = snapshot.last_scan ?
       `${snapshot.media_count} media files found · Last checked ${relativeTime(snapshot.last_scan)}` : "Your library will be checked automatically.";
@@ -232,16 +269,42 @@ async function action(button, callback) {
 async function enter() {
   const settings = await api("/settings");
   fillSettings(settings);
-  sessionStorage.setItem("crowbarr-token", token);
-  $("api-key").value = "";
+  $("password").value = "";
   $("login-view").hidden = true;
   $("navigation").hidden = false;
   $("logout").hidden = false;
   message(""); view(activeView); await refresh();
 }
+let accountConfigured = true;
+async function showLogin() {
+  try {
+    accountConfigured = (await (await fetch("/api/session")).json()).configured;
+  } catch { accountConfigured = true; }
+  $("login-heading").textContent = accountConfigured ? "Welcome to Crowbarr" : "Create your Crowbarr login";
+  $("login-intro").textContent = accountConfigured
+    ? "Automatic subtitles for your media library. Sign in to connect your folders and services."
+    : "Choose a username and password for this dashboard. Nothing is sent anywhere; it is stored on your server.";
+  $("key-help").textContent = accountConfigured
+    ? "This is only for this dashboard. Sonarr, Radarr and Bazarr use the API key in Settings instead."
+    : "At least 8 characters. You can change it later by deleting /config/dashboard.json.";
+  $("login-submit").textContent = accountConfigured ? "Sign in" : "Create login";
+  $("username").autocomplete = accountConfigured ? "username" : "off";
+  $("password").autocomplete = accountConfigured ? "current-password" : "new-password";
+}
 $("login-form").addEventListener("submit", async event => {
-  event.preventDefault(); token = $("api-key").value.trim();
-  await action(event.submitter, enter);
+  event.preventDefault();
+  const credentials = { username: $("username").value, password: $("password").value };
+  await action(event.submitter, async () => {
+    const response = await fetch(accountConfigured ? "/api/session" : "/api/setup", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "Sign in failed.");
+    $("password").value = "";
+    await enter();
+    return result;
+  });
 });
 $("settings-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -273,7 +336,49 @@ document.querySelectorAll("[data-view]").forEach(button => button.addEventListen
 $("logout").addEventListener("click", signOut);
 $("pause").addEventListener("click", event => action(event.currentTarget, () => api("/pause", "POST")));
 $("scan").addEventListener("click", event => action(event.currentTarget, () => api("/scan", "POST")));
+let searchTimer = null;
+async function renderMediaResults(term) {
+  const list = $("media-results");
+  list.replaceChildren();
+  if (term.trim().length < 2) return;
+  let results;
+  try {
+    results = (await api(`/media?q=${encodeURIComponent(term.trim())}`)).results;
+  } catch (error) {
+    list.append(element("li", error.message, "list-group-item text-danger small"));
+    return;
+  }
+  if (!results.length) {
+    list.append(element("li", "No managed media matches that name.", "list-group-item text-secondary small"));
+    return;
+  }
+  for (const item of results) {
+    const row = element("li", undefined, "list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2");
+    row.append(element("span", item.title, "text-break"));
+    const buttons = element("span", undefined, "d-flex gap-2");
+    const request = (label, className, directive) => {
+      const button = element("button", label, `btn btn-sm ${className}`);
+      button.addEventListener("click", () => action(button, async () => {
+        const result = await api("/process", "POST", { media: item.path, directive });
+        await refresh();
+        return result;
+      }));
+      return button;
+    };
+    buttons.append(request("Audit", "btn-outline-primary", ""));
+    buttons.append(request("Generate fresh", "btn-outline-secondary", "generate"));
+    row.append(buttons);
+    list.append(row);
+  }
+}
+$("media-search").addEventListener("input", event => {
+  const term = event.target.value;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => renderMediaResults(term), 250);
+});
 $("filter").addEventListener("change", renderJobs);
 $("close-detail").addEventListener("click", () => $("job-detail").hidden = true);
-if (token) enter().catch(error => message(error.message, true));
+// The session lives in an httpOnly cookie, so resume straight into the dashboard
+// when one is still valid and fall back to the sign-in panel when it is not.
+enter().catch(() => showLogin());
 setInterval(refresh, 5000);

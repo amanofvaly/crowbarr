@@ -10,12 +10,45 @@ from threading import RLock
 from pydantic import BaseModel, Field, field_validator
 
 
+def hash_password(password: str) -> str:
+    """Store a salted scrypt digest. The dashboard login must not share the API key."""
+    import hashlib
+
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    import hashlib
+    import hmac as _hmac
+
+    try:
+        scheme, salt, digest = stored.split("$")
+    except ValueError:
+        return False
+    if scheme != "scrypt":
+        return False
+    candidate = hashlib.scrypt(
+        password.encode(), salt=bytes.fromhex(salt), n=2**14, r=8, p=1, dklen=32
+    )
+    return _hmac.compare_digest(candidate.hex(), digest)
+
+
 def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".crowbarr-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            os.fchmod(stream.fileno(), mode)
+            try:
+                os.fchmod(stream.fileno(), mode)
+            except OSError:
+                # ZFS with NFSv4 ACLs refuses chmod (TrueNAS ships aclmode=restricted)
+                # and inherits permissions from the parent instead, which is what the
+                # neighbouring media files already use. Accept that for published
+                # sidecars, but never leave a file we meant to keep private exposed.
+                if not mode & 0o077 and os.fstat(stream.fileno()).st_mode & 0o077:
+                    raise
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
@@ -79,6 +112,19 @@ class Settings(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=10)
     job_timeout_minutes: int = Field(default=240, ge=1, le=1440)
     paused: bool = False
+    min_free_ram_mb: int = Field(default=1536, ge=128, le=262144)
+    min_free_vram_mb: int = Field(default=1024, ge=128, le=262144)
+    max_cpu_load: float = Field(default=0.75, ge=0.1, le=4)
+    backlog_cooldown_seconds: int = Field(default=120, ge=0, le=86400)
+    background_budget_minutes: int = Field(default=30, ge=1, le=60)
+    quiet_hour_start: int = Field(default=0, ge=0, le=23)
+    quiet_hour_end: int = Field(default=0, ge=0, le=23)
+    defer_during_plex: bool = True
+    cpu_fallback: bool = True
+    refine_generated: bool = False
+    sampled_audit: bool = True
+    bazarr_download_alternatives: bool = False
+    max_provider_attempts: int = Field(default=3, ge=1, le=10)
     allow_untagged_audio: bool = False
     allow_untagged_subtitles: bool = False
     min_match_ratio: float = Field(default=0.75, ge=0.5, le=1)
@@ -88,6 +134,7 @@ class Settings(BaseModel):
     radarr: ArrConnection = Field(default_factory=ArrConnection)
     bazarr: Connection = Field(default_factory=Connection)
     plex: Connection = Field(default_factory=Connection)
+    plex_mappings: list[PathMapping] = Field(default_factory=list, max_length=32)
 
     def providers(self) -> list[str]:
         return [name for name in ("sonarr", "radarr") if getattr(self, name).url]
@@ -165,6 +212,7 @@ class Settings(BaseModel):
             "min_match_ratio",
             "min_alignment_score",
             "max_generated_ratio",
+            "sampled_audit",
         )
         return hashlib.sha256(
             json.dumps(
@@ -188,6 +236,63 @@ class ConfigStore:
         )
         if not token_path.exists():
             atomic_write(token_path, self.token + "\n")
+        # Dashboard credentials are deliberately separate from the API key: the key is
+        # pasted into Sonarr, Radarr and Bazarr, so it must not also be the human login.
+        self.account_path = directory / "dashboard.json"
+        self.account = (
+            json.loads(self.account_path.read_text()) if self.account_path.exists() else {}
+        )
+        if not self.account.get("session_secret"):
+            self.account["session_secret"] = secrets.token_urlsafe(32)
+            atomic_write(self.account_path, json.dumps(self.account, indent=2))
+
+    def has_account(self) -> bool:
+        return bool(self.account.get("password"))
+
+    def create_account(self, username: str, password: str) -> None:
+        with self.lock:
+            if self.has_account():
+                raise ValueError("A dashboard login already exists")
+            if len(password) < 8:
+                raise ValueError("Choose a password of at least 8 characters")
+            if not username.strip():
+                raise ValueError("Choose a username")
+            self.account.update({"username": username.strip(), "password": hash_password(password)})
+            atomic_write(self.account_path, json.dumps(self.account, indent=2))
+
+    def check_account(self, username: str, password: str) -> bool:
+        stored = self.account
+        if not stored.get("password"):
+            return False
+        return username.strip() == stored.get("username") and verify_password(
+            password, stored["password"]
+        )
+
+    def issue_session(self, hours: int = 720) -> str:
+        """A signed, expiring cookie value. No server-side session store to keep."""
+        import hmac as _hmac
+        import time as _time
+
+        expires = int(_time.time() + hours * 3600)
+        signature = _hmac.new(
+            self.account["session_secret"].encode(), str(expires).encode(), "sha256"
+        ).hexdigest()
+        return f"{expires}.{signature}"
+
+    def valid_session(self, value: str) -> bool:
+        import hmac as _hmac
+        import time as _time
+
+        try:
+            expires, signature = value.split(".", 1)
+            if int(expires) < _time.time():
+                return False
+        except (ValueError, AttributeError):
+            return False
+        expected = _hmac.new(
+            self.account["session_secret"].encode(), expires.encode(), "sha256"
+        ).hexdigest()
+        return _hmac.compare_digest(signature, expected)
 
     def get(self) -> Settings:
         with self.lock:
