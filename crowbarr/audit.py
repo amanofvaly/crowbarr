@@ -96,10 +96,14 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
     required_anchors = min(30, max(3, math.ceil(dialogue_cues * 0.1)))
     dialogue_coverage = len(evidence) / max(1, dialogue_cues)
     distribution_ok = _distributed(evidence, duration)
+    # required_anchors is deliberately capped at 30: that many confident, distributed
+    # anchors already prove a global offset. A percentage floor on top of it silently
+    # raises the bar for long content -- a feature film needs 155 anchors to clear 10%
+    # -- so let a comfortable absolute count satisfy it instead.
     sufficient = (
         bool(cues)
         and len(evidence) >= required_anchors
-        and dialogue_coverage >= 0.1
+        and (dialogue_coverage >= 0.1 or len(evidence) >= 2 * required_anchors)
         and match["matched_token_ratio"] >= 0.65
         and match["speech_words"] >= 12
         and distribution_ok

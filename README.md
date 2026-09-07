@@ -11,6 +11,9 @@ no file-upload step and no routine manual submission.
 not a claim of perfect synchronization or a benchmarked production release. Start
 with a test library. See [validation and limitations](docs/validation.md).
 
+**New here?** [How Crowbarr works, and where it sits](workflow.html) walks through the
+whole pipeline in one page — every trigger, what happens to your files, and what it costs.
+
 ## What it does
 
 - Automatically discovers imports, video replacements, and new or upgraded SRTs.
@@ -25,6 +28,7 @@ with a test library. See [validation and limitations](docs/validation.md).
 - Keeps original subtitles, prior Crowbarr outputs, and per-job quality reports.
 - Retires a verified Crowbarr subtitle when its video is replaced.
 - Offers a local Bootstrap dashboard for settings, activity, reports, and retries.
+- Lets you search the library and request an audit, or force a fresh transcription.
 - Can request Plex library refreshes after publication.
 
 English audio and English subtitles are supported initially. Translations, image
@@ -45,15 +49,31 @@ cp .env.example .env
 mkdir -p data
 # Ensure CONFIG_PATH and MEDIA_PATH are writable by the configured PUID:PGID.
 docker compose up -d --build
-docker compose exec crowbarr cat /config/admin-token
 ```
 
-Open **http://localhost:8449**, sign in with the generated key, and connect Sonarr
+Open **http://localhost:8449**. On first run it asks you to choose a username and
+password for the dashboard; that login is stored hashed in `/config/dashboard.json` and
+is separate from the API key. Then connect Sonarr
 and/or Radarr under **Settings → Media managers**. Enter their URLs and API keys.
 If paths differ, add mappings such as `/tv => /media/tv` and `/movies => /media/movies`.
 Mapping destinations authorize media access and need not be repeated under Media
 folders. With identical paths, authorize those paths under Media folders instead.
 Do not mount Docker's socket or run privileged containers.
+
+### Asking for something yourself
+
+The dashboard has a search box above the queue. Type part of a title, and each result
+offers two actions:
+
+- **Audit** — check the existing subtitle against the audio and repair it only if the
+  audio shows it is out of sync.
+- **Generate fresh** — ignore whatever subtitle is there and transcribe the audio from
+  scratch. Use this when a subtitle is correctly timed but simply wrong, or when you
+  want a transcript of the actual audio.
+
+Both run ahead of everything queued. Neither one overwrites or deletes your existing
+subtitle; Crowbarr always writes its own `.crowbarr.en.srt` beside the video. Each
+queued job also has **Process next** and **Cancel**, and finished ones have **Retry**.
 
 Without Sonarr or Radarr, configure Media folders for standalone filesystem discovery.
 When either arr service is configured, its API catalog determines what gets processed;
@@ -62,8 +82,9 @@ arr service holds its new jobs until the next successful sync, instead of bypass
 monitoring preferences with a filesystem fallback.
 
 The default port binds to localhost. Set `CROWBARR_BIND` to your server's LAN address
-when accessing from another machine or using arr hooks. Treat the key as an admin
-credential; use HTTPS through your own reverse proxy beyond a trusted local network.
+when accessing from another machine or using arr hooks. The API key shown in
+**Settings** is for Sonarr, Radarr, Bazarr and scripts, which cannot hold a session
+cookie; it is not your dashboard login. Treat it as an admin credential; use HTTPS through your own reverse proxy beyond a trusted local network.
 Persistent configuration contains service credentials and must not be published.
 
 Crowbarr waits 30 minutes for Bazarr by default. An available sidecar bypasses that
@@ -105,14 +126,27 @@ longest matching prefix. API credentials are sent as headers, not URL parameters
 **Bazarr:** keep subtitle providers and automatic searches enabled. Crowbarr discovers
 downloaded SRTs directly from the library. Disable Bazarr's automatic synchronization
 if Crowbarr is to own timing. Do not configure another tool to rewrite Crowbarr's
-output files. Optional service URLs/API keys in Crowbarr can test connectivity;
-Crowbarr does not currently invoke Bazarr searches or configure Bazarr for you.
+output files. When a video has no usable subtitle, Crowbarr asks Bazarr to search its
+providers and download one, retrying up to three different candidates before falling
+back to transcription. Enable **Download provider alternatives** in Settings for that;
+with it off, Crowbarr reports that alternatives exist and stops. It never blacklists or
+deletes a Bazarr subtitle.
 
-**Faster Bazarr notifications (optional):** mount the supplied
-[`integrations/bazarr-notify.py`](integrations/bazarr-notify.py) inside Bazarr, set its
-`CROWBARR_URL` and `CROWBARR_API_KEY` environment variables, and use
-`python3 /hooks/bazarr-notify.py` as the custom post-processing command. You do not
-need this hook for automation; the periodic scanner discovers the same downloads.
+**Bazarr post-processing hook (recommended):** this is what makes Crowbarr act the
+moment Bazarr finishes, instead of waiting out the subtitle timer. Copy
+[`integrations/bazarr-notify.py`](integrations/bazarr-notify.py) into Bazarr's config
+directory, put `{"url": "http://YOUR-CROWBARR:8449", "api_key": "..."}` in a
+`crowbarr-notify.json` beside it (or set `CROWBARR_URL` and `CROWBARR_API_KEY` in
+Bazarr's environment), then set Bazarr's **Settings → Subtitles → Post-processing**
+command to:
+
+```
+python3 /config/bazarr-notify.py "{{episode}}" "{{subtitles}}" "{{provider}}" "{{score}}"
+```
+
+The arguments matter: without the episode path Crowbarr can only fall back to a full
+library reconciliation instead of auditing the one file that changed. Without the hook,
+the periodic scanner still finds the download, just later.
 
 **Plex:** save a Plex URL and token in Crowbarr Settings to request library refreshes
 after publishing. It refreshes movie/TV sections rather than guessing container path
@@ -125,8 +159,11 @@ those downloads when they arrive; it does not promise Bazarr will keep searching
 
 ## Audit-first decisions
 
-The first audit still transcribes the full selected audio track with faster-whisper.
-It is not yet a cheap sampled-audio audit. Recognized words are cached privately by
+When a subtitle already exists and the runtime exceeds ten minutes, the audit
+transcribes three two-minute windows at 12%, 50% and 85% of the runtime rather than the
+whole file — six minutes of audio regardless of length. If those windows cannot settle
+the question it escalates to the full file. Generating a missing subtitle always reads
+the whole file. Recognized words are cached privately by
 video revision and inference settings, independently of subtitle revisions, so retries
 and provider upgrades reuse the transcript. The cache is capped at 2 GiB. Jobs run one
 at a time in isolated child processes, and Whisper and alignment models are never kept
@@ -136,13 +173,18 @@ Each audit reports cue coverage, signed timing offset, median/p95 boundary diffe
 and per-cue evidence. The dashboard shows before/after metrics and offers a JSON download.
 Positive signed differences mean the subtitle is later than recognized speech.
 
-Version 2 requires at least 10% dialogue-cue coverage, from 3 to 30 confident anchors
-depending on subtitle size, at least 65% global text compatibility, twelve recognized
-words, and beginning/middle/end evidence for media at least two minutes long. Isolated
-weak internal words do not discard an otherwise strong anchor. Passing requires p95
-boundary error no greater than 1.75 seconds with fewer than 20% one-second outliers.
-Repair is justified when p95 exceeds 2 seconds or at least 20% of supported cues are
-one-second outliers. Other cases are inconclusive.
+Version 6 needs 3 to 30 confident anchors depending on subtitle size, spread across the
+beginning, middle and end, plus at least 65% global text compatibility and twelve
+recognized words. Ten percent dialogue coverage satisfies the evidence floor, and so
+does twice the required anchor count — otherwise a feature film would need far more
+anchors than a short episode to prove the same thing.
+
+Timing is judged on cue **starts**. A cue's end is reading time, and retiming preserves
+durations, so trailing time is authoring rather than error; only a cue that ends before
+its speech finishes counts as a fault. A subtitle passes when starts sit within 0.5 s
+median and 1.25 s p95, or when the best possible correction is near-identity and the
+residual spread is small. Repair is justified when starts are off by more than 0.5 s
+median, exceed 2 s at p95, or more than a fifth are over a second out.
 
 A repair must preserve all authored cues, pass the same audit, reduce p95 difference
 by at least 20% and 0.5 seconds, and keep regressions over 0.25 seconds to at most 10%
@@ -195,6 +237,7 @@ deterministic pipeline tests do not require downloading models. Set `CROWBARR_DA
 to change the local data directory. Optional `CROWBARR_API_KEY` overrides the generated
 key. Never check `.env`, `data/`, model caches, or real library samples into a repository.
 
-See [architecture](docs/architecture.md), [validation](docs/validation.md), and
+See [the pipeline walkthrough](workflow.html), [architecture](docs/architecture.md),
+[validation](docs/validation.md), and
 [contributing](CONTRIBUTING.md). Licensed under MIT; model weights and bundled
 dependencies retain their own licenses. Bootstrap's license is bundled with its CSS.

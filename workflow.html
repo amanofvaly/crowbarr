@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crowbarr Pipeline</title>
+<style>
+:root {
+  --ground: #f4f6f8;
+  --surface: #ffffff;
+  --sunken: #eceff3;
+  --ink: #14171c;
+  --muted: #5a626e;
+  --faint: #8a919c;
+  --rule: #dde2e9;
+  --accent: #9a5b00;
+  --accent-soft: #fdf3e3;
+
+  --external: #4a5b74;
+  --external-soft: #e2e9f4;
+  --you: #7a4a86;
+  --you-soft: #f1e4f5;
+  --work: #2f5d7c;
+  --work-soft: #dceaf4;
+  --good: #1f6b45;
+  --good-soft: #d9eee3;
+  --warn: #8a5a00;
+  --warn-soft: #f9eacd;
+  --stop: #9a3324;
+  --stop-soft: #f9ded9;
+
+  --shadow: 0 1px 2px rgba(20, 23, 28, .06), 0 1px 1px rgba(20, 23, 28, .04);
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #121418;
+    --surface: #191c22;
+    --sunken: #15181d;
+    --ink: #e7e9ed;
+    --muted: #99a0ab;
+    --faint: #737a86;
+    --rule: #282d36;
+    --accent: #e3a544;
+    --accent-soft: #2a2213;
+
+    --external: #9db3d1;
+    --external-soft: #1c222c;
+    --you: #c79ad2;
+    --you-soft: #241a28;
+    --work: #8fc0e0;
+    --work-soft: #16222b;
+    --good: #6ecf9d;
+    --good-soft: #12241a;
+    --warn: #e0ab52;
+    --warn-soft: #251d0f;
+    --stop: #eb8b7a;
+    --stop-soft: #271511;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5);
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #121418; --surface: #191c22; --sunken: #15181d;
+  --ink: #e7e9ed; --muted: #99a0ab; --faint: #737a86; --rule: #282d36;
+  --accent: #e3a544; --accent-soft: #2a2213;
+  --external: #9db3d1; --external-soft: #1c222c;
+  --you: #c79ad2; --you-soft: #241a28;
+  --work: #8fc0e0; --work-soft: #16222b;
+  --good: #6ecf9d; --good-soft: #12241a;
+  --warn: #e0ab52; --warn-soft: #251d0f;
+  --stop: #eb8b7a; --stop-soft: #271511;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .5);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--ink);
+  font-family: var(--sans); font-size: 16px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1260px; margin: 0 auto; padding: 48px 24px 96px; }
+.prose { max-width: 68ch; }
+
+h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 8px; letter-spacing: -.02em; text-wrap: balance; }
+h2 {
+  font-size: 1.25rem; margin: 56px 0 4px; letter-spacing: -.01em; text-wrap: balance;
+  padding-top: 24px; border-top: 1px solid var(--rule);
+}
+h3 { font-size: .95rem; margin: 28px 0 8px; letter-spacing: -.005em; }
+p { margin: 0 0 14px; }
+a { color: var(--accent); }
+.eyebrow {
+  font-family: var(--mono); font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--faint); margin: 0 0 10px;
+}
+.lede { font-size: 1.08rem; color: var(--muted); margin-bottom: 28px; }
+.section-note { color: var(--muted); font-size: .95rem; margin: 6px 0 24px; }
+code { font-family: var(--mono); font-size: .88em; background: var(--sunken); padding: .12em .38em; border-radius: 3px; }
+
+/* ---- where it sits ---- */
+.sits { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; margin: 8px 0 4px; }
+.sits .step {
+  flex: 1 1 150px; background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 12px 14px; box-shadow: var(--shadow);
+}
+.sits .step.is-ours { border-color: var(--accent); border-width: 2px; background: var(--accent-soft); }
+.sits .step strong { display: block; font-size: .92rem; }
+.sits .step span { display: block; color: var(--muted); font-size: .82rem; margin-top: 2px; }
+.sits .arrow { align-self: center; color: var(--faint); font-size: 1.1rem; }
+
+/* ---- flowchart ---- */
+.chart { margin: 20px 0 0; padding: 22px 16px; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; }
+.chart svg { display: block; min-width: 1200px; width: 1200px; max-width: none; height: auto; }
+.chart .n { stroke-width: 2; }
+.chart .n-plain { fill: var(--sunken); stroke: var(--rule); }
+.chart .n-external { fill: var(--external-soft); stroke: var(--external); }
+.chart .n-you { fill: var(--you-soft); stroke: var(--you); stroke-width: 2.5; }
+.chart .n-work { fill: var(--work-soft); stroke: var(--work); }
+.chart .n-decide { fill: var(--surface); stroke: var(--accent); }
+.chart .n-good { fill: var(--good-soft); stroke: var(--good); }
+.chart .n-warn { fill: var(--warn-soft); stroke: var(--warn); }
+.chart .n-stop { fill: var(--stop-soft); stroke: var(--stop); }
+.chart .lbl { fill: var(--ink); font-family: var(--sans); font-size: 15.5px; text-anchor: middle; }
+.chart .lbl-strong { font-weight: 600; font-size: 16px; }
+.chart .lbl-pri { fill: var(--muted); font-family: var(--mono); font-size: 12px; }
+.chart .elbl { fill: var(--muted); font-family: var(--mono); font-size: 13px; text-anchor: middle;
+  paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.chart .ln { fill: none; stroke: var(--muted); stroke-width: 1.8; opacity: .75; }
+.chart .ln-dash { stroke-dasharray: 5 4; }
+.chart .head { fill: var(--muted); opacity: .75; }
+
+/* ---- pipeline ---- */
+.pipe { margin: 24px 0 8px; }
+.stage { display: grid; grid-template-columns: 108px 1fr; gap: 20px; align-items: start; padding: 0 0 4px; }
+.stage + .stage { margin-top: 4px; }
+.stage-label {
+  font-family: var(--mono); font-size: .7rem; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--faint); padding-top: 14px; text-align: right;
+}
+.stage-body { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.connector { grid-column: 2; height: 22px; position: relative; }
+.connector::before {
+  content: ""; position: absolute; left: 26px; top: 0; bottom: 0; width: 2px; background: var(--rule);
+}
+.connector::after {
+  content: ""; position: absolute; left: 22px; bottom: 0; border: 5px solid transparent;
+  border-top-color: var(--rule); border-bottom: 0;
+}
+.connector span {
+  position: absolute; left: 44px; top: 50%; transform: translateY(-50%);
+  font-family: var(--mono); font-size: .72rem; color: var(--faint); background: var(--ground); padding: 0 6px;
+}
+
+.node {
+  flex: 1 1 210px; min-width: 190px; background: var(--surface); border: 1px solid var(--rule);
+  border-left: 3px solid var(--rule); border-radius: 5px; padding: 11px 13px; box-shadow: var(--shadow);
+}
+.node b { display: block; font-size: .9rem; line-height: 1.35; }
+.node small { display: block; color: var(--muted); font-size: .8rem; line-height: 1.45; margin-top: 3px; }
+.node .tag {
+  display: inline-block; font-family: var(--mono); font-size: .68rem; letter-spacing: .06em;
+  text-transform: uppercase; padding: 1px 5px; border-radius: 3px; margin-top: 7px;
+}
+
+.n-external { border-left-color: var(--external); background: var(--external-soft); }
+.n-external .tag { color: var(--external); border: 1px solid var(--external); }
+.n-you { border-left-color: var(--you); background: var(--you-soft); }
+.n-you .tag { color: var(--you); border: 1px solid var(--you); }
+.n-work { border-left-color: var(--work); background: var(--work-soft); }
+.n-work .tag { color: var(--work); border: 1px solid var(--work); }
+.n-decide { border-left-color: var(--accent); }
+.n-decide .tag { color: var(--accent); border: 1px solid var(--accent); }
+.n-good { border-left-color: var(--good); background: var(--good-soft); }
+.n-good .tag { color: var(--good); border: 1px solid var(--good); }
+.n-warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.n-warn .tag { color: var(--warn); border: 1px solid var(--warn); }
+.n-stop { border-left-color: var(--stop); background: var(--stop-soft); }
+.n-stop .tag { color: var(--stop); border: 1px solid var(--stop); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 18px 0 0; padding: 14px 0 0; border-top: 1px solid var(--rule); }
+.legend div { display: flex; align-items: center; gap: 7px; font-size: .82rem; color: var(--muted); }
+.legend i { width: 11px; height: 11px; border-radius: 2px; display: block; }
+
+table { border-collapse: collapse; width: 100%; margin: 10px 0 4px; font-size: .9rem; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--mono); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); font-weight: 600; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.scroller { overflow-x: auto; }
+
+ul.gaps { margin: 8px 0 0; padding: 0; list-style: none; }
+ul.gaps li { padding: 11px 0 11px 16px; border-bottom: 1px solid var(--rule); position: relative; color: var(--muted); font-size: .92rem; }
+ul.gaps li::before { content: ""; position: absolute; left: 0; top: 18px; width: 6px; height: 6px; border-radius: 50%; background: var(--stop); }
+ul.gaps li b { color: var(--ink); font-weight: 600; }
+
+footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--rule); color: var(--faint); font-size: .82rem; }
+@media (max-width: 640px) {
+  .stage { grid-template-columns: 1fr; gap: 6px; }
+  .stage-label { text-align: left; padding-top: 14px; }
+  .connector { grid-column: 1; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<p class="eyebrow">Crowbarr · subtitle timing service</p>
+<h1>How Crowbarr works, and where it sits</h1>
+<p class="lede prose">
+  Bazarr already finds and downloads subtitles automatically, and even tries to sync them.
+  Nothing checks whether the result is actually right. Crowbarr is that check: it listens to
+  the audio, measures the subtitle against the dialogue it hears, and repairs the timing only
+  when the audio proves it is wrong.
+</p>
+
+<h2>Where it sits</h2>
+<p class="section-note prose">Crowbarr does not download subtitles and is not a player. It sits after Bazarr and before you watch.</p>
+<div class="sits">
+  <div class="step"><strong>Sonarr / Radarr</strong><span>Import the episode or film</span></div>
+  <div class="arrow">→</div>
+  <div class="step"><strong>Bazarr</strong><span>Finds and downloads a subtitle, scores it, may sync it</span></div>
+  <div class="arrow">→</div>
+  <div class="step is-ours"><strong>Crowbarr</strong><span>Verifies it against the actual audio, repairs timing if needed</span></div>
+  <div class="arrow">→</div>
+  <div class="step"><strong>Plex</strong><span>Serves the corrected track when you press play</span></div>
+</div>
+
+<h2>The loop</h2>
+<p class="section-note prose">Every job follows this path. Only one job runs at a time.</p>
+
+<div class="chart scroller">
+<svg viewBox="0 0 1200 1980" role="img" aria-label="Crowbarr pipeline flowchart">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="head"/></marker></defs>
+<polyline class="ln" points="215,93.0 215,142 600,142 600,157.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="510,93.0 510,142 600,142 600,157.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="775,93.0 775,142 600,142 600,157.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="1035,93.0 1035,142 600,142 600,157.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="600,223.0 600,285.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="470.0,320 305.0,320" marker-end="url(#ah)"/>
+<text class="elbl" x="390" y="310">no</text>
+<polyline class="ln ln-dash" points="190,355.0 190,400 600,400 600,417.0" marker-end="url(#ah)"/>
+<text class="elbl" x="300" y="392">Bazarr arrives, or time is up</text>
+<polyline class="ln" points="600,355.0 600,417.0" marker-end="url(#ah)"/>
+<text class="elbl" x="618" y="406">yes</text>
+<polyline class="ln" points="730.0,452 920,452 920,392 710,392" marker-end="url(#ah)"/>
+<text class="elbl" x="800" y="442">busy: wait</text>
+<polyline class="ln" points="600,487.0 600,540.0" marker-end="url(#ah)"/>
+<text class="elbl" x="618" y="518">clear</text>
+<polyline class="ln" points="600,592.0 600,645.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="600,715.0 600,794.0" marker-end="url(#ah)"/>
+<text class="elbl" x="618" y="760">no</text>
+<polyline class="ln" points="735.0,680 1150,680 1150,1230 1060,1230 1060,1256.0" marker-end="url(#ah)"/>
+<text class="elbl" x="880" y="668">yes, skip everything</text>
+<polyline class="ln" points="600,846.0 600,915.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="465.0,950 305.0,950" marker-end="url(#ah)"/>
+<text class="elbl" x="390" y="940">none</text>
+<polyline class="ln" points="190,976.0 190,1055.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="600,985.0 600,1055.0" marker-end="url(#ah)"/>
+<text class="elbl" x="622" y="1030">found</text>
+<polyline class="ln" points="75.0,1090 48,1090 48,160 375.0,160 375.0,178" marker-end="url(#ah)"/>
+<text class="elbl" x="118" y="640">it wrote one: start over</text>
+<polyline class="ln ln-dash" points="305.0,1090 350,1090 350,905 190,905 190,924.0" marker-end="url(#ah)"/>
+<text class="elbl" x="352" y="1002">rejected: try the next</text>
+<polyline class="ln" points="190,1125.0 190,1195 980.0,1195 980.0,1256.0" marker-end="url(#ah)"/>
+<text class="elbl" x="300" y="1187">nothing left to try</text>
+<polyline class="ln" points="465.0,1090 420,1090 420,1256.0" marker-end="url(#ah)"/>
+<text class="elbl" x="444" y="1140">yes</text>
+<polyline class="ln" points="735.0,1090 800,1090 800,1256.0" marker-end="url(#ah)"/>
+<text class="elbl" x="824" y="1140">no</text>
+<polyline class="ln ln-dash" points="545.0,1290 675.0,1290" marker-end="url(#ah)"/>
+<text class="elbl" x="610" y="1246">samples unclear</text>
+<polyline class="ln" points="420,1324.0 420,1390 600,1390 600,1425.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="800,1324.0 800,1390 600,1390 600,1425.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="455.0,1460 190,1460 190,1586.0" marker-end="url(#ah)"/>
+<text class="elbl" x="300" y="1450">already correct</text>
+<polyline class="ln" points="600,1495.0 600,1586.0" marker-end="url(#ah)"/>
+<text class="elbl" x="622" y="1560">consistently off</text>
+<polyline class="ln" points="745.0,1460 900,1460 900,1580 950.0,1580 950.0,1606" marker-end="url(#ah)"/>
+<text class="elbl" x="880" y="1408">cannot tell</text>
+<polyline class="ln" points="1060,1324.0 1060,1425.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="1060,1495.0 1060,1586.0" marker-end="url(#ah)"/>
+<text class="elbl" x="1078" y="1560">yes</text>
+<polyline class="ln" points="1170.0,1460 1180,1460 1180,1850 660,1850 660,1854.0" marker-end="url(#ah)"/>
+<text class="elbl" x="1150" y="1440">no</text>
+<polyline class="ln" points="600,1654.0 600,1726.0" marker-end="url(#ah)"/>
+<polyline class="ln" points="475.0,1760 390,1760 390,1700 910.0,1700 910.0,1634" marker-end="url(#ah)"/>
+<text class="elbl" x="420" y="1750">no</text>
+<polyline class="ln" points="600,1794.0 600,1854.0" marker-end="url(#ah)"/>
+<text class="elbl" x="618" y="1840">yes</text>
+<polyline class="ln" points="600,1906.0 600,1934.0" marker-end="url(#ah)"/>
+<rect class="n n-you" x="85.0" y="19.0" width="260" height="74" rx="8"/>
+<text class="lbl" x="215" y="42">You, in the dashboard:</text><text class="lbl" x="215" y="62">Audit or Generate fresh</text><text class="lbl lbl-pri" x="215" y="82">priority 100 — highest</text>
+<rect class="n n-external" x="400.0" y="19.0" width="220" height="74" rx="8"/>
+<text class="lbl" x="510" y="42">Sonarr / Radarr</text><text class="lbl" x="510" y="62">imports a file</text><text class="lbl lbl-pri" x="510" y="82">priority 80</text>
+<rect class="n n-external" x="665.0" y="19.0" width="220" height="74" rx="8"/>
+<text class="lbl" x="775" y="42">Bazarr downloads</text><text class="lbl" x="775" y="62">a subtitle</text><text class="lbl lbl-pri" x="775" y="82">priority 60</text>
+<rect class="n n-plain" x="935.0" y="19.0" width="200" height="74" rx="8"/>
+<text class="lbl" x="1035" y="42">Library sweep</text><text class="lbl" x="1035" y="62">(background)</text><text class="lbl lbl-pri" x="1035" y="82">priority 0 — lowest</text>
+<rect class="n n-plain" x="375.0" y="157.0" width="450" height="66" rx="8"/>
+<text class="lbl" x="600" y="186">Queued: your requests first, then new imports,</text><text class="lbl" x="600" y="206">then Bazarr, then automatic retries, then the backlog</text>
+<polygon class="n n-decide" points="600,285.0 730.0,320 600,355.0 470.0,320"/>
+<text class="lbl lbl-strong" x="600" y="326">Subtitle already there?</text>
+<rect class="n n-plain" x="75.0" y="285.0" width="230" height="70" rx="8"/>
+<text class="lbl" x="190" y="316">Hold up to 30 min</text><text class="lbl" x="190" y="336">for Bazarr (backstop)</text>
+<polygon class="n n-decide" points="600,417.0 730.0,452 600,487.0 470.0,452"/>
+<text class="lbl lbl-strong" x="600" y="458">Server free enough?</text>
+<rect class="n n-plain" x="460.0" y="540.0" width="280" height="52" rx="8"/>
+<text class="lbl lbl-strong" x="600" y="572">Extract the English audio</text>
+<polygon class="n n-decide" points="600,645.0 735.0,680 600,715.0 465.0,680"/>
+<text class="lbl lbl-strong" x="600" y="686">Generate fresh requested?</text>
+<rect class="n n-plain" x="455.0" y="794.0" width="290" height="52" rx="8"/>
+<text class="lbl lbl-strong" x="600" y="826">Look for an existing subtitle</text>
+<polygon class="n n-decide" points="600,915.0 735.0,950 600,985.0 465.0,950"/>
+<text class="lbl lbl-strong" x="600" y="956">Any subtitle found?</text>
+<rect class="n n-external" x="75.0" y="924.0" width="230" height="52" rx="8"/>
+<text class="lbl lbl-strong" x="190" y="956">Ask Bazarr for one</text>
+<polygon class="n n-decide" points="190,1055.0 305.0,1090 190,1125.0 75.0,1090"/>
+<text class="lbl lbl-strong" x="190" y="1096">What did Bazarr do?</text>
+<polygon class="n n-decide" points="600,1055.0 735.0,1090 600,1125.0 465.0,1090"/>
+<text class="lbl lbl-strong" x="600" y="1096">Longer than 10 min?</text>
+<rect class="n n-work" x="295.0" y="1256.0" width="250" height="68" rx="8"/>
+<text class="lbl" x="420" y="1286">Listen to three</text><text class="lbl" x="420" y="1306">2-minute windows</text>
+<rect class="n n-work" x="675.0" y="1256.0" width="250" height="68" rx="8"/>
+<text class="lbl" x="800" y="1286">Listen to the</text><text class="lbl" x="800" y="1306">whole file</text>
+<rect class="n n-work" x="950.0" y="1256.0" width="220" height="68" rx="8"/>
+<text class="lbl" x="1060" y="1286">Transcribe the</text><text class="lbl" x="1060" y="1306">whole file</text>
+<polygon class="n n-decide" points="600,1425.0 745.0,1460 600,1495.0 455.0,1460"/>
+<text class="lbl lbl-strong" x="600" y="1466">Does it match the speech?</text>
+<polygon class="n n-decide" points="1060,1425.0 1170.0,1460 1060,1495.0 950.0,1460"/>
+<text class="lbl lbl-strong" x="1060" y="1466">Anything fatal?</text>
+<rect class="n n-good" x="75.0" y="1586.0" width="230" height="68" rx="34.0"/>
+<text class="lbl" x="190" y="1616">Leave it alone</text><text class="lbl" x="190" y="1636">nothing written</text>
+<rect class="n n-warn" x="475.0" y="1586.0" width="250" height="68" rx="8"/>
+<text class="lbl" x="600" y="1616">Shift every caption</text><text class="lbl" x="600" y="1636">by the measured error</text>
+<rect class="n n-stop" x="950.0" y="1586.0" width="220" height="68" rx="34.0"/>
+<text class="lbl" x="1060" y="1616">Needs attention</text><text class="lbl" x="1060" y="1636">original untouched</text>
+<polygon class="n n-decide" points="600,1726.0 725.0,1760 600,1794.0 475.0,1760"/>
+<text class="lbl lbl-strong" x="600" y="1766">Actually better?</text>
+<rect class="n n-good" x="440.0" y="1854.0" width="320" height="52" rx="26.0"/>
+<text class="lbl lbl-strong" x="600" y="1886">Write video.crowbarr.en.srt</text>
+<rect class="n n-external" x="440.0" y="1934.0" width="320" height="52" rx="8"/>
+<text class="lbl lbl-strong" x="600" y="1966">Plex picks up the new track</text>
+</svg>
+</div>
+
+<div class="legend">
+  <div><i style="background: var(--you)"></i> You</div>
+  <div><i style="background: var(--external)"></i> Another app (Sonarr, Radarr, Bazarr, Plex)</div>
+  <div><i style="background: var(--accent)"></i> Decision</div>
+  <div><i style="background: var(--work)"></i> Listening to audio (GPU)</div>
+  <div><i style="background: var(--good)"></i> Good outcome</div>
+  <div><i style="background: var(--warn)"></i> Repaired</div>
+  <div><i style="background: var(--stop)"></i> Stopped, nothing changed</div>
+</div>
+
+<h2>How the verdict is reached</h2>
+<p class="section-note prose">
+  Timing is judged on when each caption <em>starts</em>. When it ends is a reading-time decision —
+  subtitlers deliberately hold a line on screen after the speaker stops — and shifting a subtitle
+  cannot change how long a line stays up. Only a caption that disappears <em>before</em> its line
+  is finished counts as a fault.
+</p>
+<div class="scroller">
+<table>
+  <thead><tr><th>Verdict</th><th>Reached when</th><th>What happens to your file</th></tr></thead>
+  <tbody>
+    <tr><td><b>Already correct</b></td><td>Captions start within half a second of the speech, and stay tight across the runtime.</td><td>Nothing. Untouched.</td></tr>
+    <tr><td><b>Already correct</b><br><small>(settled)</small></td><td>The best possible correction turns out to be almost nothing, so what is left is normal variation rather than a fault.</td><td>Nothing. Untouched.</td></tr>
+    <tr><td><b>Repair</b></td><td>Captions are consistently off by more than half a second, or a fifth of them are more than a second out.</td><td>A separate corrected file is added.</td></tr>
+    <tr><td><b>Cannot tell</b></td><td>Too few passages of the subtitle can be matched to what is heard, or the wording does not match the audio at all — usually a subtitle for a different cut or a different episode.</td><td>Nothing. Flagged for you.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>What each path costs</h2>
+<p class="section-note prose">Measured on an NVIDIA T400 2GB with the <code>small</code> speech model.</p>
+<div class="scroller">
+<table>
+  <thead><tr><th>Path</th><th>Audio listened to</th><th class="num">Time</th></tr></thead>
+  <tbody>
+    <tr><td>Subtitle exists, samples are clear</td><td>6 minutes</td><td class="num">46–70 s, any runtime</td></tr>
+    <tr><td>Samples unclear, falls back to the whole file</td><td>6 minutes, then all of it</td><td class="num">the sample time is wasted</td></tr>
+    <tr><td>No subtitle, transcribes from scratch</td><td>the whole file</td><td class="num">3.6 min for a 29-min episode<br>≈13 min for a 100-min film</td></tr>
+    <tr><td>Re-run of something already heard</td><td>none, reuses the transcript</td><td class="num">seconds</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Known gaps</h2>
+<p class="section-note prose">Honest limits of the current build, not a roadmap.</p>
+<ul class="gaps">
+  <li><b>Sampling stops at 85% of the runtime.</b> The final stretch is extrapolated, and the re-check uses the same windows, so drift right at the end can be missed.</li>
+  <li><b>Crowbarr never tells Bazarr it disagreed.</b> Bazarr can re-sync or upgrade the same subtitle later, unaware its previous result was judged wrong.</li>
+  <li><b>Bazarr's provider and score are ignored.</b> The hook sends them; the decision does not use them.</li>
+  <li><b>Plex shows both English tracks identically.</b> It only labels recognised flags like SDH or forced, so the corrected track cannot be named — you switch between them by trying one.</li>
+  <li><b>"Needs attention" is a dead end.</b> Nothing automatically revisits a job the audit could not resolve.</li>
+</ul>
+
+<footer>
+  Crowbarr 0.3 · audit policy version 6 · document generated 7 September 2026.
+  Thresholds here reflect the deployed build; see <code>crowbarr/audit.py</code> and <code>crowbarr/processor.py</code> for the exact values.
+</footer>
+
+</div>
+</body>
+</html>

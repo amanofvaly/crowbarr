@@ -104,8 +104,10 @@ def queue_media(media: Path, settings: Settings, db: Database, now: float, origi
 
 def scan_arr(settings: Settings, db: Database, client_factory=ArrClient) -> int:
     total, seen = 0, set()
+    catalogs = []
+    # Validate every provider before walking thousands of files. Otherwise a slow
+    # Sonarr filesystem pass holds fresh Radarr imports behind an unhealthy gate.
     for provider in settings.providers():
-        errors = []
         try:
             with client_factory(provider, getattr(settings, provider)) as client:
                 files = client.catalog()
@@ -115,6 +117,9 @@ def scan_arr(settings: Settings, db: Database, client_factory=ArrClient) -> int:
             db.sync_failed(provider, message)
             db.notice(provider, message)
             continue
+        catalogs.append((provider, files))
+    for provider, files in catalogs:
+        errors = []
         for file in files:
             if file.path in seen:
                 continue

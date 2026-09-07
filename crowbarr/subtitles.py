@@ -98,8 +98,12 @@ def parse_srt(text: str) -> list[Cue]:
         start = values[0] * 3600 + values[1] * 60 + values[2] + values[3] / 1000
         end = values[4] * 3600 + values[5] * 60 + values[6] + values[7] / 1000
         body = "\n".join(lines[timing_index + 1 :]).strip()
-        if not body or end <= start:
-            raise ValueError("Empty or non-positive SRT cue")
+        if end <= start:
+            raise ValueError("Non-positive SRT cue")
+        # Provider files can contain an empty timed block (e.g. a removed advert).
+        # It displays nothing and must not invalidate the remaining dialogue.
+        if not body:
+            continue
         cues.append(Cue(start, end, body))
     if not cues:
         raise ValueError("Subtitle has no cues")
