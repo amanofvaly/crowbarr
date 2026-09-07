@@ -53,6 +53,35 @@ def test_low_confidence_missing_text_and_short_track_are_inconclusive():
     assert audit(cues[:1], words[:5], 8)["decision"] == "inconclusive"
 
 
+def test_one_weak_internal_word_does_not_discard_a_good_anchor():
+    cues, words = fixture()
+    words[2].probability = 0.4
+    result = audit(cues, words, 8)
+    assert result["decision"] == "pass"
+    assert result["supported_cues"] == 3
+
+
+def test_partial_distributed_evidence_can_prove_a_global_offset():
+    phrases = [f"unique phrase number {i} continues clearly" for i in range(30)]
+    words = []
+    cues = []
+    for i, phrase in enumerate(phrases):
+        audio_start = 10 + i * 20
+        phrase_words = phrase.split()
+        cue_words = [Word(audio_start + j * 0.25, audio_start + j * 0.25 + 0.2, word) for j, word in enumerate(phrase_words)]
+        words.extend(cue_words)
+        # Only every third cue belongs to the audio transcript; the others model
+        # captions/phrasing that cannot provide a unique speech anchor.
+        cues.append(Cue(audio_start + 2, cue_words[-1].end + 2, phrase))
+        cues.extend(
+            [Cue(audio_start + 5, audio_start + 6, "[music]"), Cue(audio_start + 7, audio_start + 8, "[applause]")]
+        )
+    result = audit(cues, words, 620)
+    assert result["decision"] == "repair"
+    assert result["coverage"] < 0.5
+    assert result["distributed_across_timeline"]
+
+
 def test_repair_must_pass_and_improve():
     cues, words = fixture(4)
     before = audit(cues, words, 8)

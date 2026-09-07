@@ -80,15 +80,23 @@ def extract_audio(media: Path, destination: Path, metadata: dict, stream: dict) 
     return offset, duration
 
 
-def embedded_subtitle(media: Path, destination: Path, metadata: dict) -> Path | None:
+def embedded_subtitles(
+    media: Path, directory: Path, metadata: dict, settings: Settings
+) -> list[Path]:
     supported = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
+    results = []
     for stream in metadata["streams"]:
+        language = stream.get("tags", {}).get("language", "und").lower()
         if (
             stream["codec_type"] == "subtitle"
             and stream.get("codec_name") in supported
-            and stream.get("tags", {}).get("language") in {"en", "eng"}
+            and (
+                language in {"en", "eng"}
+                or (settings.allow_untagged_subtitles and language in {"", "und"})
+            )
             and not stream.get("disposition", {}).get("forced")
         ):
+            destination = directory / f"embedded-{stream['index']}.srt"
             subprocess.run(
                 [
                     "ffmpeg",
@@ -106,5 +114,17 @@ def embedded_subtitle(media: Path, destination: Path, metadata: dict) -> Path | 
                 capture_output=True,
                 timeout=300,
             )
-            return destination
-    return None
+            results.append(destination)
+    return results
+
+
+def embedded_subtitle(
+    media: Path, destination: Path, metadata: dict, settings: Settings | None = None
+) -> Path | None:
+    """Compatibility wrapper for callers that need only one embedded subtitle."""
+    candidates = embedded_subtitles(media, destination.parent, metadata, settings or Settings())
+    if not candidates:
+        return None
+    if candidates[0] != destination:
+        candidates[0].replace(destination)
+    return destination

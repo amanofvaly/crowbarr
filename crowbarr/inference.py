@@ -86,7 +86,17 @@ def align(
                     not math.isfinite(w["score"]) or w["score"] < settings.min_alignment_score for w in scored
                 )
             ):
-                issues.append(f"Passage {index + 1}: weak or incomplete forced alignment")
+                # Faster Whisper already supplied usable timestamps. WhisperX is a
+                # refinement step, so a weak phoneme alignment falls back locally.
+                display = (
+                    passage.display
+                    if passage.authored
+                    else "\n".join(textwrap.wrap(passage.display, width=42))
+                )
+                cues.append(Cue(passage.start, passage.end, display))
+                issues.append(
+                    f"Passage {index + 1}: kept Whisper timestamps after weak forced alignment"
+                )
                 continue
             cue_start, cue_end = start + scored[0]["start"], start + scored[-1]["end"]
             display = (

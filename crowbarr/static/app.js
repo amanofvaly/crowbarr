@@ -77,7 +77,7 @@ function renderJobs() {
     const status = element("td");
     const [label, color] = states[job.state] || [job.state, "text-bg-light"];
     status.append(element("span", label, `badge ${color}`));
-    const source = job.report ? (job.report.mode === "hybrid" ? "Authored + audio" : "Generated") :
+    const source = job.report ? (job.report.mode === "authored_timing" ? "Authored + audio" : "Generated") :
       (job.source ? "Authored SRT" : "Embedded / audio");
     row.append(media, status, element("td", source, "text-secondary"), element("td", relativeTime(job.updated), "text-secondary text-nowrap"));
     const actions = element("td", undefined, "text-end");
@@ -135,6 +135,7 @@ function showDetails(job) {
     }
     for (const [key, value] of stats) $("detail-stats").append(element("dt", key, "col-sm-4"), element("dd", String(value), "col-sm-8"));
     for (const issue of report.issues || []) $("detail-issues").append(element("li", issue));
+    for (const warning of report.warnings || []) $("detail-issues").append(element("li", warning, "text-secondary"));
     $("detail-issues").append(element("li", report.note, "text-secondary"));
   }
   $("job-detail").focus({ preventScroll: true });

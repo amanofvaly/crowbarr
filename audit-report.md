@@ -442,3 +442,142 @@ The immediate implementation order should be:
 10. Build a real regression corpus from your own problematic media.
 
 That is what the testing established. The product does not have merely two problems; it has several interacting policies that currently make both primary workflows unlikely to publish on ordinary media.
+
+phase 2 audit:
+Next work, in order
+1. Server hardware and runtime audit
+   - CPU model, cores and instruction support.
+   - Total/free RAM and swap.
+   - NVIDIA GPU presence.
+   - nvidia-smi, driver and CUDA compatibility.
+   - GPU visibility inside containers.
+   - VRAM capacity and utilization.
+   - Storage throughput and available model/cache space.
+   - Existing load from Plex, Sonarr, Radarr and Bazarr.
+2. Deploy the current Crowbarr build on the server
+   - Use the CPU image if no compatible NVIDIA GPU exists.
+   - Use the CUDA image only after proving container GPU access.
+   - Mount media read-only initially.
+   - Give Crowbarr a separate writable test library and private state directory.
+   - Verify the health endpoint, queue recovery, model downloads and filesystem permissions.
+   - Confirm the report states the backend actually used—CPU or CUDA.
+3. Implement proper queue priorities
+   Proposed order:
+   1. Manual “Process now”
+   2. New Sonarr/Radarr imports
+   3. New or upgraded Bazarr subtitles
+   4. Automatic retries
+   5. Historical backlog
+   Also add:
+   - Priority and origin fields in SQLite.
+   - Priority aging to prevent permanent backlog starvation.
+   - Direct event targeting instead of rescanning the complete catalog for every hook.
+   - Manual processing endpoint and dashboard button.
+   - Move-to-top and cancel controls.
+   - Do not normally interrupt the active job; priority applies to the next job.
+   - Optional explicit “stop current job and run this” action.
+4. Implement lazy resource scheduling
+   - Continue allowing only one inference job by default.
+   - Minimum-free-RAM and minimum-free-VRAM gates.
+   - CPU load threshold.
+   - Backlog cooldown between jobs.
+   - Manual/import jobs bypass the cooldown.
+   - Optional quiet hours.
+   - Reduced OS CPU and disk priority for background work.
+   - Defer background generation while Plex is transcoding or actively playing.
+   - Configurable hourly background-processing budget.
+   - Display current RAM, VRAM, backend and reason a job is waiting.
+   - Retain transcript-cache size limits and model reuse.
+5. Implement sampled authored-subtitle auditing
+   For existing subtitles, do not transcribe an entire movie immediately:
+   - Sample dialogue windows from the first, middle and final portions.
+   - Establish a constant offset or linear drift when regions agree.
+   - Escalate to additional windows when they disagree.
+   - Run full-file transcription only for ambiguous cuts or generation.
+   - Avoid sampling literal credits; select windows containing authored dialogue.
+6. Add ad, recap and discontinuity handling
+   - Compute local offset estimates across multiple regions.
+   - Detect persistent offset jumps.
+   - Distinguish linear frame-rate drift from inserted/deleted scenes.
+   - Fit piecewise timing segments around ads or alternate recaps.
+   - Require anchors on both sides of every discontinuity.
+   - Refuse repair when segment boundaries are not sufficiently supported.
+   - Preserve non-dialogue captions using neighboring segment transforms.
+7. Complete Bazarr integration
+   Crowbarr currently only notices sidecars. It needs to:
+   - Read provider/release/score information.
+   - Request a subtitle search.
+   - Reject or blacklist a demonstrably wrong candidate.
+   - Request another candidate.
+   - Avoid retrying the same subtitle hash.
+   - Generate subtitles only after provider alternatives are exhausted.
+8. Complete Plex verification
+   - Refresh only the affected item/path.
+   - Poll Plex metadata afterward.
+   - Confirm the new sidecar appears.
+   - Confirm language, forced and hearing-impaired attributes.
+   - Record Plex delivery separately from filesystem publication.
+   - Test while Plex is playing and transcoding.
+Required real-world server tests
+All inference must run inside the deployed server container while monitoring RAM, VRAM, CPU, I/O and runtime.
+Television cases
+- The real S08E08 authored-subtitle problem.
+- The real S11E22 missing-subtitle case.
+- Correct embedded subtitle versus bad Bazarr sidecar.
+- Untagged audio and embedded subtitles.
+- Episode with recap differences.
+- Episode containing credits dialogue.
+- Episode with an inserted advertisement or discontinuity.
+Full feature-length movie
+At least one 90–150 minute movie from the real Radarr library, preferably with:
+- English multichannel audio.
+- Embedded English subtitle.
+- Bazarr external subtitle.
+- Common release metadata.
+- Enough dialogue throughout the runtime.
+Run these movie scenarios:
+- Existing correct subtitle: Crowbarr must leave it unchanged.
+- Known constant shift: apply a controlled shift to a test copy and recover it.
+- Known frame-rate drift: test 23.976/24/25 fps timing behavior.
+- Beginning trailer/ad insertion.
+- Middle insertion that requires piecewise correction.
+- Wrong-release subtitle: must reject it.
+- Missing subtitle: generate the complete movie subtitle.
+- Restart Crowbarr halfway through processing.
+- Run during Plex direct play.
+- Run during Plex transcoding.
+- Retry using the transcript cache.
+Queue/load acceptance test
+Create a realistic server queue containing:
+- Historical backlog jobs.
+- A newly imported episode.
+- A newly imported movie.
+- A Bazarr subtitle upgrade.
+- An automatic retry.
+- A manual request.
+Expected order:
+currently running job finishes
+→ manual request
+→ new imports
+→ Bazarr upgrade
+→ retry
+→ backlog resumes lazily
+Verify that:
+- Only one model is resident.
+- Manual and new-import jobs jump ahead of backlog.
+- The service does not continuously saturate the server.
+- Plex remains usable.
+- Restarting does not duplicate or lose jobs.
+- Changed media supersedes stale work.
+- No original subtitle or media file is overwritten.
+- Cache growth remains bounded.
+Completion criteria
+Crowbarr should not be called server-ready until:
+- CPU or CUDA execution is proven on the actual server.
+- A complete feature-length movie passes.
+- Both real TV workflows publish usable results.
+- Queue priorities work under a real mixed backlog.
+- RAM and VRAM remain inside hardware-specific limits.
+- Plex playback remains stable during background processing.
+- Bazarr alternatives and Plex discovery are verified end-to-end.
+- A multi-hour server soak finishes without OOM, stuck jobs or uncontrolled load.

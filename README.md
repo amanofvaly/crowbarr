@@ -126,23 +126,27 @@ those downloads when they arrive; it does not promise Bazarr will keep searching
 ## Audit-first decisions
 
 The first audit still transcribes the full selected audio track with faster-whisper.
-It is not yet a cheap sampled-audio audit. Unchanged input revisions are remembered;
-passing or inconclusive audits do not run WhisperX. Missing subtitles still use the
-full generation pipeline.
+It is not yet a cheap sampled-audio audit. Recognized words are cached privately by
+video revision and inference settings, independently of subtitle revisions, so retries
+and provider upgrades reuse the transcript. The cache is capped at 2 GiB. Jobs run one
+at a time in isolated child processes, and Whisper and alignment models are never kept
+resident between jobs.
 
 Each audit reports cue coverage, signed timing offset, median/p95 boundary differences,
 and per-cue evidence. The dashboard shows before/after metrics and offers a JSON download.
 Positive signed differences mean the subtitle is later than recognized speech.
 
-Version 1 requires confident anchors for **every cue**, at least three cues and twelve
-recognized words, and no more than 10% unmatched recognized dialogue. Anchor words
-must each have probability at least 0.8. Passing requires start differences within
-0.75 seconds, end differences within 1 second, and valid subtitle structure.
-Repair is justified when p95 boundary difference exceeds 2 seconds or at least 20%
-of supported cues differ by more than 1 second. Other cases are inconclusive.
+Version 2 requires at least 10% dialogue-cue coverage, from 3 to 30 confident anchors
+depending on subtitle size, at least 65% global text compatibility, twelve recognized
+words, and beginning/middle/end evidence for media at least two minutes long. Isolated
+weak internal words do not discard an otherwise strong anchor. Passing requires p95
+boundary error no greater than 1.75 seconds with fewer than 20% one-second outliers.
+Repair is justified when p95 exceeds 2 seconds or at least 20% of supported cues are
+one-second outliers. Other cases are inconclusive.
 
 A repair must preserve all authored cues, pass the same audit, reduce p95 difference
-by at least 50% and 0.5 seconds, and avoid worsening any cue by more than 0.25 seconds.
+by at least 20% and 0.5 seconds, and keep regressions over 0.25 seconds to at most 10%
+of anchors with no regression over 0.75 seconds.
 All existing publication checks also apply. Passing originals retire only verified,
 Crowbarr-owned sidecars, with a backup, so an earlier repair does not remain beside
 the now-correct original. Untracked or edited outputs require attention.
@@ -160,11 +164,12 @@ Audit policy changes invalidate prior input signatures and trigger fresh evaluat
 2. Select an English dialogue track, excluding known commentary/descriptive tracks.
 3. Extract mono audio and retain its offset on the video's timeline.
 4. Recognize word locations with the configured Whisper model.
-5. Match unique phrase anchors against the SRT, ignoring its old timestamps.
-6. Preserve supported authored cues; generate text for uncovered speech.
-7. Audit existing cue timing. Stop if it passes or is inconclusive; otherwise force-align the supported passages.
-8. Re-audit the candidate for improvement and check coverage, alignment scores, cue durations, overlaps, and bounds.
-9. Atomically publish a separate sidecar, or retain a report under Needs attention.
+5. Audit every eligible external and embedded subtitle against unique audio phrase anchors.
+6. Select the strongest source by decision, timing error, text compatibility, and coverage.
+7. For authored subtitles, fit a robust offset-and-drift transform and preserve every cue and its text.
+8. For missing subtitles, use Faster Whisper word timestamps; CUDA may refine a bounded sample with WhisperX, while CPU skips the optional model to limit memory.
+9. Re-audit authored candidates and check generated cue durations, overlaps, and bounds.
+10. Atomically publish a separate sidecar, or retain a private candidate and report under Needs attention.
 
 A successful model call is not a quality verdict. The gates are heuristics, not
 calibrated probabilities. Repeated phrases, deleted scenes, recognition mistakes,

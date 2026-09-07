@@ -18,7 +18,7 @@ def allowed(path: Path, settings: Settings) -> bool:
     return any(resolved.is_relative_to(Path(root).resolve()) for root in settings.media_roots())
 
 
-def source_subtitle(media: Path, settings: Settings) -> Path | None:
+def subtitle_sources(media: Path, settings: Settings) -> list[Path]:
     candidates = []
     for path in media.parent.iterdir():
         if path.suffix.lower() != ".srt" or not path.name.startswith(media.stem + "."):
@@ -32,17 +32,24 @@ def source_subtitle(media: Path, settings: Settings) -> Path | None:
     plain = media.with_suffix(".srt")
     if settings.allow_untagged_subtitles and plain.exists() and not plain.is_symlink():
         candidates.append(plain)
-    # Prefer newest authored subtitle; a later provider upgrade triggers a new revision.
-    return max(candidates, key=lambda p: (p.stat().st_mtime_ns, p.name), default=None)
+    return sorted(set(candidates), key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
+
+
+def source_subtitle(media: Path, settings: Settings) -> Path | None:
+    """Return the newest sidecar as a queue hint; processing arbitrates every source."""
+    return next(iter(subtitle_sources(media, settings)), None)
 
 
 def signature(media: Path, source: Path | None, settings: Settings) -> str:
     stat = media.stat()
     data = [str(media.resolve()), stat.st_size, stat.st_mtime_ns, settings.fingerprint()]
-    if source:
-        if source.stat().st_size > 8 * 1024 * 1024:
+    sources = subtitle_sources(media, settings)
+    if source and source not in sources:
+        sources.append(source)
+    for candidate in sources:
+        if candidate.stat().st_size > 8 * 1024 * 1024:
             raise ValueError("Subtitle exceeds 8 MiB limit")
-        data.extend([str(source), hashlib.sha256(source.read_bytes()).hexdigest()])
+        data.extend([str(candidate), hashlib.sha256(candidate.read_bytes()).hexdigest()])
     return hashlib.sha256(json.dumps(data).encode()).hexdigest()
 
 
@@ -82,7 +89,8 @@ def queue_media(media: Path, settings: Settings, db: Database, now: float) -> bo
         return False
     retire_stale_output(media, db)
     source = source_subtitle(media, settings)
-    latest_write = max(media.stat().st_mtime, source.stat().st_mtime if source else 0)
+    sources = subtitle_sources(media, settings)
+    latest_write = max([media.stat().st_mtime, *(candidate.stat().st_mtime for candidate in sources)])
     sig = signature(media, source, settings)
     first_seen = db.observe(str(media), sig, now)
     stable_at = max(first_seen, latest_write) + settings.settle_seconds
