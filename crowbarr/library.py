@@ -80,7 +80,7 @@ def retire_stale_output(media: Path, db: Database) -> None:
     db.set_video_revision(str(media), revision)
 
 
-def queue_media(media: Path, settings: Settings, db: Database, now: float) -> bool:
+def queue_media(media: Path, settings: Settings, db: Database, now: float, origin: str = "backlog") -> bool:
     if not allowed(media, settings):
         raise ValueError("Path is outside Crowbarr's media folders; configure a path mapping")
     if not media.is_file():
@@ -95,7 +95,7 @@ def queue_media(media: Path, settings: Settings, db: Database, now: float) -> bo
     first_seen = db.observe(str(media), sig, now)
     stable_at = max(first_seen, latest_write) + settings.settle_seconds
     ready = max(stable_at, first_seen + (0 if source else settings.subtitle_wait_minutes * 60))
-    job_id = db.enqueue(str(media), sig, str(source) if source else None, ready)
+    job_id = db.enqueue(str(media), sig, str(source) if source else None, ready, origin=origin)
     job = db.get(job_id)
     if job["state"] == "completed" and job["output"] and not Path(job["output"]).exists():
         db.update(job_id, state="queued", ready=now, attempts=0, error="Published subtitle is missing")

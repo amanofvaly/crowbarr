@@ -15,7 +15,7 @@ services:
       - ${CONFIG_PATH:-./data}:/config
       - ${MEDIA_PATH:?Set MEDIA_PATH in .env}:/media
     cpus: "${CPU_LIMIT:-2}"
-    mem_limit: ${MEMORY_LIMIT:-4g}
+    mem_limit: ${MEMORY_LIMIT:-0}
     stop_grace_period: 45s
     security_opt:
       - no-new-privileges:true

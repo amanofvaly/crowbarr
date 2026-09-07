@@ -334,7 +334,9 @@ def test_embedded_source_beats_bad_external_sidecar_by_audio_evidence(video, tmp
 
     result = process(job, settings, db.path.parent, db, lambda *args: (words, []), forbidden)
     report = json.loads(result["report"])
-    assert result["state"] == "unchanged"
+    assert result["state"] == "completed"
+    assert Path(result["output"]).read_text() == render_srt(embedded_cues)
+    assert media.with_suffix(".en.srt").read_text() == render_srt(bad_external)
     assert report["selected_source_kind"] == "embedded"
     assert {item["decision"] for item in report["source_arbitration"]} == {"pass", "repair"}
 
@@ -350,3 +352,30 @@ def test_failed_output_is_saved_as_private_candidate(video, tmp_path):
     report = json.loads(result["report"])
     assert Path(report["candidate"]).read_text().endswith("bad\n")
     assert not video.with_suffix(".crowbarr.en.srt").exists()
+
+
+def test_a_provider_download_that_bazarr_discards_retries_instead_of_parking(video, tmp_path, monkeypatch):
+    """Bazarr validates downloads itself and may write nothing; the episode must not stall."""
+    from crowbarr import processor
+
+    attempts = []
+
+    def fake_try_alternative(settings, db, media, directory, job_id):
+        attempts.append(job_id)
+        return {"state": "downloaded", "provider": "opensubtitlescom", "attempts": len(attempts)}
+
+    monkeypatch.setattr("crowbarr.bazarr.try_alternative", fake_try_alternative)
+    settings = Settings(
+        roots=[str(video.parent)],
+        bazarr={"url": "http://bazarr", "api_key": "k"},
+        sonarr={"url": "http://sonarr", "api_key": "k"},
+        bazarr_download_alternatives=True,
+    )
+    db = Database(tmp_path / "queue.db")
+    db.replace_catalog("sonarr", [{"file_id": 1, "item_id": 1, "path": str(video), "remote_path": str(video), "title": "t"}])
+    from crowbarr.library import signature
+
+    db.enqueue(str(video), signature(video, None, settings), None, 0)
+    result = processor.process(db.claim(), settings, tmp_path, db)
+    assert result["state"] == "retry"
+    assert "next candidate" in result["error"]

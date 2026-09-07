@@ -130,3 +130,97 @@ def test_returning_revision_can_be_requeued(tmp_path):
     db.update(job, state="superseded")
     assert db.enqueue("movie", "v1", None, 0) == job
     assert db.get(job)["state"] == "queued"
+
+
+def test_mixed_priority_queue_and_single_claim(tmp_path):
+    import time
+
+    from crowbarr.db import Database
+
+    db = Database(tmp_path / "queue.db")
+    identifiers = {}
+    for origin in ["backlog", "retry", "bazarr", "import", "manual"]:
+        identifiers[origin] = db.enqueue("/" + origin, origin, None, time.time() - 1, origin=origin)
+    for origin in ["manual", "import", "bazarr", "retry", "backlog"]:
+        job = db.claim()
+        assert job["id"] == identifiers[origin]
+        assert db.claim() is None
+        db.update(job["id"], state="completed")
+
+
+def test_resource_deferral_leaves_background_pending(tmp_path):
+    import time
+
+    from crowbarr.db import Database
+
+    db = Database(tmp_path / "queue.db")
+    background = db.enqueue("/background", "a", None, time.time() - 1)
+    assert db.claim(background_allowed=False) is None
+    assert db.promote(background)
+    assert db.claim(background_allowed=False)["id"] == background
+    assert db.cancel(background)
+    assert db.get(background)["cancel_requested"] == 1
+
+
+def test_aged_backlog_eventually_runs(tmp_path):
+    import time
+
+    from crowbarr.db import Database
+
+    db = Database(tmp_path / "queue.db")
+    old = db.enqueue("/old", "a", None, 0)
+    with db.connect() as connection:
+        connection.execute("UPDATE jobs SET created=? WHERE id=?", (time.time() - 121 * 3600, old))
+    db.enqueue("/manual", "b", None, 0, origin="manual")
+    assert db.claim()["id"] == old
+
+
+def test_snapshot_shows_results_behind_a_large_backlog(tmp_path):
+    db = Database(tmp_path / "queue.db")
+    finished = db.enqueue("done.mkv", "sig", None, 0)
+    db.update(finished, state="completed", stage="Ready to watch")
+    for index in range(200):
+        db.enqueue(f"pending{index}.mkv", "sig", None, 0)
+    jobs = db.snapshot()["jobs"]
+    # The one outcome must remain visible rather than being buried by the backlog.
+    assert finished in [job["id"] for job in jobs]
+    assert len(jobs) < 200
+    assert db.snapshot()["counts"]["queued"] == 200
+
+
+def test_superseded_bookkeeping_is_pruned(tmp_path):
+    db = Database(tmp_path / "queue.db")
+    kept = []
+    for index in range(30):
+        job = db.enqueue(f"movie{index}.mkv", "sig", None, 0)
+        db.update(job, state="superseded")
+        kept.append(job)
+    live = db.enqueue("current.mkv", "sig", None, 0)
+    assert db.prune(keep=10) == 20
+    remaining = {job["id"] for job in db.snapshot()["jobs"]}
+    assert live in remaining
+    assert db.snapshot()["counts"]["superseded"] == 10
+
+
+def test_previously_unresolved_media_is_revisited_before_untouched_backlog(tmp_path):
+    db = Database(tmp_path / "queue.db")
+    stuck = db.enqueue("needs-attention.mkv", "policy-v1", None, 0)
+    db.update(stuck, state="review", stage="Needs attention", error="could not decide")
+    db.enqueue("never-looked-at.mkv", "policy-v2", None, 0)
+    # A policy change gives every file a new signature.
+    revisit = db.enqueue("needs-attention.mkv", "policy-v2", None, 0)
+    assert db.get(revisit)["priority"] > db.get(db.enqueue("never-looked-at.mkv", "policy-v2", None, 0))["priority"]
+    assert db.claim()["id"] == revisit
+
+
+def test_waiting_for_bazarr_does_not_permanently_demote_media(tmp_path):
+    """The subtitle wait must delay a job, not push it behind everything forever."""
+    db = Database(tmp_path / "queue.db")
+    # Media with no subtitle is enqueued first, but held for the Bazarr window.
+    no_subtitle = db.enqueue("a-no-subtitle.mkv", "sig", None, time.time() + 60)
+    db.enqueue("b-has-subtitle.mkv", "sig", "b.en.srt", 0)
+    assert db.claim()["media"] == "b-has-subtitle.mkv"
+    db.update(db.get(no_subtitle)["id"], state="waiting", ready=0)
+    db.update(2, state="completed")
+    # Once its wait expires it takes its place by arrival, not last.
+    assert db.claim()["id"] == no_subtitle

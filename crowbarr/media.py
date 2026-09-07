@@ -80,9 +80,7 @@ def extract_audio(media: Path, destination: Path, metadata: dict, stream: dict) 
     return offset, duration
 
 
-def embedded_subtitles(
-    media: Path, directory: Path, metadata: dict, settings: Settings
-) -> list[Path]:
+def embedded_subtitles(media: Path, directory: Path, metadata: dict, settings: Settings) -> list[Path]:
     supported = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
     results = []
     for stream in metadata["streams"]:
@@ -90,10 +88,7 @@ def embedded_subtitles(
         if (
             stream["codec_type"] == "subtitle"
             and stream.get("codec_name") in supported
-            and (
-                language in {"en", "eng"}
-                or (settings.allow_untagged_subtitles and language in {"", "und"})
-            )
+            and (language in {"en", "eng"} or (settings.allow_untagged_subtitles and language in {"", "und"}))
             and not stream.get("disposition", {}).get("forced")
         ):
             destination = directory / f"embedded-{stream['index']}.srt"

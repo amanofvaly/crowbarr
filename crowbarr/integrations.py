@@ -42,3 +42,115 @@ def refresh_plex(connection: Connection) -> None:
                 if not key.isdigit():
                     continue
                 client.get(connection.url + f"/library/sections/{key}/refresh").raise_for_status()
+
+
+def plex_activity(connection: Connection) -> list[dict]:
+    if not connection.url:
+        return []
+    with httpx.Client(timeout=5, trust_env=False, headers={"X-Plex-Token": connection.api_key}) as client:
+        response = client.get(connection.url + "/status/sessions")
+        response.raise_for_status()
+        return [
+            {"title": v.get("title"), "transcoding": v.find("TranscodeSession") is not None}
+            for v in ET.fromstring(response.text).findall("Video")
+        ]
+
+
+def deliver_plex(
+    connection: Connection, media: str, output: str, mappings: list, timeout: float = 30
+) -> dict:
+    """Find one exact media part, refresh it, and verify the sidecar stream metadata."""
+    import hashlib
+    import time
+    from pathlib import Path, PurePosixPath
+
+    mapped = media
+    for mapping in sorted(mappings, key=lambda m: len(m.remote), reverse=True):
+        if media.startswith(mapping.remote.rstrip("/") + "/"):
+            mapped = mapping.local.rstrip("/") + media[len(mapping.remote) :]
+            break
+    expected_hash = hashlib.sha256(Path(output).read_bytes()).hexdigest()
+    deadline = time.monotonic() + timeout
+    with httpx.Client(timeout=10, trust_env=False, headers={"X-Plex-Token": connection.api_key}) as client:
+        response = client.get(connection.url + "/library/sections")
+        response.raise_for_status()
+        item_key = None
+        for section in ET.fromstring(response.text).findall("Directory"):
+            if section.get("type") not in {"movie", "show"}:
+                continue
+            key = section.get("key", "")
+            if not key.isdigit():
+                continue
+            catalog = client.get(
+                connection.url + f"/library/sections/{key}/all",
+                params={"type": 4 if section.get("type") == "show" else 1, "includeMedia": 1},
+            )
+            catalog.raise_for_status()
+            for video in ET.fromstring(catalog.text).findall("Video"):
+                if any(part.get("file") == mapped for part in video.findall("./Media/Part")):
+                    item_key = video.get("ratingKey")
+                    break
+            if item_key:
+                break
+        if not item_key or not item_key.isdigit():
+            return {
+                "state": "pending",
+                "reason": "Exact media path is not in Plex; check Plex path mappings",
+                "media_path": mapped,
+            }
+        client.put(connection.url + f"/library/metadata/{item_key}/refresh").raise_for_status()
+        while time.monotonic() < deadline:
+            response = client.get(
+                connection.url + f"/library/metadata/{item_key}", params={"includeMedia": 1}
+            )
+            response.raise_for_status()
+            for part in ET.fromstring(response.text).findall("./Video/Media/Part"):
+                if part.get("file") != mapped:
+                    continue
+                for stream in part.findall("Stream"):
+                    if stream.get("streamType") != "3":
+                        continue
+                    stream_file = stream.get("file", "")
+                    title = stream.get("title", "")
+                    matches_output = (
+                        PurePosixPath(stream_file).name == PurePosixPath(output).name
+                        or "crowbarr" in title.lower()
+                    )
+                    stream_key = stream.get("key", "")
+                    if (
+                        not matches_output
+                        and stream_key.startswith("/library/streams/")
+                        and stream_key.removeprefix("/library/streams/").isdigit()
+                    ):
+                        content = client.get(connection.url + stream_key)
+                        content.raise_for_status()
+                        matches_output = hashlib.sha256(content.content).hexdigest() == expected_hash
+                    if matches_output:
+                        attrs = {
+                            name: stream.get(name)
+                            for name in (
+                                "id",
+                                "language",
+                                "languageCode",
+                                "title",
+                                "forced",
+                                "hearingImpaired",
+                                "selected",
+                            )
+                        }
+                        valid = (
+                            attrs["languageCode"] in {"eng", "en"}
+                            and attrs["forced"] in {None, "0"}
+                            and attrs["hearingImpaired"] in {None, "0"}
+                        )
+                        return {
+                            "state": "discovered" if valid else "review",
+                            "rating_key": item_key,
+                            "stream": attrs,
+                        }
+            time.sleep(2)
+        return {
+            "state": "pending",
+            "rating_key": item_key,
+            "reason": "Published on disk; Plex has not exposed the subtitle yet",
+        }

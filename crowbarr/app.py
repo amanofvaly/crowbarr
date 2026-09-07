@@ -7,7 +7,7 @@ import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -89,8 +89,13 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                     token = ""
             except (ValueError, UnicodeError):
                 token = ""
+        # A signed session cookie is how a person signs in. The API key stays valid for
+        # Sonarr, Radarr, Bazarr and scripts, which cannot hold a cookie.
+        session = request.cookies.get("crowbarr_session", "")
+        if session and store.valid_session(session):
+            return
         if not token or not hmac.compare_digest(token.encode(), store.token.encode()):
-            raise HTTPException(401, "Enter your Crowbarr API key to continue")
+            raise HTTPException(401, "Sign in to continue")
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -126,10 +131,12 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         data = db.snapshot()
         data.update(
             {
+                "resources": service.resources,
+                "wait_reason": service.wait_reason,
                 "version": __version__,
                 "paused": store.get().paused,
                 "last_scan": service.last_scan,
-                "media_count": service.scan_count,
+                "media_count": data.pop("media_total", service.scan_count),
                 "configured": bool(store.get().media_roots()),
                 "discovery_mode": "arr" if store.get().providers() else "folders",
                 "providers": store.get().providers(),
@@ -138,9 +145,40 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         )
         return data
 
+    @app.get("/api/session")
+    def session_state():
+        """Public: lets the sign-in page know whether a login has been created yet."""
+        return {"configured": store.has_account()}
+
+    @app.post("/api/setup", status_code=201)
+    def setup(payload: dict, response: Response):
+        try:
+            store.create_account(payload.get("username", ""), payload.get("password", ""))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
+        response.set_cookie(
+            "crowbarr_session", store.issue_session(), httponly=True, samesite="lax", path="/"
+        )
+        return {"message": "Dashboard login created"}
+
+    @app.post("/api/session")
+    def sign_in(payload: dict, response: Response):
+        if not store.check_account(payload.get("username", ""), payload.get("password", "")):
+            raise HTTPException(401, "That username and password do not match")
+        response.set_cookie(
+            "crowbarr_session", store.issue_session(), httponly=True, samesite="lax", path="/"
+        )
+        return {"message": "Signed in"}
+
+    @app.delete("/api/session")
+    def sign_out(response: Response):
+        response.delete_cookie("crowbarr_session", path="/")
+        return {"message": "Signed out"}
+
     @app.get("/api/settings", dependencies=[Depends(authenticate)])
     def settings():
-        return store.public()
+        # Shown so it can be copied into Sonarr/Radarr/Bazarr; it is no longer the login.
+        return {**store.public(), "api_key": store.token}
 
     @app.put("/api/settings", dependencies=[Depends(authenticate)])
     def save_settings(payload: dict):
@@ -181,6 +219,132 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             raise HTTPException(409, "Only failed or attention-needed jobs can be retried")
         return {"message": "Job queued again"}
 
+    @app.post("/api/process", dependencies=[Depends(authenticate)], status_code=202)
+    def process_now(payload: dict):
+        import time
+
+        from .library import queue_media, signature, source_subtitle
+
+        media = Path(payload.get("media", ""))
+        current = store.get()
+        if not media.is_absolute() or not db.eligible(str(media), current.providers(), healthy=False):
+            raise HTTPException(422, "Select an absolute path from the managed library")
+        try:
+            queue_media(media, current, db, time.time(), origin="manual")
+            source = source_subtitle(media, current)
+            identifier = db.enqueue(
+                str(media),
+                signature(media, source, current),
+                str(source) if source else None,
+                time.time(),
+                origin="manual",
+            )
+            if payload.get("directive") == "generate":
+                # Re-open regardless of a previous verdict: the request is the point.
+                db.direct(identifier, "generate")
+                return {"message": "Fresh subtitle generation requested", "job_id": identifier}
+            db.direct(identifier, "")
+            return {"message": "Manual processing requested", "job_id": identifier}
+        except (OSError, ValueError):
+            raise HTTPException(422, "Media must be readable within configured media roots") from None
+
+    @app.get("/api/media", dependencies=[Depends(authenticate)])
+    def media(q: str = "", limit: int = 20):
+        """Search the managed library so the dashboard can request work on a title."""
+        term = f"%{q.strip()}%"
+        with db.connect() as connection:
+            rows = connection.execute(
+                "SELECT path, title FROM managed_media WHERE path LIKE ? ORDER BY path LIMIT ?",
+                (term, max(1, min(limit, 50))),
+            ).fetchall()
+            if not rows:
+                rows = connection.execute(
+                    "SELECT DISTINCT media AS path, media AS title FROM jobs WHERE media LIKE ? "
+                    "ORDER BY media LIMIT ?",
+                    (term, max(1, min(limit, 50))),
+                ).fetchall()
+        return {
+            "results": [
+                {"path": row["path"], "title": Path(row["path"]).stem, "label": row["title"]}
+                for row in rows
+            ]
+        }
+
+    @app.post("/api/jobs/{job_id}/promote", dependencies=[Depends(authenticate)])
+    def promote(job_id: int):
+        if not db.promote(job_id):
+            raise HTTPException(409, "Only pending jobs can move to the front")
+        return {"message": "Prioritized for the next available slot"}
+
+    @app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(authenticate)])
+    def cancel(job_id: int):
+        if not db.cancel(job_id):
+            raise HTTPException(409, "This job has already finished")
+        return {"message": "Cancellation requested"}
+
+    @app.post("/api/jobs/{job_id}/providers", dependencies=[Depends(authenticate)])
+    def providers(job_id: int):
+        from .bazarr import inspect_sources
+
+        job = db.get(job_id)
+        if not job or not store.get().bazarr.url:
+            raise HTTPException(404, "Configure Bazarr and select a managed job")
+        try:
+            result = inspect_sources(store.get(), db, job["media"], store.directory, job_id)
+            # Opaque download handles remain private; the UI receives metadata only.
+            return {
+                **result,
+                "candidates": [
+                    {k: v for k, v in c.items() if k != "subtitle"} for c in result.get("candidates", [])
+                ],
+            }
+        except Exception as error:
+            raise HTTPException(502, f"Bazarr search failed ({type(error).__name__})") from None
+
+    @app.post("/api/jobs/{job_id}/approve", dependencies=[Depends(authenticate)])
+    def approve(job_id: int):
+        import hashlib
+        import json
+
+        from .media import probe
+        from .processor import publish_candidate
+        from .subtitles import parse_srt, validate_cues
+
+        job = db.get(job_id)
+        path = store.directory / "candidates" / f"{job_id}.srt"
+        if not job or job["state"] != "review" or not path.is_file() or path.is_symlink():
+            raise HTTPException(409, "Only a saved review candidate can be approved")
+        rendered = path.read_text()
+        report = json.loads(job["report"] or "{}")
+        if hashlib.sha256(rendered.encode()).hexdigest() != report.get("output_sha256"):
+            raise HTTPException(409, "Candidate changed; retry processing before approval")
+        try:
+            cues = parse_srt(rendered)
+            duration = float(probe(Path(job["media"]))["format"]["duration"])
+            errors = [
+                issue for issue in validate_cues(cues, duration) if "unsuitable reading duration" not in issue
+            ]
+            if errors:
+                raise HTTPException(409, "Candidate has invalid timestamps; repair before approval")
+            report["manual_approval"] = True
+            result = publish_candidate(job, store.get(), store.directory, db, rendered, report)
+            db.update(job_id, **result)
+            return {
+                "message": "Candidate published"
+                if result["state"] == "completed"
+                else result.get("error", "Publication did not complete")
+            }
+        except (ValueError, OSError):
+            raise HTTPException(409, "Candidate or media is unavailable") from None
+
+    @app.get("/api/jobs/{job_id}/candidate", dependencies=[Depends(authenticate)])
+    def candidate(job_id: int):
+        job = db.get(job_id)
+        path = store.directory / "candidates" / f"{job_id}.srt"
+        if not job or not path.is_file() or path.is_symlink():
+            raise HTTPException(404, "No private candidate is available")
+        return FileResponse(path, media_type="application/x-subrip", filename=f"crowbarr-{job_id}.srt")
+
     @app.post("/api/connections/{name}/test", dependencies=[Depends(authenticate)])
     def test_connection(name: str):
         if name not in {"sonarr", "radarr", "bazarr", "plex"}:
@@ -199,9 +363,50 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     def hook(name: str, payload: dict):
         if name not in {"sonarr", "radarr", "bazarr"}:
             raise HTTPException(404, "Unknown integration")
-        if payload.get("eventType") != "Test":
-            service.scan_event.set()
-        return {"message": "Event accepted; libraries will be reconciled"}
+        if payload.get("eventType") == "Test":
+            return {"message": "Connection test accepted"}
+        import time
+
+        from .arr import ArrClient
+        from .library import queue_media
+
+        current = store.get()
+        try:
+            if name in {"sonarr", "radarr"} and payload.get(
+                "series" if name == "sonarr" else "movie", {}
+            ).get("id"):
+                with ArrClient(name, getattr(current, name)) as client:
+                    files = client.event_files(payload)
+                with db.connect() as connection:
+                    for file in files:
+                        connection.execute(
+                            "INSERT OR REPLACE INTO managed_media VALUES (?,?,?,?,?,?)",
+                            (
+                                file.provider,
+                                file.file_id,
+                                file.item_id,
+                                file.path,
+                                file.remote_path,
+                                file.title,
+                            ),
+                        )
+                for file in files:
+                    queue_media(Path(file.path), current, db, time.time(), origin="import")
+                return {"message": f"Queued {len(files)} imported files"}
+            path = payload.get("path") or payload.get("video_path")
+            if path:
+                with db.connect() as connection:
+                    rows = connection.execute(
+                        "SELECT path FROM managed_media WHERE remote_path=? OR path=?", (path, path)
+                    ).fetchall()
+                for row in rows:
+                    queue_media(Path(row[0]), current, db, time.time(), origin="bazarr")
+                if rows:
+                    return {"message": "Subtitle upgrade queued"}
+        except (ValueError, KeyError, OSError):
+            raise HTTPException(422, "Event could not be mapped to a readable managed media file") from None
+        service.scan_event.set()
+        return {"message": "Event lacked a target; library reconciliation requested"}
 
     static = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static), name="static")

@@ -1,4 +1,15 @@
-Agent Test
+
+## What should happen
+
+After deployment > Crowbarr scans library and finds all media with subtitles > Audits subtitles one by one > if not synced it repairs them > publishes new subtitle > Plex detects new subtitle (this could be a multiday job so process can be lazy. Maybe even scheduled to run at specific times only for backlogs.)
+
+Sonarr/radarr add a new media > Bazarr finds subtitle > Crowbarr detects new subtitle and audits it > if not synced it repairs them > publishes new subtitle > Plex detects new subtitle
+
+When a new media is imported by Sonarr/Radarr > it is prioritized and processed immediately, ahead of the backlog.
+
+When a user manually requests audit in crowbarr > it is prioritized and processed immediately, ahead of the backlog.
+
+if crobarr finds media without subtitles > it generates one using Whisper > publishes it > Plex detects new subtitle
 
 ## What I actually tested
 
@@ -444,6 +455,7 @@ The immediate implementation order should be:
 That is what the testing established. The product does not have merely two problems; it has several interacting policies that currently make both primary workflows unlikely to publish on ordinary media.
 
 phase 2 audit:
+
 Next work, in order
 1. Server hardware and runtime audit
    - CPU model, cores and instruction support.

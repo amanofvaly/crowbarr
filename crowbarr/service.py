@@ -11,11 +11,13 @@ import threading
 import time
 from pathlib import Path
 
-from .config import ConfigStore, Settings
+from .config import ConfigStore, Settings, atomic_write
 from .db import Database
-from .integrations import refresh_plex
+from .integrations import deliver_plex, plex_activity, refresh_plex
 from .library import scan
 from .media import ReviewRequired
+from .resources import gate, quiet
+from .resources import snapshot as resource_snapshot
 
 log = logging.getLogger("crowbarr")
 
@@ -25,20 +27,39 @@ def run_job(directory: str, job: dict, settings_data: dict) -> None:
     from .processor import process
 
     settings = Settings.model_validate(settings_data)
+    if job.get("origin", "backlog") not in {"manual", "import"}:
+        os.nice(10)
+        import subprocess
+
+        try:
+            subprocess.run(["ionice", "-c", "3", "-p", str(os.getpid())], capture_output=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            pass
     db = Database(Path(directory) / "crowbarr.db")
     try:
         result = process(job, settings, Path(directory), db)
-        if settings.plex.url and (
-            result["state"] == "completed" or json.loads(result.get("report") or "{}").get("retired_output")
-        ):
+        if settings.plex.url and result.get("output") and result["state"] == "completed":
+            report = json.loads(result.get("report") or "{}")
+            try:
+                report["plex_delivery"] = deliver_plex(
+                    settings.plex, job["media"], result["output"], settings.plex_mappings
+                )
+            except Exception as error:
+                report["plex_delivery"] = {"state": "pending", "reason": type(error).__name__}
+            result["report"] = json.dumps(report)
+        if settings.plex.url and (json.loads(result.get("report") or "{}").get("retired_output")):
             db.notice("plex-refresh", "Subtitles updated; Plex refresh pending.")
         db.update(job["id"], **result)
+        if result.get("report"):
+            atomic_write(Path(directory) / "reports" / f"{job['id']}.json", result["report"])
     except ReviewRequired as error:
         db.update(job["id"], state="review", stage="Needs attention", error=str(error))
     except Exception as error:
         # Avoid exception payloads that may include credentials or external request URLs.
         name = type(error).__name__
-        log.error("Job %s failed (%s)", job["id"], name)
+        # The stored message stays generic, but an operator needs the traceback to act
+        # on a failure at all. It goes to the log, which is not rendered in the UI.
+        log.error("Job %s failed (%s)", job["id"], name, exc_info=True)
         retry = job["attempts"] < settings.max_attempts
         db.update(
             job["id"],
@@ -46,6 +67,8 @@ def run_job(directory: str, job: dict, settings_data: dict) -> None:
             stage="",
             error=f"{name}: processing failed. Check model availability, resources, and media access.",
             ready=time.time() + min(3600, 60 * 2 ** job["attempts"]),
+            origin="retry",
+            priority=40,
         )
 
 
@@ -57,6 +80,11 @@ class Service:
         self.lock_file = None
         self.last_scan = None
         self.scan_count = 0
+        self.resources = {}
+        self.wait_reason = ""
+        self.last_background_end = 0
+        self.last_resource_check = 0
+        self.plex_busy = False
 
     def start(self):
         self.lock_file = (self.store.directory / "service.lock").open("a")
@@ -86,7 +114,34 @@ class Service:
             self.scan_event.clear()
             try:
                 self.scan_count = scan(self.store.get(), self.db)
+                self.db.prune()
                 self.last_scan = time.time()
+                settings = self.store.get()
+                if settings.plex.url:
+                    with self.db.connect() as connection:
+                        pending = [
+                            dict(row)
+                            for row in connection.execute(
+                                "SELECT * FROM jobs WHERE state='completed' AND output IS NOT NULL AND json_extract(report,'$.plex_delivery.state')='pending' ORDER BY updated LIMIT 5"
+                            )
+                        ]
+                    for job in pending:
+                        report = json.loads(job["report"])
+                        attempts = report["plex_delivery"].get("attempts", 0)
+                        if attempts >= 5:
+                            continue
+                        try:
+                            delivery = deliver_plex(
+                                settings.plex, job["media"], job["output"], settings.plex_mappings, timeout=10
+                            )
+                        except Exception as error:
+                            delivery = {"state": "pending", "reason": type(error).__name__}
+                        delivery["attempts"] = attempts + 1
+                        report["plex_delivery"] = delivery
+                        self.db.update(job["id"], report=json.dumps(report))
+                        atomic_write(
+                            self.store.directory / "reports" / f"{job['id']}.json", json.dumps(report)
+                        )
                 for notice in self.db.snapshot()["notices"]:
                     if notice["name"] == "plex-refresh" and self.store.get().plex.url:
                         try:
@@ -103,9 +158,35 @@ class Service:
         context = multiprocessing.get_context("spawn")
         while not self.stop_event.wait(1):
             settings = self.store.get()
-            if settings.paused:
+            if time.monotonic() - self.last_resource_check > 10:
+                self.resources = resource_snapshot()
+                self.last_resource_check = time.monotonic()
+                try:
+                    self.plex_busy = bool(plex_activity(settings.plex)) if settings.plex.url else False
+                except Exception:
+                    self.plex_busy = settings.defer_during_plex
+            self.wait_reason = "Paused by user" if settings.paused else gate(settings, self.resources)
+            if self.wait_reason:
                 continue
-            job = self.db.claim(settings.providers(), settings.discovery_fingerprint())
+            background_reason = (
+                "Plex is playing; background work deferred"
+                if settings.defer_during_plex and self.plex_busy
+                else "Quiet hours"
+                if quiet(settings)
+                else "CPU is busy"
+                if self.resources.get("cpu_load", 0) > settings.max_cpu_load
+                else "Hourly background budget reached"
+                if self.db.background_seconds() >= settings.background_budget_minutes * 60
+                else "Background cooldown"
+                if time.time() - self.last_background_end < settings.backlog_cooldown_seconds
+                else ""
+            )
+            self.wait_reason = background_reason
+            job = self.db.claim(
+                settings.providers(),
+                settings.discovery_fingerprint(),
+                background_allowed=not background_reason,
+            )
             if not job:
                 continue
             child = context.Process(
@@ -119,11 +200,18 @@ class Service:
                 )
                 continue
             started = time.monotonic()
+            wall_started = time.time()
+            self.wait_reason = ""
             interrupted = None
             while child.is_alive():
                 child.join(timeout=1)
                 current = self.store.get()
-                if self.stop_event.is_set():
+                if time.monotonic() - self.last_resource_check > 10:
+                    self.resources = resource_snapshot()
+                    self.last_resource_check = time.monotonic()
+                if self.db.get(job["id"]).get("cancel_requested"):
+                    interrupted = "Cancelled by user"
+                elif self.stop_event.is_set():
                     interrupted = "Service stopping"
                 elif (
                     current.fingerprint() != settings.fingerprint()
@@ -157,9 +245,17 @@ class Service:
                     else ("retry" if retry else "failed"),
                     stage="",
                     error=interrupted or "Inference process exited unexpectedly; check available memory",
-                    ready=time.time() + 120,
+                    ready=time.time() + (0 if interrupted in {"Service stopping", "Processing settings changed"} else 120),
+                    origin=job.get("origin", "backlog") if interrupted in {"Service stopping", "Processing settings changed"} else "retry",
+                    priority=job.get("priority", 0) if interrupted in {"Service stopping", "Processing settings changed"} else 40,
+                    attempts=max(0, job["attempts"]-1) if interrupted in {"Service stopping", "Processing settings changed"} else job["attempts"],
                 )
             elif latest and latest["state"] == "completed":
                 self.scan_event.set()
+            if job.get("origin", "backlog") not in {"manual", "import"}:
+                self.last_background_end = time.time()
+                self.db.record_usage(wall_started, time.monotonic() - started)
+            if interrupted == "Cancelled by user" and latest and latest["state"] == "processing":
+                self.db.update(job["id"], state="cancelled", stage="", error=interrupted)
             child.close()
             shutil.rmtree(self.store.directory / "work", ignore_errors=True)

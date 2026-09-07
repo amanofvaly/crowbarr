@@ -9,7 +9,7 @@ from statistics import median
 
 from .subtitles import Cue, Word, match_passages, tokens, validate_cues
 
-AUDIT_VERSION = 2
+AUDIT_VERSION = 6
 
 
 def _distributed(evidence: list[dict], duration: float) -> bool:
@@ -18,6 +18,35 @@ def _distributed(evidence: list[dict], duration: float) -> bool:
         return True
     buckets = {min(2, int(item["audio_start"] / duration * 3)) for item in evidence}
     return buckets == {0, 1, 2}
+
+
+def _fit_start(evidence: list[dict]) -> dict:
+    """Robust affine fit of authored cue starts onto recognized speech starts.
+
+    Retiming can only shift and scale. Whatever this fit cannot remove is not a
+    timing fault the app is able to repair, so the decision must not call it one.
+    """
+    points = sorted((e["subtitle_start"], e["audio_start"]) for e in evidence)
+    sample = (
+        points if len(points) <= 120 else [points[round(i * (len(points) - 1) / 119)] for i in range(120)]
+    )
+    slopes = [
+        (by - ay) / (bx - ax)
+        for i, (ax, ay) in enumerate(sample)
+        for bx, by in sample[i + 1 :]
+        if bx - ax >= 30
+    ]
+    scale = median(slopes) if slopes else 1.0
+    if not 0.9 <= scale <= 1.1:
+        scale = 1.0
+    offset = median(y - scale * x for x, y in points)
+    residuals = sorted(abs(y - scale * x - offset) for x, y in points)
+    return {
+        "scale": scale,
+        "offset_seconds": offset,
+        "residual_median_seconds": median(residuals),
+        "residual_p95_seconds": residuals[math.ceil(len(residuals) * 0.95) - 1],
+    }
 
 
 def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
@@ -81,11 +110,41 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
             "Insufficient confident coverage of subtitle cues or recognized dialogue",
         )
     else:
-        outlier_ratio = sum(e["error_seconds"] > 1.0 for e in evidence) / len(evidence)
-        if not blocking_structural and p95 <= 1.75 and outlier_ratio < 0.2:
-            decision, reason = "pass", "Distributed audio anchors are within the timing error budget"
-        elif p95 > 2.0 or outlier_ratio >= 0.2:
-            decision, reason = "repair", "Confident audio anchors show substantial timing errors"
+        percentile = math.ceil(len(evidence) * 0.95) - 1
+        # Synchronisation lives in the cue starts. A cue's end is a reading-time
+        # decision, so lingering past speech is authoring, not timing error; only a
+        # cue cut off before its speech finishes is a fault.
+        start_median = median(e["start_delta_seconds"] for e in evidence)
+        start_errors = sorted(abs(e["start_delta_seconds"]) for e in evidence)
+        start_p95 = start_errors[percentile]
+        start_outlier_ratio = sum(abs(e["start_delta_seconds"]) > 1.0 for e in evidence) / len(evidence)
+        truncation = sorted(max(0.0, -e["end_delta_seconds"]) for e in evidence)[percentile]
+        fit = _fit_start(evidence)
+        # What a shift-and-scale repair would leave behind.
+        residual_p95 = fit["residual_p95_seconds"]
+        aligned = abs(start_median) <= 0.5 and start_p95 <= 1.25 and truncation <= 1.0
+        # An identity transform means the cues already sit on the dialogue; the
+        # remaining spread is anchor noise that retiming cannot and must not chase.
+        near_identity = abs(fit["offset_seconds"]) <= 0.35 and abs(fit["scale"] - 1) * duration <= 1.5
+        # Settled means the cues already sit on the dialogue and what is left is
+        # irreducible: reading time on the ends, and anchor noise that a shift or
+        # scale cannot chase without inventing precision the evidence lacks.
+        # Measured on a real library, correctly timed subtitles still scatter around
+        # the fit with a p95 near 1.5-2 s. Judge the centre robustly and leave the tail
+        # room, or the noise floor itself reads as a fault.
+        settled = (
+            near_identity
+            and fit["residual_median_seconds"] <= 0.75
+            and residual_p95 <= 2.5
+        )
+        if not blocking_structural and (aligned or settled):
+            decision, reason = (
+                ("pass", "Cue starts sit on the recognized dialogue")
+                if aligned
+                else ("pass", "Already aligned; the remainder is reading time and anchor noise")
+            )
+        elif start_p95 > 2.0 or start_outlier_ratio >= 0.2 or abs(start_median) > 0.5:
+            decision, reason = "repair", "Cue starts are offset from the recognized dialogue"
         else:
             decision, reason = (
                 "inconclusive",
@@ -105,30 +164,45 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
         "matched_token_ratio": match["matched_token_ratio"],
         "median_error_seconds": median(errors) if errors else None,
         "p95_error_seconds": p95,
+        "start_p95_seconds": start_p95 if evidence and sufficient else None,
+        "start_residual_p95_seconds": residual_p95 if evidence and sufficient else None,
+        "start_fit": fit if evidence and sufficient else None,
         "signed_offset_seconds": median(e["start_delta_seconds"] for e in evidence) if evidence else None,
         "tolerances": {"start_seconds": 0.75, "end_seconds": 1.0},
         "structural_issues": structural,
         "blocking_structural_issues": blocking_structural,
         "evidence": evidence,
     }
+
+
 def improved(before: dict, after: dict) -> bool:
     if before["decision"] != "repair" or after["decision"] != "pass":
         return False
     # Compare the same authored cues; replacement text cannot game the score.
     if [e["cue"] for e in before["evidence"]] != [e["cue"] for e in after["evidence"]]:
         return False
+    # Judge the repair on the axis it can actually move. Cue durations are preserved,
+    # so reading time rides along unchanged and must not decide whether a shift worked.
     regressions = [
-        candidate["error_seconds"] - original["error_seconds"]
+        abs(candidate["start_delta_seconds"]) - abs(original["start_delta_seconds"])
         for original, candidate in zip(before["evidence"], after["evidence"], strict=True)
     ]
-    # Noisy ASR boundaries can move slightly in either direction. Reject broad or
-    # severe regressions, while allowing a small outlier budget when aggregates improve.
+    # Judge regressions in aggregate. A correct global shift still pushes the few
+    # anchors that were mismatched further out, so any single-anchor veto rejects
+    # good repairs on real media, where anchors scatter with a p95 near 1.5 s.
+    count = len(regressions)
     if (
-        sum(regression > 0.25 for regression in regressions) / len(regressions) > 0.1
-        or max(regressions) > 0.75
+        sum(regression > 0.25 for regression in regressions) / count > 0.25
+        or sum(regression > 0.75 for regression in regressions) / count > 0.1
     ):
         return False
-    return (
-        after["p95_error_seconds"] <= before["p95_error_seconds"] * 0.8
-        and before["p95_error_seconds"] - after["p95_error_seconds"] >= 0.5
-    )
+    # A repair must never start truncating speech that the original covered.
+    if max(
+        max(0.0, -candidate["end_delta_seconds"]) - max(0.0, -original["end_delta_seconds"])
+        for original, candidate in zip(before["evidence"], after["evidence"], strict=True)
+    ) > 0.5:
+        return False
+    index = math.ceil(len(before["evidence"]) * 0.95) - 1
+    was = sorted(abs(e["start_delta_seconds"]) for e in before["evidence"])[index]
+    now = sorted(abs(e["start_delta_seconds"]) for e in after["evidence"])[index]
+    return now <= was * 0.8 and was - now >= 0.5
