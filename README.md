@@ -63,88 +63,39 @@ For a detailed walkthrough of the entire pipeline, see [workflow.html](workflow.
 
 ## Installation
 
-### Docker Compose
-
-Save this as `compose.yaml`, change the two marked lines, then run `docker compose up -d`.
-
-```yaml
-services:
-  crowbarr:
-    image: ghcr.io/amanofvaly/crowbarr:latest
-    container_name: crowbarr
-    restart: unless-stopped
-    init: true
-    user: "1000:1000"            # the user and group that own your media
-    ports:
-      - "8449:8449"
-    volumes:
-      - ./config:/config
-      - /path/to/media:/media    # your library
-    stop_grace_period: 45s
-```
-
-For an NVIDIA GPU, use the `-cuda` image and add the device reservation. This needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host.
-
-```yaml
-    image: ghcr.io/amanofvaly/crowbarr:latest-cuda
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-```
-
-### Docker Run
+Linux x86_64:
 
 ```sh
-docker run -d \
-  --name crowbarr \
-  --restart unless-stopped \
-  --user 1000:1000 \
-  -p 8449:8449 \
-  -v ./config:/config \
-  -v /path/to/media:/media \
-  ghcr.io/amanofvaly/crowbarr:latest
+curl -fsSL https://github.com/amanofvaly/crowbarr/releases/latest/download/install-crowbarr.sh | sudo bash
 ```
 
-### Parameters
+Open `http://localhost:8449`. The installer adds Crowbarr as a system service and keeps
+its database, settings, models, and cached transcripts in `/var/lib/crowbarr`.
 
-| Parameter | Purpose |
-| --- | --- |
-| `-p 8449:8449` | Web dashboard |
-| `-v /config` | Database, settings, models and cached transcripts |
-| `-v /media` | Your library. Crowbarr writes subtitles beside your video files |
-| `--user` | Runs as this uid and gid so published subtitles are readable |
-
-Allow disk space for speech models and temporary audio extraction, roughly 115 MB per hour of audio.
+For Docker and NVIDIA installations, see [Install Crowbarr with Docker](docs/docker.md).
 
 ### First run
 
-Open `http://localhost:8449`.
-
-1. Set your dashboard password. It is stored in `/config/dashboard.json`.
-2. Under **Settings, Media managers**, enter your Sonarr and Radarr URL and API key.
-3. If paths differ between Crowbarr and Sonarr, add a mapping under settings. For example `/tv => /media/tv`.
-4. Under **Settings**, choose the model size and compute backend.
+1. Set your dashboard password.
+2. Add Sonarr and Radarr under **Settings, Media managers**.
+3. Add path mappings when those services report different media paths.
+4. Choose the model and processing device.
 
 ---
 
 ## Updating
 
 ```sh
-docker compose pull
-docker compose up -d
+sudo crowbarr-update
 ```
 
-The `/config` volume holds the queue, settings, downloaded models and cached transcripts, and is preserved across updates.
+The service stops while the program is replaced, then resumes with the existing data in
+`/var/lib/crowbarr`. An interrupted job returns to the queue. Other queued and completed
+work remains in place.
 
-Updating with jobs queued is safe. A job that was running is requeued and runs again on startup.
-
-Some releases change the audit policy version, shown in the dashboard footer. Crowbarr then re-audits everything in review or failed, which takes processing time and may publish subtitles an earlier version rejected. Results that passed, and results you skipped, are not touched. See [CHANGELOG.md](CHANGELOG.md).
-
-To roll back, pin an earlier tag such as `ghcr.io/amanofvaly/crowbarr:0.3.3` and run `docker compose up -d`. A rollback does not undo an audit policy change, because the database keeps the newer policy version.
+Some releases change the audit policy version shown in the dashboard footer. Crowbarr
+then rechecks jobs in review or failed. Passed and skipped results remain settled. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ---
 

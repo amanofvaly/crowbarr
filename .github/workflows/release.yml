@@ -64,24 +64,100 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
+  native-linux:
+    name: Build Linux x86_64 package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build application
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller==6.16.0 '.[asr]'
+          pyinstaller \
+            --clean \
+            --noconfirm \
+            --onedir \
+            --name crowbarr \
+            --collect-all crowbarr \
+            --collect-all faster_whisper \
+            --collect-all ctranslate2 \
+            crowbarr/__main__.py
+
+      - name: Verify packaged server
+        run: |
+          data_dir="$(mktemp -d)"
+          CROWBARR_DATA="$data_dir" dist/crowbarr/crowbarr --host 127.0.0.1 --port 18449 >crowbarr.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..20}; do
+            if curl -fsS http://127.0.0.1:18449/health | grep -F '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat crowbarr.log
+          exit 1
+
+      - name: Package release assets
+        run: |
+          mkdir -p release-assets/staging
+          cp -a dist/crowbarr release-assets/staging/crowbarr
+          cp LICENSE release-assets/staging/crowbarr/LICENSE
+          tar -C release-assets/staging -czf release-assets/crowbarr-linux-x86_64.tar.gz crowbarr
+          cp packaging/install-crowbarr.sh release-assets/install-crowbarr.sh
+          chmod 0755 release-assets/install-crowbarr.sh
+          cd release-assets
+          sha256sum crowbarr-linux-x86_64.tar.gz > crowbarr-linux-x86_64.tar.gz.sha256
+          rm -rf staging
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux
+          path: release-assets/*
+          if-no-files-found: error
+
   github-release:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: image
+    needs: [image, native-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux
+          path: release-assets
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          INSTALL_NOTES: |
+            ## Install on Linux x86_64
+
+            ```sh
+            curl -fsSL https://github.com/amanofvaly/crowbarr/releases/latest/download/install-crowbarr.sh | sudo bash
+            ```
+
+            Open `http://localhost:8449` after installation. Update later with `sudo crowbarr-update`.
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "GitHub release $GITHUB_REF_NAME already exists"
+            gh release upload "$GITHUB_REF_NAME" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
           else
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
+              --notes "$INSTALL_NOTES" \
               --title "Crowbarr ${GITHUB_REF_NAME#v}"
           fi

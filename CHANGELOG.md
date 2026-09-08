@@ -82,6 +82,13 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.3.5
+
+- Linux x86_64 releases now include a runnable Crowbarr package and installer. The
+  installer registers a system service, keeps application data in `/var/lib/crowbarr`,
+  and installs `crowbarr-update` for later upgrades. Docker remains available as a
+  separate installation method.
+
 ### 0.3.4
 
 - Dashboard is made cleaner by removing redundant edit candidates.
