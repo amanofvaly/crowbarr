@@ -125,6 +125,9 @@ class Settings(BaseModel):
     sampled_audit: bool = True
     bazarr_download_alternatives: bool = False
     max_provider_attempts: int = Field(default=3, ge=1, le=10)
+    # Retained so existing installs keep loading and their cached transcripts stay
+    # valid. Track selection no longer consults it: recognition establishes the spoken
+    # language from the audio, which is a better answer than a checkbox.
     allow_untagged_audio: bool = False
     allow_untagged_subtitles: bool = False
     min_match_ratio: float = Field(default=0.75, ge=0.5, le=1)

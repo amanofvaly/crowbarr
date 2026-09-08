@@ -1,6 +1,6 @@
 import pytest
 
-from crowbarr.audit import audit, improved
+from crowbarr.audit import ALIGNED_START_P95, audit, improved, improvement
 from crowbarr.subtitles import Cue, Word
 
 TEXT = ["Please open the front door", "We should leave before sunrise", "Bring your coat and shoes"]
@@ -88,6 +88,136 @@ def test_repair_must_pass_and_improve():
     assert not improved(before, before)
     worse, _ = fixture(6)
     assert not improved(before, audit(worse, words, 12))
+
+
+def test_small_constant_offset_is_not_sent_to_review_over_noisy_anchors():
+    """A tight subtitle with a few wild anchors is correct, whichever path accepts it.
+
+    Real measurement: 30 anchors, median start error 0.27 s, three mismatched anchors
+    dragging the 95th percentile to 3.6 s. The fit clears every scatter limit, so the
+    file must be left alone rather than flagged for a repair that cannot help it.
+    """
+    words, cues, clock = [], [], 0.0
+    for index in range(40):
+        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
+        start = clock
+        for token in phrase:
+            words.append(Word(clock, clock + 0.4, token, 0.95))
+            clock += 0.5
+        bad = 3.5 if index in (11, 27, 33) else 0.0
+        cues.append(Cue(start + 0.42 + bad, clock - 0.1 + 0.42 + bad, " ".join(phrase)))
+        clock += 8.0
+    result = audit(cues, words, clock)
+    assert result["start_p95_seconds"] > ALIGNED_START_P95, "the tail is genuinely noisy"
+    assert abs(result["start_fit"]["offset_seconds"]) > 0.35, "and the fit offset is over the old limit"
+    assert result["decision"] == "pass"
+
+
+def test_a_lag_split_between_offset_and_scale_is_still_a_lag():
+    """Real measurement: cues 0.93 s late passed as aligned because the fit charged
+    0.47 s to its offset and the rest to its scale, each under its own limit."""
+    words, cues, clock = [], [], 0.0
+    for index in range(40):
+        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
+        start = clock
+        for token in phrase:
+            words.append(Word(clock, clock + 0.4, token, 0.95))
+            clock += 0.5
+        # A constant 0.47 s late plus a slow drift that reaches another 0.5 s by the end.
+        lag = 0.47 + 0.5 * (index / 39)
+        cues.append(Cue(start + lag, clock - 0.1 + lag, " ".join(phrase)))
+        clock += 8.0
+    result = audit(cues, words, clock)
+    assert abs(result["start_fit"]["offset_seconds"]) <= 0.5, "each fit term looks small"
+    assert result["signed_offset_seconds"] > 0.5, "yet the cues are measurably late"
+    assert result["decision"] == "repair"
+
+
+def _late_subtitle(clipped_indices):
+    """A subtitle 1.4 s late, where the named lines end before their speech does."""
+    words, cues, shifted, clock = [], [], [], 0.0
+    for index in range(40):
+        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
+        start = clock
+        for token in phrase:
+            words.append(Word(clock, clock + 0.4, token, 0.95))
+            clock += 0.5
+        speech_end = clock - 0.1
+        end = speech_end - 0.6 if index in clipped_indices else speech_end
+        cues.append(Cue(start + 1.4, end + 1.4, " ".join(phrase)))
+        shifted.append(Cue(start, end, " ".join(phrase)))
+        clock += 8.0
+    return audit(cues, words, clock), audit(shifted, words, clock)
+
+
+def test_one_clipped_line_does_not_discard_a_correct_repair():
+    """Measured on the real library: a 1.19 s lag fixed to 0.15 s was thrown away
+    because a single line of 43 lost 0.554 s of trailing reading time."""
+    verdict = improvement(*_late_subtitle({17}))
+    assert verdict["accepted"], verdict["reason"]
+
+
+def test_a_shift_that_clips_many_lines_is_still_refused():
+    verdict = improvement(*_late_subtitle(set(range(12))))
+    assert not verdict["accepted"]
+    assert "cut short" in verdict["reason"]
+
+
+def test_a_refused_repair_always_says_why():
+    """A verdict nobody can inspect is a label. Every refusal carries a stated reason."""
+    cues, words = fixture(4)
+    before = audit(cues, words, 8)
+    worse, _ = fixture(6)
+    verdict = improvement(before, audit(worse, words, 12))
+    assert not verdict["accepted"]
+    assert verdict["reason"], "a refusal without a reason cannot be shown to anyone"
+
+
+def test_an_accepted_repair_publishes_the_checks_it_cleared():
+    words, cues, clock, shifted = [], [], 0.0, []
+    for index in range(40):
+        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
+        start = clock
+        for token in phrase:
+            words.append(Word(clock, clock + 0.4, token, 0.95))
+            clock += 0.5
+        bad = 5.0 if index in (7, 19, 31) else 0.0
+        cues.append(Cue(start + 1.4 + bad, clock - 0.1 + 1.4 + bad, " ".join(phrase)))
+        shifted.append(Cue(start + bad, clock - 0.1 + bad, " ".join(phrase)))
+        clock += 8.0
+    verdict = improvement(audit(cues, words, clock), audit(shifted, words, clock))
+    assert verdict["accepted"]
+    assert len(verdict["checks"]) == 5
+    for check in verdict["checks"]:
+        assert {"name", "measured", "limit", "passed", "failure"} <= set(check)
+        assert check["passed"]
+
+
+def test_audit_publishes_every_threshold_it_judged():
+    cues, words = fixture()
+    result = audit(cues, words, 8)
+    assert result["checks"], "a sufficient audit must show what it measured"
+    for check in result["checks"]:
+        assert {"name", "measured", "limit", "passed"} <= set(check)
+    # A decision to leave the subtitle alone means nothing was over its limit.
+    assert result["decision"] != "pass" or all(check["passed"] for check in result["checks"])
+
+
+def test_inconclusive_names_the_measurement_that_fell_short():
+    """Measured on a real film: 57.7% text match against a 65% floor arrived as the
+    bare sentence "Insufficient confident coverage", with no number anywhere."""
+    cues, words = fixture()
+    for cue in cues:
+        cue.text = "Unrelated repeated phrase here"
+    result = audit(cues, words, 8)
+    assert result["decision"] == "inconclusive"
+    assert result["coverage_checks"], "an inconclusive verdict must still show its evidence"
+    short = [check for check in result["coverage_checks"] if not check["passed"]]
+    assert short, "something must have fallen short to reach this verdict"
+    for check in short:
+        assert check["measured"] in result["reason"]
+        assert check["limit"] in result["reason"]
+    assert "recognized_words" in result and "low_confidence_ratio" in result
 
 
 def test_wrong_text_cannot_pass_just_because_timestamps_match():

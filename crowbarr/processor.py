@@ -7,12 +7,13 @@ import textwrap
 from pathlib import Path
 from statistics import median
 
-from .audit import audit, improved
+from .audit import audit, improvement
 from .config import Settings, atomic_write
 from .db import Database
 from .library import allowed, signature, source_subtitle, subtitle_sources
 from .media import (
     ReviewRequired,
+    audio_candidates,
     choose_audio,
     embedded_subtitles,
     extract_audio,
@@ -321,12 +322,13 @@ def process(
     from .inference import align, transcribe
 
     progress_updated = [0.0]
+    recognition_stage = ["Recognizing dialogue"]
 
     def progress(position, total):
         if time.monotonic() - progress_updated[0] > 2 or position >= total:
             db.update(
                 job["id"],
-                stage="Recognizing dialogue",
+                stage=recognition_stage[0],
                 progress_current=max(0, min(position, total)),
                 progress_total=total,
             )
@@ -342,6 +344,7 @@ def process(
     media = Path(job["media"])
     metadata = probe(media)
     audio_stream = choose_audio(metadata, settings)
+    audio_selection = _describe_audio_choice(audio_candidates(metadata), audio_stream)
     cache = directory / "models"
     cache.mkdir(exist_ok=True)
     work = directory / "work"
@@ -351,6 +354,8 @@ def process(
         offset, duration = extract_audio(media, audio, metadata, audio_stream)
         issues = []
         warnings = []
+        if audio_selection["note"]:
+            warnings.append(audio_selection["note"])
         # An explicit "generate" request means the user has already judged whatever
         # exists to be unusable, so discovered sources and providers are both skipped.
         forced_generation = job.get("directive") == "generate"
@@ -417,9 +422,17 @@ def process(
             if candidates and settings.sampled_audit and cache_transcript and duration > 600
             else []
         )
-        db.update(
-            job["id"], stage="Sampling dialogue across the runtime" if windows else "Recognizing dialogue"
-        )
+        initial_sampling_windows = list(windows)
+        full_audit_escalation = False
+        if windows:
+            recognition_stage[0] = "Sampling existing subtitle across the runtime"
+        elif forced_generation:
+            recognition_stage[0] = "Generating a fresh subtitle from full audio"
+        elif candidates:
+            recognition_stage[0] = "Auditing existing subtitle against full dialogue"
+        else:
+            recognition_stage[0] = "No usable subtitle found; recognizing full audio"
+        db.update(job["id"], stage=recognition_stage[0])
         if cache_transcript:
             words, transcription_issues, transcript_cache_hit = _recognized_words(
                 media, audio, settings, directory, cache, transcriber, windows=windows
@@ -463,7 +476,9 @@ def process(
             )
 
         if windows and all(candidate["audit"]["decision"] == "inconclusive" for candidate in candidates):
-            db.update(job["id"], stage="Samples inconclusive; recognizing full dialogue")
+            full_audit_escalation = True
+            recognition_stage[0] = "Sample inconclusive; auditing against full dialogue"
+            db.update(job["id"], stage=recognition_stage[0])
             words, transcription_issues, transcript_cache_hit = _recognized_words(
                 media, audio, settings, directory, cache, transcriber
             )
@@ -498,6 +513,8 @@ def process(
         report.update(
             bazarr=provider_result,
             sampling_windows=windows,
+            initial_sampling_windows=initial_sampling_windows,
+            full_audit_escalation=full_audit_escalation,
             mode="authored_timing" if original else "generated",
             model=settings.model,
             transcript_cache_hit=transcript_cache_hit,
@@ -507,6 +524,7 @@ def process(
             source_arbitration=arbitration,
             selected_source=selected["label"] if selected else None,
             selected_source_kind=selected["kind"] if selected else None,
+            audio_selection=audio_selection,
         )
         if original:
             db.update(job["id"], stage="Auditing existing subtitle")
@@ -605,7 +623,16 @@ def process(
 
             if any(not spoken(c.text) for c in original):
                 warnings.append("Standalone sound captions use timing interpolated from nearby speech")
-        db.update(job["id"], stage="Aligning words to audio")
+        db.update(
+            job["id"],
+            stage=(
+                "Repairing existing subtitle timing"
+                if original
+                else "Refining fresh subtitle timing"
+                if refine_generated
+                else "Preparing fresh subtitle file"
+            ),
+        )
         eligible_passages = [passage for passage in passages if passage.authored] if original else passages
         if original:
             aligned, timing_model = _retime_authored(original, before)
@@ -648,12 +675,16 @@ def process(
             after = _audit_source(
                 aligned, timeline_words, duration, windows, before.get("sample_cue_indices")
             )
-            better = [c.text for c in aligned] == [c.text for c in original] and improved(before, after)
-            report["audit"].update(after=after, improved=better)
-            if not better:
-                issues.append(
-                    "Repair did not demonstrate sufficient timing improvement while preserving every authored cue"
-                )
+            verdict = improvement(before, after)
+            if [c.text for c in aligned] != [c.text for c in original]:
+                verdict = {
+                    "accepted": False,
+                    "reason": "the repair did not preserve every authored line of text",
+                    "checks": verdict["checks"],
+                }
+            report["audit"].update(after=after, improved=verdict["accepted"], improvement=verdict)
+            if not verdict["accepted"]:
+                issues.append(f"Repair withheld because {verdict['reason']}")
         report.update(
             {
                 "mode": "authored_timing" if original else "generated",
@@ -701,6 +732,44 @@ def process(
                 "report": json.dumps(report),
             }
         return publish_candidate(job, settings, directory, db, rendered, report)
+
+
+def _describe_audio_choice(tracks: list[dict], chosen: dict) -> dict:
+    """Explain the track choice, including when a language tag had to be overruled."""
+    picked = next(
+        (track for track in tracks if track["stream"] is chosen),
+        {"index": chosen.get("index"), "language": "unknown", "channels": 0, "tier": 0},
+    )
+    peers = [track for track in tracks if track["tier"] == picked["tier"] and track is not picked]
+    note = None
+    if picked["tier"] and peers:
+        note = (
+            f"No audio track is tagged English. Using stream {picked['index']} tagged "
+            f"{picked['language']} of {len(peers) + 1} untagged or differently tagged tracks; "
+            "the spoken language is verified from the audio itself."
+        )
+    elif picked["tier"]:
+        note = (
+            f"The only dialogue track is tagged {picked['language']}, not English. Using it anyway "
+            "and verifying the spoken language from the audio itself."
+        )
+    elif peers:
+        note = (
+            f"{len(peers) + 1} interchangeable English tracks; using stream {picked['index']} "
+            f"({picked['channels']} channels) because it carries the fullest mix."
+        )
+    return {
+        "stream": picked["index"],
+        "language_tag": picked["language"],
+        "channels": picked["channels"],
+        "tag_matched_english": picked["tier"] == 0,
+        "alternates": [
+            {"stream": track["index"], "language_tag": track["language"], "channels": track["channels"]}
+            for track in tracks
+            if track is not picked
+        ],
+        "note": note,
+    }
 
 
 def publish_candidate(job, settings, directory, db, rendered, report):

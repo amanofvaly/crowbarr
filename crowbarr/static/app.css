@@ -272,6 +272,9 @@ p {
   min-width: 0;
 }
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
   height: 60px;
   background: var(--header);
   display: flex;
@@ -943,24 +946,96 @@ label small {
 #notice {
   margin-top: 15px;
 }
-.toast {
-  position: fixed;
-  right: 22px;
-  bottom: 20px;
-  z-index: 70;
-  width: auto;
-  max-width: min(520px, calc(100vw - 30px));
+.progress-context {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.inline-progress .progress-context {
+  margin-top: 4px;
+  font-size: 10px;
+}
+.audit-explanation,
+.recognition-notes {
+  margin-top: 20px;
+  padding: 14px 16px;
+  background: var(--raised);
   border: 1px solid var(--line);
-  border-radius: 3px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-  padding: 13px 18px;
+}
+.audit-explanation.pass {
+  background: color-mix(in srgb, var(--green-strong) 9%, var(--surface));
+  border-color: color-mix(in srgb, var(--green-strong) 38%, var(--line));
+}
+.audit-explanation.warning {
+  background: color-mix(in srgb, var(--warn) 9%, var(--surface));
+  border-color: color-mix(in srgb, var(--warn) 38%, var(--line));
+}
+.audit-explanation h3,
+.recognition-notes h3 {
+  margin: 0 0 4px;
   font-size: 13px;
+}
+.audit-explanation p,
+.recognition-notes p {
+  margin: 0 0 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.audit-explanation p {
+  margin-bottom: 0;
   color: var(--text);
 }
-.toast.error {
-  color: var(--danger);
-  border-color: var(--danger);
+.measure {
+  width: 100%;
+  margin-top: 14px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.measure caption {
+  caption-side: top;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+.measure th {
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+}
+.measure td {
+  padding: 5px 10px 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  color: var(--text);
+  vertical-align: top;
+}
+.measure td:nth-child(2),
+.measure td:nth-child(3) {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.measure td:nth-child(3) {
+  color: var(--muted);
+}
+.measure tr:last-child td {
+  border-bottom: 0;
+}
+.measure tr.over td:nth-child(2) {
+  color: var(--warn);
+  font-weight: 600;
+}
+.recognition-notes ul {
+  margin: 0;
+  padding-left: 18px;
 }
 .api-grid {
   display: grid;
@@ -1482,9 +1557,8 @@ dialog::backdrop {
   font-variant-numeric: tabular-nums;
 }
 
-/* Every finished file announces its verdict; they stack when work is quick.
-   Named apart from the existing single-slot .toast so the two cannot collide. */
-.verdicts {
+/* Actions and finished jobs share one visible, predictable notification stack. */
+.notifications {
   position: fixed;
   right: 22px;
   top: 74px;
@@ -1495,7 +1569,7 @@ dialog::backdrop {
   width: min(360px, calc(100vw - 44px));
   pointer-events: none;
 }
-.verdict {
+.notification {
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -1505,11 +1579,12 @@ dialog::backdrop {
   background: var(--green-strong);
   color: #fff;
   box-shadow: var(--shadow);
-  animation: verdict-in 160ms ease-out;
+  animation: notification-in 160ms ease-out;
 }
-@keyframes verdict-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) { .verdict { animation: none; } }
-.verdict.leaving { opacity: 0; transition: opacity 240ms ease; }
-.verdict strong { font-size: 12px; font-weight: 600; white-space: nowrap; color: #fff; }
-.verdict span { font-size: 12px; color: rgba(255, 255, 255, 0.82); overflow-wrap: anywhere; }
-.verdict.review, .verdict.failed { background: var(--warn); }
+@keyframes notification-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .notification { animation: none; } }
+.notification.leaving { opacity: 0; transition: opacity 240ms ease; }
+.notification strong { font-size: 12px; font-weight: 600; white-space: nowrap; color: #fff; }
+.notification span { font-size: 12px; color: rgba(255, 255, 255, 0.82); overflow-wrap: anywhere; }
+.notification.warning { background: var(--warn); }
+.notification.error { background: var(--danger); }
