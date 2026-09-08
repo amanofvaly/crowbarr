@@ -92,6 +92,15 @@ let listQuery = "",
   setup = false,
   timer;
 let renderedKey = null;
+function syncAttributes(current, wanted) {
+  for (const attribute of [...current.attributes]) {
+    if (!wanted.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+  }
+  for (const attribute of [...wanted.attributes]) {
+    if (current.getAttribute(attribute.name) !== attribute.value)
+      current.setAttribute(attribute.name, attribute.value);
+  }
+}
 function merge(current, draft) {
   // Walk both trees and touch only the elements that actually differ. An element whose
   // markup is unchanged is never replaced, so a selection, a focused control or a
@@ -106,7 +115,10 @@ function merge(current, draft) {
     } else if (node.tagName !== next.tagName) {
       node.replaceWith(next);
     } else if (node.outerHTML !== next.outerHTML) {
-      if (node.children.length && next.children.length) merge(node, next);
+      if (node.children.length && next.children.length) {
+        syncAttributes(node, next);
+        merge(node, next);
+      }
       else node.replaceWith(next);
     }
   }
@@ -125,8 +137,7 @@ function paint(id, markup) {
 }
 let jobs = new Map(),
   media = [],
-  total = 0,
-  toastTimer;
+  total = 0;
 const navigation = [
   ["dashboard", "Dashboard"],
   ["activity", "Activity"],
@@ -136,12 +147,20 @@ const navigation = [
   ["settings", "Settings"],
   ["api", "API & Webhooks"],
 ];
-function toast(text, error = false) {
-  $("toast").textContent = text;
-  $("toast").className = `toast show${error ? " error" : ""}`;
-  $("toast").hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => ($("toast").hidden = true), 6500);
+function notification(heading, text, tone = "success") {
+  const node = document.createElement("div");
+  node.className = `notification ${tone}`;
+  node.innerHTML = `<strong>${esc(heading)}</strong><span>${esc(text)}</span>`;
+  $("notifications").append(node);
+  while ($("notifications").children.length > 6)
+    $("notifications").firstElementChild.remove();
+  setTimeout(() => {
+    node.classList.add("leaving");
+    setTimeout(() => node.remove(), 260);
+  }, 6500);
+}
+function toast(text, error = false, heading = error ? "Action failed" : "Done") {
+  notification(heading, text, error ? "error" : "success");
 }
 async function api(path, method = "GET", body) {
   const response = await fetch(`/api${path}`, {
@@ -201,8 +220,34 @@ function progressMarkup(job, compact = false) {
         Math.max(0, (job.progress_current / job.progress_total) * 100),
       )
     : null;
+  const stage = job.stage || "Recognizing dialogue";
+  const sampled = stage.startsWith("Sampling existing subtitle");
+  const escalated = stage.startsWith("Sample inconclusive");
+  const compactStage = sampled
+    ? "Sampling existing subtitle"
+    : escalated
+      ? "Full audit after inconclusive sample"
+      : job.directive === "generate"
+        ? "Generating fresh subtitle"
+        : stage.startsWith("No usable subtitle")
+          ? "Generating from full audio"
+          : stage.startsWith("Auditing existing subtitle")
+            ? "Full audit of existing subtitle"
+            : stage;
+  const explanation = sampled
+    ? "checking up to 6 minutes across the beginning, middle, and end"
+    : escalated
+      ? "the initial sample did not provide enough evidence for a verdict"
+      : job.directive === "generate"
+        ? "a fresh subtitle was explicitly requested"
+        : stage.startsWith("No usable subtitle")
+          ? "no usable authored subtitle was found"
+          : stage.startsWith("Auditing existing subtitle")
+            ? "checking an existing authored subtitle"
+            : "analyzing dialogue audio";
+  const amount = `${duration(job.progress_current)} of ${duration(job.progress_total)} ${sampled ? "sampled" : "full"} audio`;
   return measured
-    ? `<div class="${compact ? "inline-progress" : ""}"><div class="progress-label"><span>${compact ? "Audio processed" : esc(job.stage || "Recognizing dialogue")}</span><strong>${percent.toFixed(1)}%</strong></div><progress aria-label="Audio processed during recognition" max="${job.progress_total}" value="${job.progress_current}"></progress>${compact ? "" : `<p class="hint mt-8">${duration(job.progress_current)} of ${duration(job.progress_total)} audio · recognition stage</p>`}</div>`
+    ? `<div class="${compact ? "inline-progress" : ""}"><div class="progress-label"><span>${esc(compact ? compactStage : stage)}</span><strong>${percent.toFixed(1)}%</strong></div><progress aria-label="${esc(stage)}: ${percent.toFixed(1)}% of audio analyzed" max="${job.progress_total}" value="${job.progress_current}"></progress><p class="progress-context">${amount}${compact ? "" : ` · ${explanation}`}</p></div>`
     : `<div class="stage-working">${icon("refresh")}<span>${esc(job.stage || "Preparing worker")}${job.cached === 1 ? " · reusing recognised audio" : job.cached === 0 ? " · listening for the first time" : ""}</span>${job.started ? `<em class="elapsed" data-since="${job.started}">${Math.round(Date.now() / 1000 - job.started)}s</em>` : ""}</div>`;
 }
 function jobButtons(job) {
@@ -218,7 +263,10 @@ function activeJob() {
 
 function rows(items, compact = false) {
   items.forEach((j) => jobs.set(j.id, j));
-  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${route === "activity" ? "Requested" : "Finished"}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
+  const timeHeading = items.every((job) => FINISHED.includes(job.state))
+    ? "Finished"
+    : "Requested";
+  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${timeHeading}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
 }
 function systemPanel() {
   const r = status?.resources || {};
@@ -531,7 +579,6 @@ function settingsPage() {
           "Refine generated timings with WhisperX",
           "Requires the optional alignment package and additional memory.",
         ) +
-        check("allow_untagged_audio", "Try audio without a language tag") +
         check(
           "allow_untagged_subtitles",
           "Treat untagged SRT files as English",
@@ -830,15 +877,11 @@ const verdicts = {
 };
 let announced = null;
 function verdictToast(job) {
-  const node = document.createElement("div");
-  node.className = `verdict ${job.state}`;
-  node.innerHTML = `<strong>${esc(verdicts[job.state] || job.state)}</strong><span>${esc(title(job))}</span>`;
-  $("verdicts").append(node);
-  while ($("verdicts").children.length > 6) $("verdicts").firstElementChild.remove();
-  setTimeout(() => {
-    node.classList.add("leaving");
-    setTimeout(() => node.remove(), 260);
-  }, 6000);
+  notification(
+    verdicts[job.state] || job.state,
+    title(job),
+    ["review", "failed"].includes(job.state) ? "warning" : "success",
+  );
 }
 function announce(list) {
   // First payload establishes what is already known; only later changes are news.
@@ -909,13 +952,50 @@ async function refresh() {
     $("notice").hidden = false;
   }
 }
+function measureTable(list, caption) {
+  if (!list || !list.length) return "";
+  const rows = list
+    .map(
+      (check) =>
+        `<tr class="${check.passed ? "within" : "over"}"><td>${esc(check.name)}</td><td>${esc(check.measured)}</td><td>${esc(check.limit)}</td></tr>`,
+    )
+    .join("");
+  return `<table class="measure"><caption>${esc(caption)}</caption><thead><tr><th>Measured</th><th>Result</th><th>Limit</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
 async function detail(id) {
   const job = await api(`/jobs/${id}`);
   jobs.set(job.id, job);
   const report = job.report || {};
+  const warnings = report.warnings || [];
+  const legacyEscalation =
+    report.mode === "authored_timing" &&
+    warnings.some((warning) => warning.startsWith("Sample ")) &&
+    warnings.some((warning) => warning.startsWith("Chunk "));
+  const fullAuditEscalation =
+    report.full_audit_escalation === true || legacyEscalation;
+  const sampledSeconds = (report.initial_sampling_windows || []).reduce(
+    (sum, [start, end]) => sum + Math.max(0, end - start),
+    0,
+  );
+  const audioAnalysis = fullAuditEscalation
+    ? "Full audio — the initial sample was inconclusive"
+    : report.mode === "generated"
+      ? "Full audio — required to generate a fresh subtitle"
+      : sampledSeconds
+        ? `${duration(sampledSeconds)} sampled across the runtime`
+        : report.mode === "authored_timing"
+          ? "Full audio used to audit the existing subtitle"
+          : null;
   $("detail-title").textContent = title(job);
   const facts = [
     ["Outcome", labels[job.state] || job.state],
+    [
+      "Requested work",
+      job.directive === "generate"
+        ? "Generate a fresh subtitle from the full audio"
+        : "Audit an existing subtitle and repair it only when needed",
+    ],
+    ...(audioAnalysis ? [["Audio analysis", audioAnalysis]] : []),
     ["Requested", new Date(job.created * 1000).toLocaleString()],
     ...(FINISHED.includes(job.state)
       ? [["Finished", new Date(job.updated * 1000).toLocaleString()]]
@@ -923,6 +1003,22 @@ async function detail(id) {
     ["Origin", origins[job.origin] || job.origin],
     ["Attempt", job.attempts],
     ["Output", job.output || "No published output"],
+    ...(report.selected_source
+      ? [
+          [
+            "Audited subtitle",
+            `${report.selected_source}${report.selected_source_kind ? ` (${report.selected_source_kind})` : ""}`,
+          ],
+        ]
+      : []),
+    ...(report.audio_selection
+      ? [
+          [
+            "Audio track",
+            `Stream ${report.audio_selection.stream} · ${report.audio_selection.channels} channels · tagged ${report.audio_selection.language_tag}`,
+          ],
+        ]
+      : []),
     [
       "Runtime",
       report.runtime
@@ -933,9 +1029,26 @@ async function detail(id) {
   if (report.audit) {
     const before = report.audit.before;
     facts.push(
-      ["Audit decision", before.decision],
+      [
+        "Audit decision",
+        before.decision === "pass"
+          ? "Passed — original subtitle retained"
+          : before.decision === "repair"
+            ? "Repair needed"
+            : "Inconclusive — review needed",
+      ],
       ["Evidence", before.reason],
       ["Supported cues", `${before.supported_cues} / ${before.total_cues}`],
+      ...(before.recognized_words != null
+        ? [
+            [
+              "Recognition quality",
+              `${fmt(before.recognized_words)} words recognized · ${Math.round(
+                before.low_confidence_ratio * 100,
+              )}% of them low confidence`,
+            ],
+          ]
+        : []),
       [
         "Original p95 timing error",
         before.p95_error_seconds == null
@@ -956,8 +1069,37 @@ async function detail(id) {
       "Plex delivery",
       `${report.plex_delivery.state} · ${report.plex_delivery.reason || ""}`,
     ]);
+  const auditExplanation = report.audit
+    ? (() => {
+        const result = report.audit.before;
+        const verdict = report.audit.improvement;
+        const matched = Number.isFinite(result.matched_token_ratio)
+          ? `${Math.round(result.matched_token_ratio * 100)}% of recognized dialogue matched the subtitle text`
+          : "The subtitle text matched the recognized dialogue";
+        const distribution = result.distributed_across_timeline
+          ? " across the beginning, middle, and end"
+          : "";
+        const anchors = `Crowbarr found ${fmt(result.supported_cues)} confident timing anchors${distribution}; ${esc(matched)}.`;
+        const flagged = esc(
+          result.reason.charAt(0).toLowerCase() + result.reason.slice(1),
+        );
+        const original = measureTable(result.checks, "The original subtitle");
+        if (result.decision === "pass")
+          return `<section class="audit-explanation pass"><h3>Why the original was retained</h3><p>${esc(result.reason)}. ${anchors} Weak recognition regions were excluded from this evidence.</p>${original}</section>`;
+        // Jobs audited before verdicts carried their reasoning still report `improved`,
+        // so fall back to it rather than describing a repair that never shipped.
+        const withheld = verdict
+          ? !verdict.accepted
+          : report.audit.after && report.audit.improved === false;
+        if (result.decision === "repair" && withheld)
+          return `<section class="audit-explanation warning"><h3>Why the repair was withheld</h3><p>The subtitle was flagged because ${flagged}. ${anchors} Crowbarr built a corrected version and measured it against those same anchors, then discarded it${verdict ? ` because ${esc(verdict.reason)}` : " because it did not improve the timing enough to justify replacing the original"}. Your original subtitle is untouched.</p>${original}${verdict ? measureTable(verdict.checks, "The repair Crowbarr built and rejected") : ""}</section>`;
+        if (result.decision === "repair")
+          return `<section class="audit-explanation"><h3>Why Crowbarr repaired the timing</h3><p>${esc(result.reason)}. ${anchors} The authored text is preserved while its cue timing is adjusted.</p>${original}${verdict ? measureTable(verdict.checks, "The repair Crowbarr accepted") : ""}</section>`;
+        return `<section class="audit-explanation warning"><h3>Why this needs review</h3><p>${esc(result.reason)}. ${anchors} Without that, Crowbarr cannot tell whether the timing is right, so your subtitle was left exactly as it was.</p>${measureTable(result.coverage_checks, "What the evidence had to clear")}</section>`;
+      })()
+    : "";
   $("detail-content").innerHTML =
-    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${report.warnings?.length ? `<p>${report.warnings.map(esc).join(" · ")}</p>` : ""}<div class="actions mt-22">${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
+    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}${auditExplanation}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<section class="recognition-notes"><h3>Recognition regions excluded from the verdict</h3><p>Crowbarr ignored these weak regions when forming timing evidence. They remain here so you can inspect what the recognizer encountered.</p><ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul></section>` : ""}<div class="actions mt-22">${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
 }
 function download(data, name) {
@@ -1010,7 +1152,11 @@ async function perform(target) {
         media: item.path,
         directive: action === "generate" ? "generate" : "",
       });
-      toast(`${response.message}. Job #${response.job_id}.`);
+      toast(
+        `${item.label !== item.path ? item.label : item.title} was added to the priority queue. Manual requests run ahead of background work. Job #${response.job_id}.`,
+        false,
+        action === "generate" ? "Fresh generation queued" : "Subtitle audit queued",
+      );
     } else if (action === "previous" || action === "next") {
       pageOffset += action === "next" ? 25 : -25;
       await loadList();

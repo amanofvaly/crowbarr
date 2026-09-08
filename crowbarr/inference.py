@@ -64,8 +64,13 @@ def transcribe(audio: Path, settings: Settings, cache: Path) -> tuple[list[Word]
     segments, info = model.transcribe(
         str(audio), word_timestamps=True, vad_filter=True, condition_on_previous_text=False, beam_size=5
     )
+    # This, not the container tag, is what establishes the spoken language. Report the
+    # measurement: "not English" is a conclusion, and the user cannot check a conclusion.
     if info.language != settings.language or info.language_probability < 0.65:
-        raise ReviewRequired("Audio language detection does not confidently match English")
+        raise ReviewRequired(
+            f"Audio was heard as {info.language} with {info.language_probability:.0%} confidence, "
+            f"not {settings.language}"
+        )
     words, issues = [], []
     for segment in segments:
         callback = getattr(transcribe, "progress", None)
@@ -181,8 +186,8 @@ def transcribe_windows(audio: Path, windows: list[tuple[float, float]], settings
                 words, warnings = transcribe(clip, settings, cache)
                 result.extend(Word(w.start + start, w.end + start, w.text, w.probability) for w in words)
                 issues.extend(f"Sample {start:.0f}s: {warning}" for warning in warnings)
-            except ReviewRequired:
-                issues.append(f"Sample near {start:.0f}s has insufficient English speech")
+            except ReviewRequired as error:
+                issues.append(f"Sample near {start:.0f}s was not usable: {error}")
             finally:
                 transcribe.progress = callback
                 completed += end - start

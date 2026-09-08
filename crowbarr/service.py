@@ -99,12 +99,10 @@ class Service:
         from .audit import AUDIT_VERSION
 
         reopened = self.db.adopt_policy(AUDIT_VERSION)
+        # Older releases persisted a one-time policy-change message indefinitely.
+        # Keep the re-evaluation in the log and remove the stale dashboard notice.
+        self.db.notice("policy", "")
         if reopened:
-            self.db.notice(
-                "policy",
-                f"Subtitle checks were updated in this release. Re-checking {reopened} items; "
-                "recognized audio is reused, so most finish in seconds.",
-            )
             log.info("Policy changed; %s media will be re-evaluated", reopened)
         self.db.invalidate_sync()
         shutil.rmtree(self.store.directory / "work", ignore_errors=True)

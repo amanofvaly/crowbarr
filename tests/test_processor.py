@@ -9,7 +9,15 @@ import pytest
 from crowbarr.config import Settings
 from crowbarr.db import Database
 from crowbarr.library import scan
-from crowbarr.media import ReviewRequired, choose_audio, extract_audio, probe
+from crowbarr.media import (
+    ReviewRequired,
+    audio_candidates,
+    choose_audio,
+    describe_audio,
+    embedded_subtitles,
+    extract_audio,
+    probe,
+)
 from crowbarr.processor import _recognized_words, process
 from crowbarr.subtitles import Cue, Word, parse_srt, render_srt
 
@@ -140,22 +148,66 @@ def test_ffmpeg_selects_track_and_preserves_offset(video, tmp_path):
     assert (tmp_path / "audio.wav").stat().st_size > 200000
 
 
-def test_commentary_and_wrong_language_are_not_selected():
+def test_forced_subtitle_track_is_skipped_even_without_the_disposition_flag(tmp_path):
+    """Real file: a forced track with disposition forced=0 and the title set to "Forced"
+    was extracted and audited, scoring 8% text match against 74 signage cues."""
+    metadata = {
+        "streams": [
+            {
+                "index": 2,
+                "codec_type": "subtitle",
+                "codec_name": "subrip",
+                "disposition": {"forced": 0},
+                "tags": {"language": "eng", "title": "Forced"},
+            }
+        ]
+    }
+    assert embedded_subtitles(Path("/nonexistent.mkv"), tmp_path, metadata, Settings()) == []
+
+
+def test_commentary_is_never_selected():
     with pytest.raises(ReviewRequired):
         choose_audio(
             {"streams": [{"codec_type": "audio", "tags": {"language": "eng", "title": "Commentary"}}]},
             Settings(),
         )
-    with pytest.raises(ReviewRequired):
-        choose_audio({"streams": [{"codec_type": "audio", "tags": {"language": "fra"}}]}, Settings())
 
 
-def test_ambiguous_audio_is_reviewed():
-    metadata = {"streams": [{"codec_type": "audio", "tags": {"language": "eng"}, "index": i} for i in (1, 2)]}
-    with pytest.raises(ReviewRequired):
-        choose_audio(metadata, Settings())
-    metadata["streams"][1]["disposition"] = {"default": 1}
+def test_missing_audio_reports_what_the_file_holds():
+    with pytest.raises(ReviewRequired, match="no audio track"):
+        choose_audio({"streams": [{"codec_type": "video", "index": 0}]}, Settings())
+
+
+def test_wrongly_tagged_track_is_used_and_verified_by_recognition():
+    """Container tags are often wrong. Recognition establishes the language, not the tag."""
+    metadata = {"streams": [{"codec_type": "audio", "index": 1, "tags": {"language": "fin"}}]}
+    assert choose_audio(metadata, Settings())["index"] == 1
+    assert "tagged fin" in describe_audio(metadata)
+
+
+def test_english_tag_outranks_an_untagged_and_a_foreign_track():
+    metadata = {
+        "streams": [
+            {"codec_type": "audio", "index": 1, "tags": {"language": "fra"}},
+            {"codec_type": "audio", "index": 2},
+            {"codec_type": "audio", "index": 3, "tags": {"language": "eng"}},
+        ]
+    }
+    assert choose_audio(metadata, Settings())["index"] == 3
+    assert [c["index"] for c in audio_candidates(metadata)] == [3, 2, 1]
+
+
+def test_interchangeable_english_tracks_pick_the_fullest_mix():
+    """Stereo and 5.1 of the same dialogue is not ambiguity worth refusing over."""
+    metadata = {
+        "streams": [
+            {"codec_type": "audio", "index": 1, "channels": 2, "tags": {"language": "eng"}},
+            {"codec_type": "audio", "index": 2, "channels": 6, "tags": {"language": "eng"}},
+        ]
+    }
     assert choose_audio(metadata, Settings())["index"] == 2
+    metadata["streams"][0]["disposition"] = {"default": 1}
+    assert choose_audio(metadata, Settings())["index"] == 1
 
 
 def test_untracked_output_is_never_overwritten(video, tmp_path):
