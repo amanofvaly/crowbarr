@@ -213,12 +213,29 @@ def transcribe_bounded(audio: Path, settings: Settings, cache: Path, checkpoint:
             core_start, core_end = index * 300, min(duration, (index + 1) * 300)
             start, end = max(0, core_start - 2), min(duration, core_end + 2)
             saved = checkpoint / f"{index}.json"
+            chunk = None
             if saved.exists():
-                payload = json.loads(saved.read_text())
-                chunk = [Word(**word) for word in payload["words"]]
-                warnings = payload["issues"]
-                transcribe.runtime = payload.get("runtime", {"backend": "cached"})
-            else:
+                try:
+                    payload = json.loads(saved.read_text())
+                    restored = [Word(**word) for word in payload["words"]]
+                    warnings = payload["issues"]
+                    runtime = payload.get("runtime", {"backend": "cached"})
+                    if not isinstance(warnings, list) or not all(isinstance(w, str) for w in warnings):
+                        raise ValueError("Invalid checkpoint warnings")
+                    if not isinstance(runtime, dict) or any(
+                        not isinstance(w.text, str)
+                        or not all(isinstance(v, (int, float)) and math.isfinite(v)
+                                   for v in (w.start, w.end, w.probability))
+                        or not core_start <= w.start < core_end or w.end <= w.start
+                        or not 0 <= w.probability <= 1
+                        for w in restored
+                    ):
+                        raise ValueError("Invalid checkpoint words")
+                    chunk = restored
+                    transcribe.runtime = runtime
+                except (ValueError, TypeError, KeyError, UnicodeError):
+                    pass  # Recompute only this chunk; keep the other durable checkpoints.
+            if chunk is None:
                 clip = Path(work) / "chunk.wav"
                 source.setpos(int(start * rate))
                 with wave.open(str(clip), "wb") as target:

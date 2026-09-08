@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .config import ConfigStore, Settings, atomic_write
-from .db import Database
+from .db import Database, StaleJob
 from .integrations import deliver_plex, plex_activity, refresh_plex
 from .library import scan
 from .media import ReviewRequired
@@ -36,6 +36,7 @@ def run_job(directory: str, job: dict, settings_data: dict) -> None:
         except (OSError, subprocess.SubprocessError):
             pass
     db = Database(Path(directory) / "crowbarr.db")
+    db.bind_worker(job)
     try:
         result = process(job, settings, Path(directory), db)
         if settings.plex.url and result.get("output") and result["state"] == "completed":
@@ -51,9 +52,15 @@ def run_job(directory: str, job: dict, settings_data: dict) -> None:
             db.notice("plex-refresh", "Subtitles updated; Plex refresh pending.")
         db.update(job["id"], **result)
         if result.get("report"):
-            atomic_write(Path(directory) / "reports" / f"{job['id']}.json", result["report"])
+            with db.connect():
+                atomic_write(Path(directory) / "reports" / f"{job['id']}.json", result["report"])
+    except StaleJob:
+        return
     except ReviewRequired as error:
-        db.update(job["id"], state="review", stage="Needs attention", error=str(error))
+        try:
+            db.update(job["id"], state="review", stage="Needs attention", error=str(error))
+        except StaleJob:
+            pass
     except Exception as error:
         # Avoid exception payloads that may include credentials or external request URLs.
         name = type(error).__name__
@@ -61,15 +68,18 @@ def run_job(directory: str, job: dict, settings_data: dict) -> None:
         # on a failure at all. It goes to the log, which is not rendered in the UI.
         log.error("Job %s failed (%s)", job["id"], name, exc_info=True)
         retry = job["attempts"] < settings.max_attempts
-        db.update(
-            job["id"],
-            state="retry" if retry else "failed",
-            stage="",
-            error=f"{name}: processing failed. Check model availability, resources, and media access.",
-            ready=time.time() + min(3600, 60 * 2 ** job["attempts"]),
-            origin="retry",
-            priority=40,
-        )
+        try:
+            db.update(
+                job["id"],
+                state="retry" if retry else "failed",
+                stage="",
+                error=f"{name}: processing failed. Check model availability, resources, and media access.",
+                ready=time.time() + min(3600, 60 * 2 ** job["attempts"]),
+                origin="retry",
+                priority=40,
+            )
+        except StaleJob:
+            pass
 
 
 class Service:
@@ -87,6 +97,7 @@ class Service:
         self.last_background_end = 0
         self.last_resource_check = 0
         self.plex_busy = False
+        self.child_pid = None
 
     def start(self):
         self.lock_file = (self.store.directory / "service.lock").open("a")
@@ -95,7 +106,7 @@ class Service:
         except BlockingIOError:
             self.lock_file.close()
             raise RuntimeError("Another Crowbarr service is already using this data directory") from None
-        self.db.recover()
+        self.db.recover(self.store.get().max_attempts)
         from .audit import AUDIT_VERSION
 
         reopened = self.db.adopt_policy(AUDIT_VERSION)
@@ -111,12 +122,33 @@ class Service:
             thread.start()
             self.threads.append(thread)
 
-    def close(self):
+    def close(self, timeout: float = 20):
         self.stop_event.set()
         self.scan_event.set()
+        deadline = time.monotonic() + timeout
         for thread in self.threads:
-            thread.join(timeout=25)
-        if self.lock_file:
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in self.threads):
+            child_pid = self.child_pid
+            if child_pid is not None:
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            log.warning("Shutdown deadline reached; retaining data lock until background threads exit")
+            # Slow filesystem/network operations cannot be cancelled in a Python thread.
+            # Do not let a second service use the data while those operations still run.
+            def release_when_stopped():
+                for thread in self.threads:
+                    thread.join()
+                if self.lock_file:
+                    self.lock_file.close()
+
+            threading.Thread(target=release_when_stopped, daemon=True).start()
+        elif self.lock_file:
             self.lock_file.close()
 
     def scanner(self):
@@ -124,6 +156,8 @@ class Service:
             self.scan_event.clear()
             try:
                 self.scan_count = scan(self.store.get(), self.db)
+                if self.stop_event.is_set():
+                    break
                 self.db.prune()
                 self.last_scan = time.time()
                 settings = self.store.get()
@@ -136,6 +170,8 @@ class Service:
                             )
                         ]
                     for job in pending:
+                        if self.stop_event.is_set():
+                            break
                         report = json.loads(job["report"])
                         attempts = report["plex_delivery"].get("attempts", 0)
                         if attempts >= 5:
@@ -206,14 +242,22 @@ class Service:
             )
             if not job:
                 continue
+            if self.stop_event.is_set():
+                self.db.update(
+                    job["id"], expected_generation=job["generation"], state="retry", stage="",
+                    attempts=max(0, job["attempts"] - 1), ready=time.time(),
+                )
+                break
             child = context.Process(
                 target=run_job, args=(str(self.store.directory), job, settings.model_dump())
             )
             try:
                 child.start()
+                self.child_pid = child.pid
             except Exception:
                 self.db.update(
-                    job["id"], state="failed", stage="", error="Could not start the inference process"
+                    job["id"], expected_generation=job["generation"],
+                    state="failed", stage="", error="Could not start the inference process"
                 )
                 continue
             started = time.monotonic()
@@ -223,10 +267,10 @@ class Service:
             while child.is_alive():
                 child.join(timeout=1)
                 current = self.store.get()
-                if time.monotonic() - self.last_resource_check > 10:
-                    self.resources = resource_snapshot()
-                    self.last_resource_check = time.monotonic()
-                if self.db.get(job["id"]).get("cancel_requested"):
+                latest = self.db.get(job["id"])
+                if not latest or latest["generation"] != job["generation"]:
+                    interrupted = "Job request replaced"
+                elif latest.get("cancel_requested"):
                     interrupted = "Cancelled by user"
                 elif self.stop_event.is_set():
                     interrupted = "Service stopping"
@@ -239,33 +283,43 @@ class Service:
                     interrupted = "Media is no longer eligible in the arr library"
                 elif time.monotonic() - started > settings.job_timeout_minutes * 60:
                     interrupted = "Job exceeded its configured time limit"
+                if not interrupted and time.monotonic() - self.last_resource_check > 10:
+                    self.resources = resource_snapshot()
+                    self.last_resource_check = time.monotonic()
                 if interrupted:
                     try:
                         os.killpg(child.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         child.terminate()
                     child.join(timeout=10)
-                    if child.is_alive():
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
+                    # The leader may exit before an FFmpeg descendant does.
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        if child.is_alive():
                             child.kill()
-                        child.join(timeout=5)
+                    child.join(timeout=5)
                     break
             latest = self.db.get(job["id"])
-            if latest and latest["state"] == "processing":
-                retry = job["attempts"] < settings.max_attempts
+            if latest and latest["generation"] == job["generation"] and latest["state"] == "processing":
+                administrative = interrupted in {"Service stopping", "Processing settings changed"}
+                attempts = max(0, job["attempts"] - 1) if administrative else job["attempts"]
+                retry = attempts < settings.max_attempts
                 self.db.update(
                     job["id"],
+                    expected_generation=job["generation"],
                     state="superseded"
                     if interrupted == "Media is no longer eligible in the arr library"
+                    else "cancelled" if interrupted == "Cancelled by user"
                     else ("retry" if retry else "failed"),
                     stage="",
                     error=interrupted or "Inference process exited unexpectedly; check available memory",
                     ready=time.time() + (0 if interrupted in {"Service stopping", "Processing settings changed"} else 120),
                     origin=job.get("origin", "backlog") if interrupted in {"Service stopping", "Processing settings changed"} else "retry",
                     priority=job.get("priority", 0) if interrupted in {"Service stopping", "Processing settings changed"} else 40,
-                    attempts=max(0, job["attempts"]-1) if interrupted in {"Service stopping", "Processing settings changed"} else job["attempts"],
+                    attempts=attempts,
+                    started=None,
+                    cached=None,
                 )
             elif latest and latest["state"] == "completed":
                 self.scan_event.set()
@@ -276,7 +330,6 @@ class Service:
             if did_work and job.get("origin", "backlog") not in {"manual", "import"}:
                 self.last_background_end = time.time()
                 self.db.record_usage(wall_started, time.monotonic() - started)
-            if interrupted == "Cancelled by user" and latest and latest["state"] == "processing":
-                self.db.update(job["id"], state="cancelled", stage="", error=interrupted)
+            self.child_pid = None
             child.close()
             shutil.rmtree(self.store.directory / "work", ignore_errors=True)

@@ -1,5 +1,6 @@
 name: Tests
 on:
+  workflow_call:
   push:
     paths-ignore:
       - "**/*.md"
@@ -21,6 +22,6 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: pip install -e '.[test]'
-      - run: ruff check crowbarr tests integrations
+      - run: ruff check crowbarr tests integrations packaging
       - run: pytest
       - run: pip wheel --no-deps . -w dist

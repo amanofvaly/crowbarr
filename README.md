@@ -29,7 +29,7 @@ All processed subtitles are published alongside your media as separate `.crowbar
 
 ## Installation
 
-Linux x86_64:
+Linux x86_64 with systemd:
 
 ```sh
 curl -fsSL https://github.com/amanofvaly/crowbarr/releases/latest/download/install-crowbarr.sh | sudo bash
@@ -39,6 +39,11 @@ Open `http://localhost:8449`. The installer adds Crowbarr as a system service an
 its database, settings, models, and cached transcripts in `/var/lib/crowbarr`.
 
 For Docker and NVIDIA installations, see [Install Crowbarr with Docker](docs/docker.md).
+For native permissions, scheduled updates and service recovery, see
+[Native Linux installation](docs/linux.md).
+For NAS app managers and unattended release updates, see
+[TrueNAS and Portainer](docs/nas.md). Existing users should read
+[Migration and backup](docs/migration.md) before changing installations.
 
 ### First run
 
@@ -54,6 +59,10 @@ For Docker and NVIDIA installations, see [Install Crowbarr with Docker](docs/doc
 ```sh
 sudo crowbarr-update
 ```
+
+This command updates manually. Container auto-updates use the managed
+[release-only Portainer setup](docs/nas.md#portainer). Ordinary source pushes do not
+update installations; a new application release must pass the release pipeline.
 
 The service stops while the program is replaced, then resumes with the existing data in
 `/var/lib/crowbarr`. An interrupted job returns to the queue. Other queued and completed

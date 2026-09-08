@@ -1,0 +1,10 @@
+# Optional second library, for example movies stored separately from television.
+# Add with: docker compose -f compose.yaml -f compose.extra-media.yaml up -d
+services:
+  crowbarr:
+    volumes:
+      - type: bind
+        source: ${CROWBARR_EXTRA_MEDIA_DIR:?Set an absolute second media directory}
+        target: ${CROWBARR_EXTRA_MEDIA_MOUNT:-/media-extra}
+        bind:
+          create_host_path: false

@@ -9,7 +9,8 @@ COPY pyproject.toml README.md LICENSE ./
 COPY crowbarr ./crowbarr
 RUN pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 \
     --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir '.[inference]'
+    && pip install --no-cache-dir '.[inference]' torchcodec==0.7.0 \
+    && pip check
 RUN mkdir -p /config && chown 1000:1000 /config
 USER 1000:1000
 EXPOSE 8449
