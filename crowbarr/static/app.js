@@ -35,9 +35,9 @@ const paths = {
 const icon = (name) =>
   `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.activity}</svg>`;
 const button = (label, action, style = "", attrs = "") =>
-  `<button type="button" class="button ${style}" data-action="${action}" ${attrs}>${label}</button>`;
+  `<button type="button" class="btn button ${style.includes("primary") ? "btn-primary" : "btn-outline-secondary"} ${style}" data-action="${action}" ${attrs}>${label}</button>`;
 const link = (label, route, style = "") =>
-  `<a class="button ${style}" href="#${route}">${label}</a>`;
+  `<a class="btn button ${style.includes("primary") ? "btn-primary" : "btn-outline-secondary"} ${style}" href="#${route}">${label}</a>`;
 const labels = {
   processing: "Processing",
   queued: "Queued",
@@ -64,8 +64,14 @@ const duration = (value) =>
   value == null
     ? "Unavailable"
     : `${Math.floor(Math.max(0, value) / 60)}m ${Math.floor(Math.max(0, value) % 60)}s`;
-const ago = (value) =>
-  !value ? "Not yet" : duration(Date.now() / 1000 - value) + " ago";
+const ago = (value) => {
+  if (!value) return "Not yet";
+  const seconds = Math.max(0, Date.now() / 1000 - value);
+  if (seconds < 60) return "Just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
+  return `${Math.floor(seconds / 86400)} days ago`;
+};
 const title = (job) =>
   job.title || job.media?.split("/").pop() || "Untitled media";
 let savedSettings,
@@ -95,11 +101,11 @@ const navigation = [
   ["review", "Review"],
   ["history", "History"],
   ["settings", "Settings"],
-  ["api", "API & webhooks"],
+  ["api", "API & Webhooks"],
 ];
 function toast(text, error = false) {
   $("toast").textContent = text;
-  $("toast").className = `toast${error ? " error" : ""}`;
+  $("toast").className = `toast show${error ? " error" : ""}`;
   $("toast").hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => ($("toast").hidden = true), 6500);
@@ -164,27 +170,10 @@ function jobButtons(job) {
 function activeJob() {
   const job = status?.jobs.find((j) => j.state === "processing");
   if (!job)
-    return empty(
-      status?.paused
-        ? "Queue is paused"
-        : status?.wait_reason
-          ? "Waiting to process"
-          : "Worker is ready",
-      status?.wait_reason ||
-        "Eligible jobs will start automatically. You can also request an audit from your library.",
-      link("Browse library", "library"),
-      status?.paused ? "pause" : "check",
-    );
-  const stage = (job.stage || "").toLowerCase();
-  const step = stage.includes("publish")
-    ? 3
-    : /align|audit|match/.test(stage)
-      ? 2
-      : /recogn|sampl/.test(stage)
-        ? 1
-        : 0;
-  return `<div class="panel-body">${badge("processing")}<div class="active-title">${esc(title(job))}</div><p class="active-meta">${esc(origins[job.origin] || "Library sweep")} · ${job.directive === "generate" ? "Fresh generation" : "Subtitle audit & repair"}</p>${progressMarkup(job)}<ol class="pipeline">${["Prepare audio", "Recognize dialogue", "Validate timing", "Publish subtitle"].map((s, i) => `<li class="${i === step ? "current" : ""}" ${i === step ? 'aria-current="step"' : ""}>${s}</li>`).join("")}</ol><div class="active-footer"><span class="hint">${job.started ? `Running for ${duration(Date.now() / 1000 - job.started)}` : "Worker active"} · Single worker</span><div class="actions">${jobButtons(job)}</div></div></div>`;
+    return `<div class="worker-band idle">${icon(status?.paused ? "pause" : "check")}<strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Worker waiting" : "Worker idle"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span></div>`;
+  return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library sweep")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
 }
+
 function rows(items, compact = false) {
   items.forEach((j) => jobs.set(j.id, j));
   return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : "<th>Requested</th>"}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
@@ -192,10 +181,7 @@ function rows(items, compact = false) {
 function systemPanel() {
   const r = status?.resources || {};
   return `<div class="panel-body">${[
-    [
-      "Inference device",
-      r.gpu || savedSettings?.device?.toUpperCase() || "Unavailable",
-    ],
+    ["Detected GPU", r.gpu || "Not detected"],
     ["Whisper model", savedSettings?.model || "Unavailable"],
     [
       "RAM headroom",
@@ -233,43 +219,59 @@ function connectionsPanel() {
     .join("")}</div>`;
 }
 function dashboard() {
-  const c = status?.counts || {},
-    pending = (status?.jobs || [])
-      .filter((j) => ["queued", "waiting", "retry"].includes(j.state))
-      .slice(0, 5);
+  const counts = status?.counts || {};
+  const pending = (status?.jobs || [])
+    .filter((j) => ["queued", "waiting", "retry"].includes(j.state))
+    .slice(0, 10);
   const recent = (status?.jobs || [])
     .filter(
       (j) => !["processing", "queued", "waiting", "retry"].includes(j.state),
     )
     .slice(0, 5);
+  const waiting = ["queued", "waiting", "retry"].reduce(
+    (sum, key) => sum + (counts[key] || 0),
+    0,
+  );
+  const r = status?.resources || {};
   return (
     heading(
       "Dashboard",
-      "Your subtitle library, working in sync.",
-      `${button(icon(status?.paused ? "play" : "pause") + (status?.paused ? "Resume queue" : "Pause queue"), "pause")}${button(icon("refresh") + "Sync libraries", "scan", "primary")}`,
+      "",
+      button(
+        icon(status?.paused ? "play" : "pause") +
+          (status?.paused ? "Resume queue" : "Pause queue"),
+        "pause",
+      ) +
+        button(icon("refresh") + "Sync libraries", "scan") +
+        link(icon("search") + "Search library", "library"),
     ) +
     (!status?.configured
-      ? `<div class="callout"><div><strong>Let’s connect your library</strong><p>Add Sonarr or Radarr, map your folders, and choose a processing device.</p></div>${link("Set up Crowbarr", "settings/connections", "primary")}</div>`
+      ? `<div class="callout"><div><strong>No libraries configured</strong><p>Connect a media manager or add your media folders to begin.</p></div>${link("Configure libraries", "settings/connections", "primary")}</div>`
       : "") +
-    `<div class="stats-strip">${[
-      ["Managed media", status?.media_count, "library"],
-      [
-        "In queue",
-        ["queued", "waiting", "retry"].reduce((n, k) => n + (c[k] || 0), 0),
-        "queue",
-      ],
-      ["Subtitles written", c.completed, "check"],
-      ["Needs attention", (c.review || 0) + (c.failed || 0), "review"],
-    ]
-      .map(
-        ([label, value, symbol]) =>
-          `<div class="stat ${symbol === "review" ? "attention" : ""}"><span>${label}</span><strong>${fmt(value)}</strong>${icon(symbol)}</div>`,
-      )
-      .join(
-        "",
-      )}</div><div class="dashboard-grid"><div>${panel("Currently processing", activeJob(), '<span class="hint">Live worker activity</span>')}${panel("Up next", pending.length ? rows(pending, true) : empty("No pending jobs", "New imports and scheduled library checks will appear here."), '<a href="#activity">View queue →</a>')}${panel("Recent outcomes", recent.length ? rows(recent, true) : empty("Your results will appear here", "Completed audits, repairs, and review candidates are kept in History."), '<a href="#history">View history →</a>')}</div><aside class="dashboard-aside">${panel("System resources", systemPanel(), icon("cpu"))}${panel("Connected services", connectionsPanel(), '<a href="#settings/connections">Manage</a>')}</aside></div>`
+    `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
+    activeJob() +
+    panel(
+      "Queue",
+      pending.length
+        ? rows(pending)
+        : empty(
+            "Queue is empty",
+            "Imported media will be queued automatically.",
+          ),
+      `<a href="#activity">View all ${fmt(waiting)} pending jobs</a>`,
+    ) +
+    `<div class="system-line"><span>${icon("cpu")} ${esc(r.gpu || "No GPU detected")}</span><span>RAM available: ${r.ram_available_mb == null ? "Unavailable" : fmt(r.ram_available_mb) + " MB"}</span><span>GPU memory free: ${r.vram_free_mb == null ? "Unavailable" : fmt(r.vram_free_mb) + " MB"}</span><span>Model: ${esc(savedSettings?.model || "Unavailable")}</span><a href="#settings/resources">Resource settings</a></div>` +
+    panel(
+      "Recent activity",
+      recent.length
+        ? rows(recent, true)
+        : empty("No activity yet", "Finished jobs will appear here."),
+      '<a href="#history">View history</a>',
+    ) +
+    `<details class="service-disclosure"><summary>Services & system information</summary><div class="system-details">${systemPanel()}${connectionsPanel()}</div></details>`
   );
 }
+
 function pager() {
   return `<div class="pagination"><span>${total ? `${fmt(pageOffset + 1)}–${fmt(Math.min(pageOffset + 25, total))} of ${fmt(total)}` : "0 results"}</span><div class="actions">${button("Previous", "previous", "small", pageOffset === 0 ? "disabled" : "")}${button("Next", "next", "small", pageOffset + 25 >= total ? "disabled" : "")}</div></div>`;
 }
@@ -582,13 +584,10 @@ function settingsPage() {
     content = settingPanel(
       "Appearance",
       "Choose a theme for this browser. Your server settings are shared separately.",
-      `<label>Color theme<select id="theme-select"><option value="dark" ${document.documentElement.dataset.theme === "dark" ? "selected" : ""}>Dark · forest</option><option value="light" ${document.documentElement.dataset.theme === "light" ? "selected" : ""}>Light · sage</option></select><small>Saved on this device.</small></label>`,
+      `<label>Color theme<select id="theme-select"><option value="dark" ${document.documentElement.dataset.theme === "dark" ? "selected" : ""}>Dark</option><option value="light" ${document.documentElement.dataset.theme === "light" ? "selected" : ""}>Light</option></select><small>Saved on this device.</small></label>`,
     );
   return (
-    heading(
-      "Settings",
-      "Configure once. Keep your library running on your terms.",
-    ) +
+    heading("Settings", "") +
     `<div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">${groups.map(([id, label]) => `<a href="#settings/${id}" class="nav-link ${id === section ? "active" : ""}" ${id === section ? 'aria-current="page"' : ""}>${label}</a>`).join("")}</nav><form id="settings-form" class="settings-form">${content}${section !== "appearance" ? `<div class="save-bar"><button class="button primary" type="submit">Save changes</button><span id="save-state" class="settings-status">All changes saved</span></div>` : ""}</form></div>`
   );
 }
@@ -639,7 +638,7 @@ function apiPage() {
   ];
   return (
     heading(
-      "API & webhooks",
+      "API & Webhooks",
       "Connect your apps to Crowbarr with an authenticated HTTP API.",
       '<a class="button" href="/api/openapi.json" download="crowbarr-openapi.json">Download OpenAPI schema</a>',
     ) +
@@ -934,7 +933,7 @@ async function perform(target) {
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try {
-    localStorage.setItem("crowbarr-theme", theme);
+    localStorage.setItem("crowbarr-arr-theme", theme);
   } catch {}
   $("theme-button").textContent =
     `Switch to ${theme === "dark" ? "light" : "dark"} theme`;
@@ -1097,9 +1096,9 @@ document.addEventListener("keydown", (event) => {
   }
 });
 try {
-  setTheme(localStorage.getItem("crowbarr-theme") || "dark");
+  setTheme(localStorage.getItem("crowbarr-arr-theme") || "light");
 } catch {
-  setTheme("dark");
+  setTheme("light");
 }
 enter().catch(showLogin);
 setInterval(refresh, 3000);

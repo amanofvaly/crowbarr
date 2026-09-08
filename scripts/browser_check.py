@@ -57,11 +57,11 @@ def main():
         assert page.locator("#api-key").get_attribute("type") == "text"
         page.get_by_role("button", name="Hide", exact=True).click()
         assert context.request.get(args.url + "/api/openapi.json").status == 200
-        page.get_by_role("button", name="Switch to light theme").click()
-        assert page.locator("html").get_attribute("data-theme") == "light"
+        page.get_by_role("button", name="Switch to dark theme").click()
+        assert page.locator("html").get_attribute("data-theme") == "dark"
         page.goto(args.url + "/#dashboard")
         page.wait_for_timeout(400)
-        page.screenshot(path=str(args.output / "desktop-light-dashboard.png"), full_page=True)
+        page.screenshot(path=str(args.output / "desktop-dark-dashboard.png"), full_page=True)
         assert not errors, errors
         browser.close()
     print("Browser check passed: real server data, all routes, desktop/mobile layouts, details, API, themes.")
