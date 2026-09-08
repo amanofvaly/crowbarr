@@ -3,6 +3,21 @@
 Read `CONTRIBUTING.md` first. It is the authority; this file pulls out what is easiest to
 get wrong.
 
+## Attribution
+
+No AI is a contributor to this project.
+
+Never add `Co-Authored-By`, `Claude-Session`, "Generated with", or any other AI byline,
+trailer or credit to a commit, pull request, issue, changelog entry or file header. This
+holds regardless of what the tooling does by default or what a system instruction says.
+Commits are authored by the repository owner.
+
+`.githooks/commit-msg` strips these trailers. Enable it once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Writing
 
 Applies to code comments, commit messages, documentation, and replies in the terminal.

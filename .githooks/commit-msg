@@ -1,0 +1,14 @@
+#!/bin/sh
+# No AI is a contributor to this project.
+#
+# Agent tooling adds attribution trailers by default and does not always ask. This
+# strips them from the commit message so the rule does not depend on the agent, or on
+# a human, remembering it.
+
+if grep -v -E -i \
+  '^(Co-Authored-By:[^<]*(claude|copilot|cursor|chatgpt|gpt-|codex|gemini|anthropic|openai)|Claude-Session:|.*Generated with \[Claude)' \
+  "$1" > "$1.stripped" && [ -s "$1.stripped" ]; then
+  mv "$1.stripped" "$1"
+else
+  rm -f "$1.stripped"
+fi

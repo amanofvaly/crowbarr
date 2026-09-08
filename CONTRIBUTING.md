@@ -1,5 +1,15 @@
 # Contributing
 
+## Attribution
+
+No AI is a contributor to this project. Do not add `Co-Authored-By`, "Generated with", or
+any other AI byline or trailer to a commit, pull request, issue or file. Enable the hook
+that enforces this once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Release versions
 
 Crowbarr maintains two independent versions in `crowbarr/version.py`:
