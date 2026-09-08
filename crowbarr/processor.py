@@ -424,6 +424,9 @@ def process(
             words, transcription_issues, transcript_cache_hit = _recognized_words(
                 media, audio, settings, directory, cache, transcriber, windows=windows
             )
+            # Say so plainly: a reused transcript finishes in seconds, and that speed
+            # must not be mistaken for what a file takes the first time.
+            db.update(job["id"], cached=1 if transcript_cache_hit else 0)
         else:
             words, transcription_issues = transcriber(audio, settings, cache)
             transcript_cache_hit = False

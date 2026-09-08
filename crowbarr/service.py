@@ -79,6 +79,8 @@ class Service:
         self.threads: list[threading.Thread] = []
         self.lock_file = None
         self.last_scan = None
+        self.wait_until = None
+        self.wait_total = None
         self.scan_count = 0
         self.resources = {}
         self.wait_reason = ""
@@ -94,6 +96,16 @@ class Service:
             self.lock_file.close()
             raise RuntimeError("Another Crowbarr service is already using this data directory") from None
         self.db.recover()
+        from .audit import AUDIT_VERSION
+
+        reopened = self.db.adopt_policy(AUDIT_VERSION)
+        if reopened:
+            self.db.notice(
+                "policy",
+                f"Subtitle checks were updated in this release. Re-checking {reopened} items; "
+                "recognized audio is reused, so most finish in seconds.",
+            )
+            log.info("Policy changed; %s media will be re-evaluated", reopened)
         self.db.invalidate_sync()
         shutil.rmtree(self.store.directory / "work", ignore_errors=True)
         for target in (self.scanner, self.worker):
@@ -182,6 +194,13 @@ class Service:
                 else ""
             )
             self.wait_reason = background_reason
+            # Only the cooldown has a knowable end; other gates clear when the machine does.
+            self.wait_until = (
+                self.last_background_end + settings.backlog_cooldown_seconds
+                if background_reason == "Background cooldown"
+                else None
+            )
+            self.wait_total = settings.backlog_cooldown_seconds if self.wait_until else None
             job = self.db.claim(
                 settings.providers(),
                 settings.discovery_fingerprint(),
@@ -252,7 +271,11 @@ class Service:
                 )
             elif latest and latest["state"] == "completed":
                 self.scan_event.set()
-            if job.get("origin", "backlog") not in {"manual", "import"}:
+            # A job discarded because its inputs moved on did no inference, so it must not
+            # spend the background budget or start a cooldown. Otherwise a library-wide
+            # re-sign leaves the worker idling between jobs that never ran.
+            did_work = not (latest and latest["state"] == "superseded")
+            if did_work and job.get("origin", "backlog") not in {"manual", "import"}:
                 self.last_background_end = time.time()
                 self.db.record_usage(wall_started, time.monotonic() - started)
             if interrupted == "Cancelled by user" and latest and latest["state"] == "processing":

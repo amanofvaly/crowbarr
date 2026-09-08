@@ -164,7 +164,8 @@ The web UI provides real-time visibility into the queue and library:
 ## Known Limitations
 
 - **English Dialogue & Subtitles**: Initial releases focus on English audio and English subtitles. Multilingual transcription and translation alignment are not yet supported.
-- **Text Subtitles Only**: Crowbarr reads text subtitle formats (SubRip `.srt`, `.ass`, `.ssa`, `.vtt`, and text-based MP4/MKV embedded tracks). Image/bitmap subtitles (`dvd_subtitle`, `hdmv_pgs_subtitle`) common in DVD and Blu-ray remuxes require OCR, which is not currently supported.
+- **Text Subtitles Only**: Crowbarr reads text subtitle formats (SubRip `.srt`, `.ass`, `.ssa`, `.vtt`, and text-based MP4/MKV embedded tracks). Image/bitmap subtitles (`dvd_subtitle`, `hdmv_pgs_subtitle`) common in DVD and Blu-ray remuxes require OCR, which is not currently supported. A remux whose only English subtitle is a bitmap therefore appears to Crowbarr as having no English subtitle: it will request one from Bazarr and publish a sidecar alongside the track you already have. The job report lists any subtitle it could not read.
+- **Processing Speed Varies**: Recognized audio is cached per file and reused on later checks, so a re-run finishes in seconds while a first pass must extract audio and run recognition. The dashboard states which applies to the job in progress. Do not use re-run timings to estimate how long a full library will take.
 - **Single Job Worker**: To prevent server CPU and GPU memory exhaustion, jobs are processed one at a time via a local SQLite-backed queue.
 
 ---

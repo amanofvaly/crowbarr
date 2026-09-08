@@ -9,6 +9,7 @@ const esc = (value) =>
       ],
   );
 const paths = {
+  clock: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   dashboard:
     '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
   activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
@@ -90,6 +91,38 @@ let listQuery = "",
   dirty = false,
   setup = false,
   timer;
+let renderedKey = null;
+function merge(current, draft) {
+  // Walk both trees and touch only the elements that actually differ. An element whose
+  // markup is unchanged is never replaced, so a selection, a focused control or a
+  // scrolled container survives while the rest of the page updates around it.
+  const wanted = [...draft.children];
+  const existing = [...current.children];
+  for (let i = 0; i < wanted.length; i++) {
+    const next = wanted[i];
+    const node = existing[i];
+    if (!node) {
+      current.append(next);
+    } else if (node.tagName !== next.tagName) {
+      node.replaceWith(next);
+    } else if (node.outerHTML !== next.outerHTML) {
+      if (node.children.length && next.children.length) merge(node, next);
+      else node.replaceWith(next);
+    }
+  }
+  for (let i = current.children.length - 1; i >= wanted.length; i--) {
+    current.children[i].remove();
+  }
+}
+function paint(id, markup) {
+  const node = typeof id === "string" ? $(id) : id;
+  if (!node) return;
+  if (node.dataset.key === markup) return;   // nothing differs at all
+  node.dataset.key = markup;
+  const draft = document.createElement(node.tagName);
+  draft.innerHTML = markup;
+  merge(node, draft);
+}
 let jobs = new Map(),
   media = [],
   total = 0,
@@ -120,6 +153,7 @@ async function api(path, method = "GET", body) {
   if (!response.ok) {
     if (response.status === 401 && session) {
       session = false;
+      if (stream) { stream.close(); stream = null; }
       showLogin();
     }
     throw new Error(
@@ -150,6 +184,14 @@ function drawNav() {
   $("breadcrumb").textContent =
     `Workspace / ${navigation.find(([key]) => key === route)?.[1] || "Dashboard"}`;
 }
+function cooldownMarkup() {
+  const total = status?.wait_total;
+  const until = status?.wait_until;
+  if (!total || !until) return "";
+  const left = Math.max(0, until - Date.now() / 1000);
+  const done = Math.min(100, Math.max(0, ((total - left) / total) * 100));
+  return `<div class="cooldown"><div class="progress-label"><span data-countdown="${until}" data-total="${total}">Resuming in ${Math.ceil(left)}s</span></div><div class="bar"><span data-fill style="width:${done}%"></span></div></div>`;
+}
 function progressMarkup(job, compact = false) {
   const measured =
     Number.isFinite(job.progress_current) && job.progress_total > 0;
@@ -161,7 +203,7 @@ function progressMarkup(job, compact = false) {
     : null;
   return measured
     ? `<div class="${compact ? "inline-progress" : ""}"><div class="progress-label"><span>${compact ? "Audio processed" : esc(job.stage || "Recognizing dialogue")}</span><strong>${percent.toFixed(1)}%</strong></div><progress aria-label="Audio processed during recognition" max="${job.progress_total}" value="${job.progress_current}"></progress>${compact ? "" : `<p class="hint mt-8">${duration(job.progress_current)} of ${duration(job.progress_total)} audio · recognition stage</p>`}</div>`
-    : `<div class="stage-working">${icon("refresh")}<span>${esc(job.stage || "Preparing worker")}</span></div>`;
+    : `<div class="stage-working">${icon("refresh")}<span>${esc(job.stage || "Preparing worker")}${job.cached === 1 ? " · reusing recognised audio" : job.cached === 0 ? " · listening for the first time" : ""}</span>${job.started ? `<em class="elapsed" data-since="${job.started}">${Math.round(Date.now() / 1000 - job.started)}s</em>` : ""}</div>`;
 }
 function jobButtons(job) {
   const id = `data-id="${job.id}"`;
@@ -170,13 +212,13 @@ function jobButtons(job) {
 function activeJob() {
   const job = status?.jobs.find((j) => j.state === "processing");
   if (!job)
-    return `<div class="worker-band idle">${icon(status?.paused ? "pause" : "check")}<strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Worker waiting" : "Worker idle"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span></div>`;
+    return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Worker idle"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${cooldownMarkup()}</div></div>`;
   return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library sweep")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
 }
 
 function rows(items, compact = false) {
   items.forEach((j) => jobs.set(j.id, j));
-  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : "<th>Requested</th>"}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${route === "activity" ? "Requested" : "Finished"}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
 }
 function systemPanel() {
   const r = status?.resources || {};
@@ -248,7 +290,7 @@ function dashboard() {
     (!status?.configured
       ? `<div class="callout"><div><strong>No libraries configured</strong><p>Connect a media manager or add your media folders to begin.</p></div>${link("Configure libraries", "settings/connections", "primary")}</div>`
       : "") +
-    `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
+    `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><span><strong>${fmt(counts.unchanged)}</strong> checked, already correct</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
     activeJob() +
     panel(
       "Queue",
@@ -356,7 +398,7 @@ async function loadList(silent = false) {
     }
     if (view === "library") {
       media = result.results;
-      $("list-content").innerHTML = media.length
+      const libraryMarkup = media.length
         ? `<div class="table-wrap"><table><thead><tr><th>Title / file</th><th>Source</th><th>Subtitle actions</th></tr></thead><tbody>${media.map((item, index) => `<tr><td class="title-cell"><strong>${esc(item.label !== item.path ? item.label : item.title)}</strong><small>${esc(item.path)}</small></td><td><span class="badge">${esc(item.provider === "folders" ? "Folders" : item.provider === "sonarr" ? "Sonarr" : "Radarr")}</span></td><td><div class="row-actions">${button("Audit subtitles", "audit", "small primary", `data-index="${index}"`)}${button("Generate fresh", "generate", "small", `data-index="${index}"`)}</div></td></tr>`).join("")}</tbody></table></div>${pager()}`
         : empty(
             listQuery ? "No matching media" : "Your library is waiting",
@@ -366,8 +408,9 @@ async function loadList(silent = false) {
             link("Manage libraries", "settings/connections"),
             "search",
           );
+      paint("list-content", libraryMarkup);
     } else {
-      $("list-content").innerHTML = result.results.length
+      const listMarkup = result.results.length
         ? rows(result.results) + pager()
         : empty(
             listQuery
@@ -385,15 +428,20 @@ async function loadList(silent = false) {
             link("Browse library", "library"),
             view === "review" ? "check" : "queue",
           );
+      paint("list-content", listMarkup);
     }
   } catch (error) {
-    if (revision === listRevision && $("list-content") && !silent)
-      $("list-content").innerHTML = empty(
-        "Couldn’t load this view",
-        esc(error.message),
-        button("Try again", "reload"),
-        "review",
+    if (revision === listRevision && $("list-content") && !silent) {
+      paint(
+        "list-content",
+        empty(
+          "Couldn’t load this view",
+          esc(error.message),
+          button("Try again", "reload"),
+          "review",
+        ),
       );
+    }
   }
 }
 const groups = [
@@ -668,6 +716,7 @@ async function navigate() {
   jobs = new Map();
   $("workspace").classList.remove("menu-open");
   $("menu").setAttribute("aria-expanded", "false");
+  renderedKey = null;
   drawNav();
   $("page").innerHTML =
     route === "dashboard"
@@ -725,13 +774,30 @@ function captureSettings() {
           : value;
   }
 }
+function dashboardKey() {
+  // Everything that changes the markup. Elapsed seconds and the cooldown countdown are
+  // deliberately absent: the browser ticks those in place, so they must not force the
+  // page to be rebuilt three times a minute.
+  const c = status?.counts || {};
+  return JSON.stringify([
+    status?.paused,
+    status?.wait_reason,
+    status?.media_count,
+    Object.keys(c).sort().map((k) => [k, c[k]]),
+    (status?.jobs || []).map((j) => [j.id, j.state, j.stage, j.error, j.priority, j.origin, j.progress_current, j.progress_total]),
+    (status?.notices || []).length,
+  ]);
+}
 function renderDashboard() {
+  const key = dashboardKey();
+  if (key === renderedKey) return;   // nothing changed; leave the DOM alone
+  renderedKey = key;
   const focused = document.activeElement?.closest("[data-action]");
   const focusAction = focused?.dataset.action,
     focusId = focused?.dataset.id;
   const previous = $("page").querySelector("progress")?.value;
   const oldTitle = $("page").querySelector(".active-title")?.textContent;
-  $("page").innerHTML = dashboard();
+  paint("page", dashboard());
   const progress = $("page").querySelector("progress"),
     next = progress?.value;
   if (
@@ -754,49 +820,93 @@ function renderDashboard() {
     button?.focus({ preventScroll: true });
   }
 }
+const TERMINAL = ["completed", "unchanged", "review", "failed"];
+const FINISHED = ["completed", "unchanged", "review", "failed", "superseded", "cancelled"];
+const verdicts = {
+  completed: "Subtitle written",
+  unchanged: "Already correct",
+  review: "Needs attention",
+  failed: "Failed",
+};
+let announced = null;
+function verdictToast(job) {
+  const node = document.createElement("div");
+  node.className = `verdict ${job.state}`;
+  node.innerHTML = `<strong>${esc(verdicts[job.state] || job.state)}</strong><span>${esc(title(job))}</span>`;
+  $("verdicts").append(node);
+  while ($("verdicts").children.length > 6) $("verdicts").firstElementChild.remove();
+  setTimeout(() => {
+    node.classList.add("leaving");
+    setTimeout(() => node.remove(), 260);
+  }, 6000);
+}
+function announce(list) {
+  // First payload establishes what is already known; only later changes are news.
+  const current = new Map(list.map((job) => [job.id, job.state]));
+  if (announced === null) return void (announced = current);
+  for (const job of list) {
+    if (TERMINAL.includes(job.state) && announced.get(job.id) !== job.state) verdictToast(job);
+  }
+  announced = current;
+}
+function tick() {
+  const now = Date.now() / 1000;
+  for (const node of document.querySelectorAll("[data-since]")) {
+    node.textContent = `${Math.round(now - Number(node.dataset.since))}s`;
+  }
+  for (const node of document.querySelectorAll("[data-countdown]")) {
+    const total = Number(node.dataset.total) || 1;
+    const left = Math.max(0, Number(node.dataset.countdown) - now);
+    node.textContent = left > 0 ? `Resuming in ${Math.ceil(left)}s` : "Starting next file";
+    const done = Math.min(100, Math.max(0, ((total - left) / total) * 100));
+    const bar = node.closest(".cooldown")?.querySelector("[data-fill]");
+    if (bar) bar.style.width = `${done}%`;
+  }
+}
+setInterval(tick, 250);
+function apply(next) {
+  // Everything the shell shows is written value by value. The shell itself is rendered
+  // once at sign-in and never rebuilt.
+  if (!session) return;
+  status = next;
+  status.jobs.forEach((j) => jobs.set(j.id, j));
+  announce(status.jobs);
+  $("worker-state").textContent = status.paused
+    ? "Queue paused"
+    : status.wait_reason
+      ? "Worker deferred"
+      : status.jobs.some((j) => j.state === "processing")
+        ? "Worker processing"
+        : "Worker ready";
+  $("worker-dot").classList.toggle(
+    "warning",
+    status.paused || Boolean(status.wait_reason),
+  );
+  $("version").textContent = `v${status.version} · Self-hosted`;
+  drawNav();
+  const notices = (status.notices || []).map((n) => n.message);
+  if (!status.ffmpeg)
+    notices.push("FFmpeg is unavailable. Install FFmpeg and ffprobe to process media.");
+  const text = notices.join(" · ");
+  if ($("notice").textContent !== text) $("notice").textContent = text;
+  $("notice").hidden = !notices.length;
+  if (route === "dashboard" && !$("detail-dialog").open) renderDashboard();
+  else if (
+    ["activity", "review", "history"].includes(route) &&
+    !$("detail-dialog").open &&
+    !document.activeElement?.matches("input,select,button:disabled")
+  )
+    loadList(true);
+}
 async function refresh() {
-  if (!session || busy) return;
-  busy = true;
+  // Used for the first paint and after an action; the stream carries everything after.
+  if (!session) return;
   try {
-    const next = await api("/status");
-    if (!session) return;
-    status = next;
-    status.jobs.forEach((j) => jobs.set(j.id, j));
-    $("connection-status").textContent = "Live · updated just now";
-    $("worker-state").textContent = status.paused
-      ? "Queue paused"
-      : status.wait_reason
-        ? "Worker deferred"
-        : status.jobs.some((j) => j.state === "processing")
-          ? "Worker processing"
-          : "Worker ready";
-    $("worker-dot").classList.toggle(
-      "warning",
-      status.paused || Boolean(status.wait_reason),
-    );
-    $("version").textContent = `v${status.version} · Self-hosted`;
-    drawNav();
-    const notices = (status.notices || []).map((n) => n.message);
-    if (!status.ffmpeg)
-      notices.push(
-        "FFmpeg is unavailable. Install FFmpeg and ffprobe to process media.",
-      );
-    $("notice").textContent = notices.join(" · ");
-    $("notice").hidden = !notices.length;
-    if (route === "dashboard" && !$("detail-dialog").open) renderDashboard();
-    else if (
-      ["activity", "review", "history"].includes(route) &&
-      !$("detail-dialog").open &&
-      !document.activeElement?.matches("input,select,button:disabled")
-    )
-      await loadList(true);
+    apply(await api("/status"));
   } catch (error) {
     $("connection-status").textContent = "Connection interrupted";
-    $("notice").textContent =
-      `Live updates unavailable. Displaying the last received data. ${error.message} Retrying automatically.`;
+    $("notice").textContent = `Live updates unavailable. ${error.message}`;
     $("notice").hidden = false;
-  } finally {
-    busy = false;
   }
 }
 async function detail(id) {
@@ -807,6 +917,9 @@ async function detail(id) {
   const facts = [
     ["Outcome", labels[job.state] || job.state],
     ["Requested", new Date(job.created * 1000).toLocaleString()],
+    ...(FINISHED.includes(job.state)
+      ? [["Finished", new Date(job.updated * 1000).toLocaleString()]]
+      : []),
     ["Origin", origins[job.origin] || job.origin],
     ["Attempt", job.attempts],
     ["Output", job.output || "No published output"],
@@ -916,7 +1029,10 @@ async function perform(target) {
       await copy(settings.api_key);
       toast("API key copied.");
     } else if (action === "download-report")
-      download(jobs.get(id).report || {}, `crowbarr-audit-${id}.json`);
+      download(
+        (jobs.get(id)?.report) || (await api(`/jobs/${id}`)).report || {},
+        `crowbarr-audit-${id}.json`,
+      );
     else if (action === "providers") {
       const result = await api(`/jobs/${id}/providers`, "POST");
       $("provider-results").innerHTML =
@@ -940,6 +1056,7 @@ function setTheme(theme) {
 }
 async function showLogin() {
   session = false;
+  if (stream) { stream.close(); stream = null; }
   settings = savedSettings = null;
   status = null;
   jobs.clear();
@@ -974,6 +1091,7 @@ async function enter() {
   $("workspace").hidden = false;
   await refresh();
   await navigate();
+  listen();          // from here the server pushes; nothing polls
 }
 $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1100,5 +1218,32 @@ try {
 } catch {
   setTheme("light");
 }
-enter().catch(showLogin);
-setInterval(refresh, 3000);
+enter().catch((error) => {
+  // Only an authentication failure means "sign in". Anything else is a fault worth
+  // showing, not a login prompt that hides it.
+  if (!session) return showLogin();
+  $("notice").textContent = `Crowbarr could not start: ${error.message}`;
+  $("notice").hidden = false;
+  console.error(error);
+});
+// The server pushes state when it changes. The browser stops asking on a timer, so an
+// idle library costs one heartbeat a minute instead of twenty requests.
+let stream = null;
+function listen() {
+  if (stream) stream.close();
+  stream = new EventSource("/api/events");
+  stream.addEventListener("status", (event) => {
+    try {
+      apply(JSON.parse(event.data));
+    } catch (error) {
+      console.error(error);
+    }
+  });
+  stream.addEventListener("open", () => {
+    $("connection-status").textContent = "Live";
+  });
+  stream.addEventListener("error", () => {
+    $("connection-status").textContent = "Reconnecting…";
+    // EventSource retries on its own; only step in if the session ended.
+  });
+}

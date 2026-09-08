@@ -154,3 +154,43 @@ def test_a_feature_length_subtitle_is_not_rejected_for_being_long():
     assert result["dialogue_coverage"] < 0.1
     # Plenty of distributed anchors: the percentage floor must not veto it.
     assert result["decision"] != "inconclusive"
+
+
+def test_scattered_bad_anchors_do_not_turn_a_correct_subtitle_into_a_repair():
+    """47 good anchors and a few wild ones is a correct subtitle, not a timing fault."""
+    words, cues, clock = [], [], 0.0
+    for index in range(40):
+        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
+        start = clock
+        for token in phrase:
+            words.append(Word(clock, clock + 0.4, token, 0.95))
+            clock += 0.5
+        # Three cues sit far from their audio; the rest are correct.
+        drift = 5.0 if index in (7, 19, 31) else 0.0
+        cues.append(Cue(start + drift, clock - 0.1 + drift, " ".join(phrase)))
+        clock += 8.0
+    result = audit(cues, words, clock)
+    assert result["start_fit"]["residual_median_seconds"] < 0.5
+    assert result["start_fit"]["residual_p95_seconds"] > 2.5
+    assert result["decision"] == "pass"
+
+
+def test_a_correct_shift_counts_as_improvement_despite_unmovable_outliers():
+    """Mismatched anchors stay wrong after a shift; they must not mask a real repair."""
+    words, cues, clock, shifted = [], [], 0.0, []
+    for index in range(40):
+        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
+        start = clock
+        for token in phrase:
+            words.append(Word(clock, clock + 0.4, token, 0.95))
+            clock += 0.5
+        # The whole subtitle is 1.4 s late; three cues are simply mismatched.
+        bad = 5.0 if index in (7, 19, 31) else 0.0
+        cues.append(Cue(start + 1.4 + bad, clock - 0.1 + 1.4 + bad, " ".join(phrase)))
+        shifted.append(Cue(start + bad, clock - 0.1 + bad, " ".join(phrase)))
+        clock += 8.0
+    before = audit(cues, words, clock)
+    after = audit(shifted, words, clock)
+    assert before["decision"] == "repair"
+    assert after["decision"] == "pass"
+    assert improved(before, after), "removing a real 1.4 s lag is an improvement"

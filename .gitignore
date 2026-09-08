@@ -14,3 +14,5 @@ dist/
 build/
 playwright-report/
 test-results/
+icon.af~lock~
+icon.af
