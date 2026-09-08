@@ -2,13 +2,63 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions: {}
 
+concurrency:
+  group: crowbarr-release
+  cancel-in-progress: false
+
 jobs:
+  release-version:
+    name: Read release version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      series: ${{ steps.version.outputs.series }}
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: version
+        name: Create version tag when needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(python -c 'from crowbarr.version import APPLICATION_VERSION; print(APPLICATION_VERSION)')"
+          series="${version%.*}"
+          tag="v$version"
+          publish=false
+
+          git fetch --tags --force
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            tagged_commit="$(git rev-list -n 1 "$tag")"
+            if [[ "$tagged_commit" == "$GITHUB_SHA" ]] && ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              publish=true
+            fi
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "Crowbarr $version"
+            git push origin "$tag"
+            publish=true
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "series=$series" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
   image:
+    if: needs.release-version.outputs.publish == 'true'
+    needs: release-version
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -46,12 +96,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          flavor: |
-            latest=auto
-            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ needs.release-version.outputs.version }}${{ matrix.suffix }}
+            type=raw,value=${{ needs.release-version.outputs.series }}${{ matrix.suffix }}
+            type=raw,value=latest${{ matrix.suffix }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -66,6 +114,8 @@ jobs:
 
   native-linux:
     name: Build Linux x86_64 package
+    if: needs.release-version.outputs.publish == 'true'
+    needs: release-version
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -126,8 +176,8 @@ jobs:
 
   github-release:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [image, native-linux]
+    if: needs.release-version.outputs.publish == 'true'
+    needs: [release-version, image, native-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -140,6 +190,8 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
           INSTALL_NOTES: |
             ## Install on Linux x86_64
 
@@ -149,15 +201,15 @@ jobs:
 
             Open `http://localhost:8449` after installation. Update later with `sudo crowbarr-update`.
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release-assets/* \
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release-assets/* \
+            gh release create "$RELEASE_TAG" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
               --notes "$INSTALL_NOTES" \
-              --title "Crowbarr ${GITHUB_REF_NAME#v}"
+              --title "Crowbarr $RELEASE_VERSION"
           fi
