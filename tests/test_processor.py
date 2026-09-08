@@ -379,3 +379,62 @@ def test_a_provider_download_that_bazarr_discards_retries_instead_of_parking(vid
     result = processor.process(db.claim(), settings, tmp_path, db)
     assert result["state"] == "retry"
     assert "next candidate" in result["error"]
+
+
+def test_a_few_bad_anchors_do_not_veto_an_otherwise_excellent_fit():
+    """At small anchor counts the 95th percentile is just the second-worst point."""
+    from crowbarr.processor import _retime_authored
+    from crowbarr.subtitles import Cue
+
+    # 29 anchors: 27 sitting almost exactly on a 0.64 s offset, 2 badly mismatched.
+    evidence = []
+    for index in range(27):
+        start = 10 + index * 40
+        evidence.append({"cue": index + 1, "subtitle_start": start, "subtitle_end": start + 2,
+                         "audio_start": start - 0.64, "audio_end": start + 1.36,
+                         "start_delta_seconds": 0.64, "end_delta_seconds": 0.64,
+                         "error_seconds": 0.64, "within_tolerance": False})
+    for index, start in enumerate((450, 890)):
+        evidence.append({"cue": 100 + index, "subtitle_start": start, "subtitle_end": start + 2,
+                         "audio_start": start - 4.2, "audio_end": start - 2.2,
+                         "start_delta_seconds": 4.2, "end_delta_seconds": 4.2,
+                         "error_seconds": 4.2, "within_tolerance": False})
+    original = [Cue(item["subtitle_start"], item["subtitle_end"], f"line {n}")
+                for n, item in enumerate(evidence)]
+    aligned, model = _retime_authored(original, {"evidence": evidence})
+    assert model["median_residual_seconds"] < 0.5
+    assert model["p95_residual_seconds"] > 3.0
+    assert aligned, "two outliers must not discard a fit the other 27 anchors agree on"
+
+
+def test_a_fit_the_anchors_broadly_disagree_with_is_still_refused():
+    from crowbarr.processor import _retime_authored
+    from crowbarr.subtitles import Cue
+
+    evidence = []
+    for index in range(20):
+        start = 10 + index * 40
+        drift = 3.0 if index % 2 else -3.0   # no consistent offset exists
+        evidence.append({"cue": index + 1, "subtitle_start": start, "subtitle_end": start + 2,
+                         "audio_start": start + drift, "audio_end": start + drift + 2,
+                         "start_delta_seconds": -drift, "end_delta_seconds": -drift,
+                         "error_seconds": abs(drift), "within_tolerance": False})
+    original = [Cue(item["subtitle_start"], item["subtitle_end"], f"line {n}")
+                for n, item in enumerate(evidence)]
+    aligned, model = _retime_authored(original, {"evidence": evidence})
+    assert not aligned
+    assert "do not support" in model["reason"]
+
+
+def test_an_english_image_subtitle_is_reported_rather_than_ignored():
+    """A remux can carry a good English subtitle as bitmaps; the job must say so."""
+    from crowbarr.media import unreadable_subtitles
+
+    metadata = {"streams": [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 2, "codec_type": "subtitle", "codec_name": "dvd_subtitle", "tags": {"language": "eng"}},
+        {"index": 3, "codec_type": "subtitle", "codec_name": "dvd_subtitle", "tags": {"language": "fre"}},
+        {"index": 4, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}},
+    ]}
+    reported = unreadable_subtitles(metadata)
+    assert reported == ["embedded stream 2 (dvd_subtitle)"]

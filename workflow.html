@@ -389,6 +389,11 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--rule);
 <h2>Known gaps</h2>
 <p class="section-note prose">Honest limits of the current build, not a roadmap.</p>
 <ul class="gaps">
+  <li><b>Image subtitles are invisible.</b> Only text tracks are read. Blu-ray and DVD
+  remuxes usually store subtitles as bitmaps, English included, so a file that already has
+  a good English subtitle can look to Crowbarr like a file with none — it will fetch an
+  external one, repair that, and publish a third track. The job report names the track it
+  could not read, but reading it would need OCR.</li>
   <li><b>Sampling stops at 85% of the runtime.</b> The final stretch is extrapolated, and the re-check uses the same windows, so drift right at the end can be missed.</li>
   <li><b>Crowbarr never tells Bazarr it disagreed.</b> Bazarr can re-sync or upgrade the same subtitle later, unaware its previous result was judged wrong.</li>
   <li><b>Bazarr's provider and score are ignored.</b> The hook sends them; the decision does not use them.</li>

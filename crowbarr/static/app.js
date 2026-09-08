@@ -9,9 +9,10 @@ let polling = false;
 const states = {
   waiting: ["Waiting for subtitle", "text-bg-light"], queued: ["Queued", "text-bg-light"],
   retry: ["Retry scheduled", "text-bg-warning"], processing: ["Processing", "text-bg-primary"],
-  unchanged: ["Audit passed · unchanged", "text-bg-success"],
-  completed: ["Completed", "text-bg-success"], review: ["Needs attention", "text-bg-warning"],
-  failed: ["Failed", "text-bg-danger"], superseded: ["Replaced", "text-bg-light"],
+  // Both of these finished successfully; the difference is whether anything was written.
+  unchanged: ["Checked · left alone", "text-bg-success"],
+  completed: ["Subtitle written", "text-bg-success"], review: ["Needs attention", "text-bg-warning"],
+  failed: ["Failed", "text-bg-danger"], superseded: ["Superseded · restarted", "text-bg-light"],
 };
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -54,7 +55,7 @@ function endSession() {
   $("machine-api-key").type = "password";
   $("toggle-api-key").textContent = "Show key";
   $("toggle-api-key").setAttribute("aria-pressed", "false");
-  $("jobs").replaceChildren();
+  renderJobs();
   ["activity-view", "settings-view", "navigation", "logout"].forEach(id => $(id).hidden = true);
   $("login-view").hidden = false;
   $("service-state").textContent = "Subtitle automation";
@@ -74,55 +75,151 @@ function relativeTime(value) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   return new Date(value * 1000).toLocaleDateString();
 }
-function renderJobs() {
-  if (!snapshot) return;
-  $("jobs").replaceChildren();
-  const filter = $("filter").value;
-  const jobs = snapshot.jobs.filter(job => filter === "all" || job.state === filter ||
-    (filter === "active" && ["waiting", "queued", "processing", "retry"].includes(job.state)) ||
-    (filter === "attention" && ["review", "failed"].includes(job.state)));
-  for (const job of jobs) {
-    const row = element("tr");
-    const media = element("td", undefined, "media-cell");
-    media.append(element("div", job.title, "media-title"));
-    let note = job.state === "processing" ? job.stage : job.error;
-    if (job.state === "waiting") note = `Eligible ${new Date(job.ready * 1000).toLocaleString()}`;
-    if (note) media.append(element("div", note, "job-note"));
-    if (job.manager) media.append(element("div", job.manager === "sonarr" ? "Sonarr" : "Radarr", "job-note"));
-    const status = element("td");
-    const [label, color] = states[job.state] || [job.state, "text-bg-light"];
-    status.append(element("span", label, `badge ${color}`));
-    const source = job.report ? (job.report.mode === "authored_timing" ? "Authored + audio" : "Generated") :
-      (job.source ? "Authored SRT" : "Embedded / audio");
-    row.append(media, status, element("td", source, "text-secondary"), element("td", relativeTime(job.updated), "text-secondary text-nowrap"));
-    const actions = element("td", undefined, "text-end");
-    const details = element("button", "Details", "btn btn-sm btn-outline-secondary");
-    details.addEventListener("click", () => showDetails(job));
-    actions.append(details);
-    if (["waiting", "queued", "retry"].includes(job.state)) {
-      const promote = element("button", "Process next", "btn btn-sm btn-outline-primary ms-2");
-      promote.addEventListener("click", () => action(promote, () => api(`/jobs/${job.id}/promote`, "POST")));
-      actions.append(promote);
-    }
-    if (["waiting", "queued", "retry", "processing"].includes(job.state)) {
-      const cancel = element("button", job.cancel_requested ? "Stopping…" : "Cancel", "btn btn-sm btn-outline-danger ms-2");
-      cancel.disabled = Boolean(job.cancel_requested);
-      cancel.addEventListener("click", () => action(cancel, () => api(`/jobs/${job.id}/cancel`, "POST")));
-      actions.append(cancel);
-    }
-    media.append(element("div", `${job.origin || "backlog"} · priority ${job.priority || 0}`, "job-note"));
-    if (["failed", "review"].includes(job.state)) {
-      const retry = element("button", "Retry", "btn btn-sm btn-outline-secondary ms-2");
-      retry.addEventListener("click", () => action(retry, () => api(`/jobs/${job.id}/retry`, "POST")));
-      actions.append(retry);
-    }
-    row.append(actions);
-    $("jobs").append(row);
-  }
-  $("empty-queue").hidden = jobs.length > 0;
-  $("empty-queue").querySelector("h2").textContent = filter === "all" ? "Nothing in the queue yet" : "No matching jobs";
+const PENDING = ["queued", "waiting", "retry"];
+const ORIGINS = { manual: "you asked for it", import: "new import", bazarr: "Bazarr subtitle", retry: "retry", backlog: "library sweep" };
+function jobWhy(job) {
+  const source = job.report ? (job.report.mode === "authored_timing" ? "checked against audio" : "transcribed") : null;
+  return [ORIGINS[job.origin] || "library sweep", job.manager, source].filter(Boolean).join(" · ");
 }
-function showDetails(job) {
+let openDetail = null;
+const detailHome = () => $("job-detail").closest("#detail-home") ? null : document.getElementById("detail-home");
+function parkDetails() {
+  // The list re-renders every few seconds; move the panel out first or it is destroyed.
+  const home = document.getElementById("detail-home");
+  if (home && $("job-detail").parentElement !== home) home.append($("job-detail"));
+  $("job-detail").hidden = true;
+}
+function jobRow(job, tbody) {
+  const row = element("tr");
+  row.dataset.job = job.id;
+  const media = element("td", undefined, "media-cell");
+  media.append(element("div", job.title, "media-title"));
+  let note = job.state === "processing" ? job.stage : job.error;
+  if (job.state === "waiting") note = `Eligible ${new Date(job.ready * 1000).toLocaleString()}`;
+  if (note) media.append(element("div", note, "job-note"));
+  media.append(element("div", jobWhy(job), "job-note"));
+
+  const status = element("td");
+  const [label, color] = states[job.state] || [job.state, "text-bg-light"];
+  status.append(element("span", label, `badge ${color}`));
+
+  const actions = element("td", undefined, "text-end text-nowrap");
+  const details = element("button", "Details", "btn btn-sm btn-outline-secondary");
+  details.addEventListener("click", () => toggleDetails(job, row, details));
+  actions.append(details);
+  actions.append(jobActions(job));
+  if (["failed", "review", "unchanged", "completed"].includes(job.state)) {
+    const retry = element("button", "Check again", "btn btn-sm btn-outline-secondary ms-2");
+    retry.addEventListener("click", () => action(retry, () => api(`/jobs/${job.id}/retry`, "POST")));
+    actions.append(retry);
+  }
+  row.append(media, status, element("td", relativeTime(job.updated), "text-secondary text-nowrap"), actions);
+  tbody.append(row);
+}
+function jobActions(job) {
+  const wrap = element("span", undefined, "text-nowrap");
+  const add = (text, cls, path) => {
+    const button = element("button", text, `btn btn-sm ${cls} ms-2`);
+    button.addEventListener("click", () => action(button, () => api(path, "POST")));
+    wrap.append(button);
+  };
+  if (PENDING.includes(job.state)) add("Process next", "btn-outline-primary", `/jobs/${job.id}/promote`);
+  if ([...PENDING, "processing"].includes(job.state) && !job.cancel_requested) add("Cancel", "btn-outline-danger", `/jobs/${job.id}/cancel`);
+  return wrap;
+}
+function renderNow(job) {
+  $("now").hidden = !job;
+  $("now-idle").hidden = Boolean(job);
+  if (!job) return;
+  $("now-title").textContent = job.title;
+  $("now-stage").textContent = job.stage || "Starting…";
+  $("now-actions").replaceChildren(jobActions(job));
+}
+function renderSummary(counts) {
+  const waiting = (counts.queued || 0) + (counts.waiting || 0) + (counts.retry || 0);
+  const summary = [["Subtitle written", counts.completed || 0], ["Checked · left alone", counts.unchanged || 0],
+    ["Needs attention", (counts.review || 0) + (counts.failed || 0)], ["Waiting", waiting]];
+  $("queue-summary").replaceChildren();
+  for (const [label, value] of summary) {
+    const item = element("span", undefined, "summary-item");
+    item.append(element("b", value.toLocaleString()), element("span", label));
+    $("queue-summary").append(item);
+  }
+}
+function renderNext(next, waiting) {
+  $("next-count").textContent = next.length
+    ? (waiting > next.length ? `Next up — showing ${next.length} of ${waiting.toLocaleString()} waiting` : `Next up — ${waiting} waiting`)
+    : "Nothing waiting";
+  const list = $("next");
+  list.replaceChildren();
+  for (const job of next) {
+    const item = element("li", undefined, "next-item");
+    const label = element("span", undefined, "next-label");
+    label.append(element("span", job.title, "next-title"), element("span", jobWhy(job), "job-note"));
+    item.append(label, jobActions(job));
+    list.append(item);
+  }
+}
+function renderJobs() {
+  if (!snapshot) { $("results").replaceChildren(); return; }
+  parkDetails();
+  const counts = snapshot.counts || {};
+  const all = snapshot.jobs || [];
+  const total = states => states.reduce((sum, state) => sum + (counts[state] || 0), 0);
+
+  renderNow(all.find(job => job.state === "processing"));
+  renderSummary(counts);
+  const next = all.filter(job => PENDING.includes(job.state));
+  renderNext(next, total(PENDING));
+
+  const filter = $("filter").value;
+  const finished = all.filter(job => !PENDING.includes(job.state) && job.state !== "processing");
+  const shown = finished.filter(job => filter === "all" || job.state === filter ||
+    (filter === "attention" && ["review", "failed"].includes(job.state)));
+  const done = total(["completed", "unchanged", "review", "failed", "superseded"]);
+  const body = $("results");
+  body.replaceChildren();
+  for (const job of shown) jobRow(job, body);
+  $("results-empty").hidden = shown.length > 0;
+  $("results-empty").textContent = filter === "all"
+    ? "No results yet. Crowbarr will list what it decided here."
+    : "No results of that kind yet.";
+  $("results-count").textContent = done > finished.length
+    ? `showing the ${shown.length} most recent of ${done.toLocaleString()}`
+    : `${shown.length} of ${done.toLocaleString()}`;
+
+  if (openDetail) {
+    const row = document.querySelector(`tr[data-job="${openDetail}"]`);
+    const job = all.find(item => item.id === openDetail);
+    if (row && job) openDetails(job, row, row.querySelector("button"));
+    else openDetail = null;
+  }
+}
+function closeDetails() {
+  openDetail = null;
+  parkDetails();
+  document.querySelectorAll("tr.detail-row").forEach(node => node.remove());
+  document.querySelectorAll(".activity-table button").forEach(node => {
+    if (node.textContent === "Hide details") node.textContent = "Details";
+  });
+}
+function openDetails(job, row, button) {
+  const holder = element("tr", undefined, "detail-row");
+  const cell = element("td"); cell.colSpan = 4;
+  holder.append(cell);
+  row.after(holder);
+  buildDetails(job);
+  cell.append($("job-detail"));
+  $("job-detail").hidden = false;
+  openDetail = job.id;
+  if (button) button.textContent = "Hide details";
+}
+function toggleDetails(job, row, button) {
+  const isOpen = openDetail === job.id;
+  closeDetails();
+  if (!isOpen) openDetails(job, row, button);
+}
+function buildDetails(job) {
   $("job-detail").hidden = false;
   $("detail-title").textContent = job.title;
   $("detail-path").textContent = job.media;
@@ -187,8 +284,6 @@ function showDetails(job) {
     for (const warning of report.warnings || []) $("detail-issues").append(element("li", warning, "text-secondary"));
     $("detail-issues").append(element("li", report.note, "text-secondary"));
   }
-  $("job-detail").focus({ preventScroll: true });
-  $("job-detail").scrollIntoView({ block: "nearest" });
 }
 async function refresh() {
   if (!authenticated || polling) return;
@@ -216,17 +311,6 @@ async function refresh() {
       $("integration-status").append(element("span", !sync ? `${label}: first sync pending` :
         sync.healthy ? `${label}: ${sync.file_count} eligible files · synced ${relativeTime(sync.last_success)}` :
         `${label}: sync unavailable · new jobs held`, sync?.healthy ? "text-secondary" : "text-warning-emphasis"));
-    }
-    $("queue-summary").replaceChildren();
-    const counts = snapshot.counts;
-    const summary = [["Queued", (counts.queued || 0) + (counts.waiting || 0) + (counts.retry || 0)],
-      ["Processing", counts.processing || 0], ["Completed", counts.completed || 0],
-      ["Audit passed · unchanged", counts.unchanged || 0],
-      ["Need attention", (counts.review || 0) + (counts.failed || 0)]];
-    for (const [label, value] of summary) {
-      const span = element("span", undefined, "text-secondary");
-      span.append(element("strong", String(value), "text-body me-1"), document.createTextNode(label));
-      $("queue-summary").append(span);
     }
     renderJobs();
   } catch (error) {
@@ -408,7 +492,7 @@ $("media-search").addEventListener("input", event => {
   searchTimer = setTimeout(() => renderMediaResults(term), 250);
 });
 $("filter").addEventListener("change", renderJobs);
-$("close-detail").addEventListener("click", () => $("job-detail").hidden = true);
+$("close-detail").addEventListener("click", closeDetails);
 // The session lives in an httpOnly cookie, so resume straight into the dashboard
 // when one is still valid and fall back to the sign-in panel when it is not.
 enter().catch(() => showLogin());

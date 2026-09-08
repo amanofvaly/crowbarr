@@ -80,8 +80,27 @@ def extract_audio(media: Path, destination: Path, metadata: dict, stream: dict) 
     return offset, duration
 
 
+def unreadable_subtitles(metadata: dict) -> list[str]:
+    """Name English subtitle tracks that exist but cannot be read as text.
+
+    Blu-ray and DVD remuxes usually store subtitles as bitmaps, so a file can carry a
+    perfectly good English subtitle that Crowbarr cannot use without OCR. Skipping it
+    silently makes the job look like an episode with no subtitle at all.
+    """
+    return [
+        f"embedded stream {stream['index']} ({stream.get('codec_name')})"
+        for stream in metadata["streams"]
+        if stream["codec_type"] == "subtitle"
+        and stream.get("codec_name") not in EMBEDDED_TEXT_CODECS
+        and stream.get("tags", {}).get("language", "und").lower() in {"en", "eng"}
+    ]
+
+
+EMBEDDED_TEXT_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+
 def embedded_subtitles(media: Path, directory: Path, metadata: dict, settings: Settings) -> list[Path]:
-    supported = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
+    supported = EMBEDDED_TEXT_CODECS
     results = []
     for stream in metadata["streams"]:
         language = stream.get("tags", {}).get("language", "und").lower()

@@ -405,6 +405,7 @@ class Database:
             "WHERE path=jobs.media LIMIT 1) AS manager FROM jobs "
         )
         pending = "('queued','waiting','retry')"
+        now = time.time()
         with self.connect() as db:
             jobs = [
                 dict(row)
@@ -413,7 +414,12 @@ class Database:
             jobs += [
                 dict(row)
                 for row in db.execute(
-                    select + f"WHERE state IN {pending} ORDER BY priority DESC, ready, id LIMIT 25"
+                    # Identical ordering to claim(), including the ageing term, or the
+                    # dashboard shows a different "next up" than the queue will run.
+                    select
+                    + f"WHERE state IN {pending} "
+                    + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,created,id "
+                    + "LIMIT 25"
                 )
             ]
             jobs += [
