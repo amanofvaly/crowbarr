@@ -7,7 +7,7 @@ import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -145,6 +145,72 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         )
         return data
 
+    @app.get("/api/openapi.json", dependencies=[Depends(authenticate)], include_in_schema=False)
+    def api_schema():
+        schema = app.openapi()
+        schema.setdefault("components", {})["securitySchemes"] = {
+            "ApiKey": {"type": "apiKey", "in": "header", "name": "X-Api-Key"},
+            "Bearer": {"type": "http", "scheme": "bearer"},
+        }
+        for path, operations in schema["paths"].items():
+            if path.startswith("/api/") and path not in {"/api/session", "/api/setup"}:
+                for operation in operations.values():
+                    if isinstance(operation, dict):
+                        operation["security"] = [{"ApiKey": []}, {"Bearer": []}]
+        return schema
+
+    @app.get("/api/jobs", dependencies=[Depends(authenticate)])
+    def jobs(
+        state: str = "queue", q: str = "", offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)
+    ):
+        import json
+        import time
+
+        groups = {
+            "queue": ["processing", "queued", "waiting", "retry"],
+            "review": ["review", "failed"],
+            "history": ["completed", "unchanged", "superseded", "cancelled", "failed", "review"],
+        }
+        valid = set(sum(groups.values(), []))
+        if state not in groups and state not in valid and state != "all":
+            raise HTTPException(422, "Unknown job state")
+        selected = groups.get(state, [state])
+        where, args = [], []
+        if state != "all":
+            where.append("state IN (" + ",".join("?" for _ in selected) + ")")
+            args.extend(selected)
+        for word in q.split():
+            where.append("media LIKE ? ESCAPE '!'")
+            args.append("%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
+        condition = " AND ".join(where) or "1"
+        order = (
+            "CASE WHEN state='processing' THEN 0 ELSE 1 END, "
+            f"(priority + MIN(120, CAST(({time.time()}-created)/3600 AS INTEGER))) DESC,created,id"
+            if state == "queue"
+            else "updated DESC,id DESC"
+        )
+        with db.connect() as connection:
+            total = connection.execute(f"SELECT COUNT(*) FROM jobs WHERE {condition}", args).fetchone()[0]
+            rows = connection.execute(
+                f"SELECT * FROM jobs WHERE {condition} ORDER BY {order} LIMIT ? OFFSET ?",
+                (*args, limit, offset),
+            ).fetchall()
+        result = []
+        for row in rows:
+            job = dict(row)
+            job.update(title=Path(job["media"]).stem, report=json.loads(job["report"] or "null"))
+            result.append(job)
+        return {"results": result, "total": total, "offset": offset, "limit": limit}
+
+    @app.get("/api/jobs/{job_id}", dependencies=[Depends(authenticate)])
+    def job_detail(job_id: int):
+        import json
+
+        job = db.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        return {**job, "title": Path(job["media"]).stem, "report": json.loads(job["report"] or "null")}
+
     @app.get("/api/session")
     def session_state():
         """Public: lets the sign-in page know whether a login has been created yet."""
@@ -249,30 +315,46 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             raise HTTPException(422, "Media must be readable within configured media roots") from None
 
     @app.get("/api/media", dependencies=[Depends(authenticate)])
-    def media(q: str = "", limit: int = 20):
-        """Search the managed library so the dashboard can request work on a title."""
-        terms = ["%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
-                 for word in q.split()]
-        if not terms:
-            return {"results": []}
-        path_match = " AND ".join("path LIKE ? ESCAPE '!'" for _ in terms)
-        media_match = " AND ".join("media LIKE ? ESCAPE '!'" for _ in terms)
+    def media(
+        q: str = "", provider: str = "all", offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)
+    ):
+        if provider not in {"all", "sonarr", "radarr", "folders"}:
+            raise HTTPException(422, "Unknown library source")
+        conditions, args = [], []
+        if provider != "all":
+            conditions.append("provider=?")
+            args.append(provider)
+        for word in q.split():
+            conditions.append("(path LIKE ? ESCAPE '!' OR title LIKE ? ESCAPE '!')")
+            term = "%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+            args.extend([term, term])
+        where = " AND ".join(conditions) or "1"
+        catalog = (
+            "WITH catalog AS (SELECT path,title,provider FROM managed_media UNION ALL "
+            "SELECT DISTINCT media AS path,media AS title,'folders' AS provider FROM jobs "
+            "WHERE media NOT IN (SELECT path FROM managed_media)) "
+        )
         with db.connect() as connection:
+            total = connection.execute(
+                catalog + f"SELECT COUNT(*) FROM catalog WHERE {where}", args
+            ).fetchone()[0]
             rows = connection.execute(
-                f"SELECT path, title FROM managed_media WHERE {path_match} ORDER BY path LIMIT ?",
-                (*terms, max(1, min(limit, 50))),
+                catalog + f"SELECT * FROM catalog WHERE {where} ORDER BY title,path LIMIT ? OFFSET ?",
+                (*args, limit, offset),
             ).fetchall()
-            if not rows:
-                rows = connection.execute(
-                    f"SELECT DISTINCT media AS path, media AS title FROM jobs WHERE {media_match} "
-                    "ORDER BY media LIMIT ?",
-                    (*terms, max(1, min(limit, 50))),
-                ).fetchall()
         return {
             "results": [
-                {"path": row["path"], "title": Path(row["path"]).stem, "label": row["title"]}
+                {
+                    "path": row["path"],
+                    "title": Path(row["path"]).stem,
+                    "label": row["title"],
+                    "provider": row["provider"],
+                }
                 for row in rows
-            ]
+            ],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
         }
 
     @app.post("/api/jobs/{job_id}/promote", dependencies=[Depends(authenticate)])

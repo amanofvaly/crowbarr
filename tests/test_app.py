@@ -209,7 +209,9 @@ def test_sign_in_rejects_a_wrong_password_and_the_api_key_still_works_for_machin
     assert client.get("/api/status").status_code == 401
 
     assert client.post("/api/session", json={"username": "aman", "password": "wrong"}).status_code == 401
-    assert client.post("/api/session", json={"username": "aman", "password": "correct-horse"}).status_code == 200
+    assert (
+        client.post("/api/session", json={"username": "aman", "password": "correct-horse"}).status_code == 200
+    )
     assert client.get("/api/status").status_code == 200
 
     client.delete("/api/session")
@@ -223,3 +225,53 @@ def test_a_short_password_is_refused(client):
     assert response.status_code == 400
     assert "8 characters" in response.json()["detail"]
     assert client.get("/api/session").json()["configured"] is False
+
+
+def test_paginated_jobs_search_and_details_require_auth(client):
+    db = client.app.state.db
+    for index in range(31):
+        identifier = db.enqueue(f"/media/Title {index:02}.mkv", str(index), None, 0)
+        if index == 0:
+            db.update(
+                identifier,
+                state="processing",
+                stage="Recognizing dialogue",
+                progress_current=30,
+                progress_total=120,
+            )
+    assert client.get("/api/jobs").status_code == 401
+    first = client.get("/api/jobs?limit=25", headers=auth(client)).json()
+    second = client.get("/api/jobs?offset=25", headers=auth(client)).json()
+    assert first["total"] == 31
+    assert len(first["results"]) == 25 and len(second["results"]) == 6
+    assert not {j["id"] for j in first["results"]} & {j["id"] for j in second["results"]}
+    job = first["results"][0]
+    assert job["state"] == "processing" and job["progress_current"] == 30
+    detail = client.get(f"/api/jobs/{job['id']}", headers=auth(client)).json()
+    assert detail["progress_total"] == 120
+    assert client.get("/api/jobs?state=unknown", headers=auth(client)).status_code == 422
+    assert client.get("/api/jobs?offset=-1", headers=auth(client)).status_code == 422
+    assert client.get("/api/jobs/9999", headers=auth(client)).status_code == 404
+    matched = client.get("/api/jobs?q=Title%2003", headers=auth(client)).json()
+    assert matched["total"] == 1
+
+
+def test_library_search_matches_display_title_and_paginates(client):
+    with client.app.state.db.connect() as db:
+        for index in range(28):
+            db.execute(
+                "INSERT INTO managed_media VALUES (?,?,?,?,?,?)",
+                ("sonarr", index, 1, f"/tv/file-{index}.mkv", f"/tv/file-{index}.mkv", "A Friendly Title"),
+            )
+    found = client.get("/api/media?q=Friendly&provider=sonarr&offset=25", headers=auth(client)).json()
+    assert found["total"] == 28 and len(found["results"]) == 3
+    assert client.get("/api/media?provider=radarr", headers=auth(client)).json()["total"] == 0
+    assert client.get("/api/media?q=%25", headers=auth(client)).json()["total"] == 0
+    assert client.get("/api/media?limit=500", headers=auth(client)).status_code == 422
+
+
+def test_openapi_is_authenticated_and_describes_machine_auth(client):
+    assert client.get("/api/openapi.json").status_code == 401
+    schema = client.get("/api/openapi.json", headers=auth(client)).json()
+    assert schema["components"]["securitySchemes"]["ApiKey"]["name"] == "X-Api-Key"
+    assert schema["paths"]["/api/process"]["post"]["security"] == [{"ApiKey": []}, {"Bearer": []}]

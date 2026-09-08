@@ -159,19 +159,35 @@ def transcribe_windows(audio: Path, windows: list[tuple[float, float]], settings
     result, issues = [], []
     with wave.open(str(audio), "rb") as source, tempfile.TemporaryDirectory(dir=audio.parent) as work:
         rate = source.getframerate()
+        total = sum(end - start for start, end in windows)
+        completed = 0.0
         for index, (start, end) in enumerate(windows):
             clip = Path(work) / f"sample-{index}.wav"
             source.setpos(int(start * rate))
             with wave.open(str(clip), "wb") as target:
                 target.setparams(source.getparams())
                 target.writeframes(source.readframes(int((end - start) * rate)))
+            callback = getattr(transcribe, "progress", None)
+            transcribe.progress = (
+                (
+                    lambda position, duration, offset=completed, notify=callback: notify(
+                        offset + position, total
+                    )
+                )
+                if callback
+                else None
+            )
             try:
                 words, warnings = transcribe(clip, settings, cache)
+                result.extend(Word(w.start + start, w.end + start, w.text, w.probability) for w in words)
+                issues.extend(f"Sample {start:.0f}s: {warning}" for warning in warnings)
             except ReviewRequired:
                 issues.append(f"Sample near {start:.0f}s has insufficient English speech")
-                continue
-            result.extend(Word(w.start + start, w.end + start, w.text, w.probability) for w in words)
-            issues.extend(f"Sample {start:.0f}s: {warning}" for warning in warnings)
+            finally:
+                transcribe.progress = callback
+                completed += end - start
+                if callback:
+                    callback(completed, total)
     return result, issues
 
 

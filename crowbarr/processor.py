@@ -54,6 +54,7 @@ def _retime_authored(original: list[Cue], before: dict) -> tuple[list[Cue], dict
     model["kind"] = "robust_affine"
     if not 0.95 <= model["scale"] <= 1.05:
         return [], {**model, "reason": "Audio anchors imply an implausible timing scale"}
+
     def _piecewise():
         """Optional refinement. If it cannot be established, the global fit still stands."""
         residuals = [y - model["scale"] * x for x, y in points]
@@ -83,7 +84,11 @@ def _retime_authored(original: list[Cue], before: dict) -> tuple[list[Cue], dict
         built = []
         for index, (first, last) in enumerate(zip(indexes, indexes[1:], strict=False)):
             fitted = _fit_timing(points[first:last])
-            if last - first < 8 or not 0.95 <= fitted["scale"] <= 1.05 or fitted["p95_residual_seconds"] > 1.5:
+            if (
+                last - first < 8
+                or not 0.95 <= fitted["scale"] <= 1.05
+                or fitted["p95_residual_seconds"] > 1.5
+            ):
                 return None
             built.append(
                 {
@@ -318,8 +323,13 @@ def process(
     progress_updated = [0.0]
 
     def progress(position, total):
-        if time.monotonic() - progress_updated[0] > 10:
-            db.update(job["id"], stage=f"Recognizing dialogue · {position / 60:.1f} / {total / 60:.1f} min")
+        if time.monotonic() - progress_updated[0] > 2 or position >= total:
+            db.update(
+                job["id"],
+                stage="Recognizing dialogue",
+                progress_current=max(0, min(position, total)),
+                progress_total=total,
+            )
             progress_updated[0] = time.monotonic()
 
     if transcriber is None:
