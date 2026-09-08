@@ -1,12 +1,13 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
-    <meta name="theme-color" content="#141a17" />
+    <meta name="theme-color" content="#454950" />
     <title>Crowbarr — Subtitle workspace</title>
     <link rel="icon" href="/static/mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/vendor/bootstrap.min.css" />
     <link rel="stylesheet" href="/static/app.css" />
     <script src="/static/app.js" defer></script>
   </head>
@@ -16,8 +17,8 @@
       <div class="login-brand">
         <img src="/static/mark.svg" width="76" height="76" alt="" />
         <h1>Crowbarr</h1>
-        <p>Better subtitles.<br />Right where you watch.</p>
-        <div class="login-foot">Your library. Your server. Your subtitles.</div>
+        <p>Subtitle management</p>
+        <div class="login-foot">Crowbarr · Self-hosted subtitle management</div>
       </div>
       <form id="login-form" class="login-form">
         <h2 id="login-title">Welcome back</h2>
@@ -94,6 +95,6 @@
       </div>
       <div id="detail-content"></div>
     </dialog>
-    <div id="toast" class="toast" role="status" hidden></div>
+    <div id="toast" class="toast show" role="status" hidden></div>
   </body>
 </html>
