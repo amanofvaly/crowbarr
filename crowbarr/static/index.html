@@ -63,24 +63,52 @@
         <ul id="media-results" class="list-group list-group-flush mt-2"></ul>
       </div>
       <div id="integration-status" class="d-flex flex-wrap gap-3 small mb-3" aria-live="polite"></div>
-      <div class="queue-toolbar d-flex flex-wrap justify-content-between align-items-center gap-3 border-top border-bottom py-3">
-        <div id="queue-summary" class="d-flex flex-wrap gap-3 small" aria-live="polite"></div>
-        <div class="d-flex align-items-center gap-2"><label for="filter" class="small text-secondary">Show</label><select id="filter" class="form-select form-select-sm"><option value="all">All activity</option><option value="active">In progress</option><option value="completed">Completed</option><option value="unchanged">Audit passed · unchanged</option><option value="attention">Needs attention</option></select></div>
+      <div id="now" class="now-strip" hidden>
+        <span class="now-pulse" aria-hidden="true"></span>
+        <div class="now-body">
+          <div id="now-title" class="now-title"></div>
+          <div id="now-stage" class="job-note"></div>
+        </div>
+        <div id="now-actions" class="text-nowrap"></div>
       </div>
-      <div class="table-responsive">
-        <table class="table align-middle activity-table mb-0">
-          <caption class="visually-hidden">The active job, what runs next, and recent results</caption>
-          <thead><tr><th scope="col">Media</th><th scope="col">Status</th><th scope="col">Source</th><th scope="col">Updated</th><th scope="col" aria-label="Actions"></th></tr></thead>
-          <tbody id="jobs"></tbody>
-        </table>
-      </div>
-      <div id="empty-queue" class="empty-state text-center py-5" hidden><h2 class="h5">Nothing in the queue yet</h2><p class="text-secondary mb-0">Crowbarr will show new media and subtitle updates here after its next library check.</p></div>
-      <p class="small text-secondary mt-3">Showing the active job, the next few queued, and recent results. Originals are preserved. Existing subtitles are audited first. Repairs require measured improvement; uncertain results are withheld.</p>
-      <section id="job-detail" class="border rounded-3 p-4 mt-4" tabindex="-1" hidden>
+      <p id="now-idle" class="queue-empty" hidden>Nothing is being processed right now.</p>
+
+      <div id="queue-summary" class="summary-strip" aria-live="polite"></div>
+
+      <details id="next-block" class="next-block">
+        <summary id="next-count">Waiting</summary>
+        <ol id="next" class="next-list"></ol>
+      </details>
+
+      <section class="queue-block" aria-labelledby="results-heading">
+        <div class="queue-head">
+          <h2 id="results-heading" class="h6 mb-0">Recent results</h2>
+          <span id="results-count" class="queue-count"></span>
+          <label for="filter" class="visually-hidden">Filter results</label>
+          <select id="filter" class="form-select form-select-sm queue-filter">
+            <option value="all">All results</option>
+            <option value="completed">Subtitle written</option>
+            <option value="unchanged">Checked · left alone</option>
+            <option value="attention">Needs attention</option>
+            <option value="superseded">Superseded · restarted</option>
+          </select>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle activity-table mb-0">
+            <thead><tr><th scope="col">Media</th><th scope="col">Outcome</th><th scope="col">Finished</th><th scope="col" aria-label="Actions"></th></tr></thead>
+            <tbody id="results"></tbody>
+          </table>
+        </div>
+        <p id="results-empty" class="queue-empty" hidden>No results yet. Crowbarr will list what it decided here.</p>
+      </section>
+
+      <div id="detail-home">
+      <section id="job-detail" class="border rounded-3 p-4" tabindex="-1" hidden>
         <div class="d-flex justify-content-between gap-3"><h2 id="detail-title" class="h5 text-break"></h2><button id="close-detail" class="btn btn-sm btn-outline-secondary align-self-start">Close</button></div>
         <p id="detail-path" class="small text-secondary text-break"></p>
         <p id="detail-description"></p><dl id="detail-stats" class="row small"></dl><div id="detail-audit"></div><ul id="detail-issues" class="small mb-0"></ul>
       </section>
+      </div>
     </section>
 
     <section id="settings-view" hidden>

@@ -11,7 +11,14 @@ from .audit import audit, improved
 from .config import Settings, atomic_write
 from .db import Database
 from .library import allowed, signature, source_subtitle, subtitle_sources
-from .media import ReviewRequired, choose_audio, embedded_subtitles, extract_audio, probe
+from .media import (
+    ReviewRequired,
+    choose_audio,
+    embedded_subtitles,
+    extract_audio,
+    probe,
+    unreadable_subtitles,
+)
 from .subtitles import Cue, Word, match_passages, parse_srt, render_srt, validate_cues
 
 
@@ -46,7 +53,7 @@ def _retime_authored(original: list[Cue], before: dict) -> tuple[list[Cue], dict
     model = _fit_timing(points)
     model["kind"] = "robust_affine"
     if not 0.95 <= model["scale"] <= 1.05:
-        return [], model
+        return [], {**model, "reason": "Audio anchors imply an implausible timing scale"}
     def _piecewise():
         """Optional refinement. If it cannot be established, the global fit still stands."""
         residuals = [y - model["scale"] * x for x, y in points]
@@ -95,7 +102,11 @@ def _retime_authored(original: list[Cue], before: dict) -> tuple[list[Cue], dict
         if refined:
             segments, model = refined
     if not segments:
-        if model["p95_residual_seconds"] > 3.0:
+        # Judge the fit by its middle, not its worst points. Anchor sets are small -- at
+        # 29 anchors the 95th percentile is simply the second-worst one -- so a p95 gate
+        # lets two bad anchors veto a correction whose typical error is a tenth of a
+        # second. Give up only when the bulk of the anchors disagree with the fit.
+        if model["median_residual_seconds"] > 1.0 or model["p95_residual_seconds"] > 6.0:
             return [], {**model, "reason": "Timing residuals do not support a global correction"}
         segments = [{**model, "start": 0, "end": None}]
     result = []
@@ -358,6 +369,10 @@ def process(
                 warnings.append(f"Ignored unreadable {label}: {error}")
         if candidate_paths and not candidates:
             raise ReviewRequired("No discovered subtitle source could be read")
+        # An English track Crowbarr cannot decode is still worth reporting: without this
+        # the job looks as though the file had no English subtitle at all.
+        for label in unreadable_subtitles(metadata):
+            warnings.append(f"English {label} is an image subtitle and needs OCR; not used")
         provider_result = None
         if not candidates and not forced_generation and settings.bazarr.url and settings.providers():
             from .bazarr import try_alternative
@@ -583,7 +598,8 @@ def process(
             aligned, timing_model = _retime_authored(original, before)
             alignment_passages = before["evidence"]
             if not aligned:
-                issues.append("Audio anchors imply an implausible timing scale")
+                # Report why the model actually declined, not a guess about the scale.
+                issues.append(timing_model.get("reason", "Audio anchors do not support a correction"))
         else:
             timing_model = None
             baseline = _generated_baseline(passages)
