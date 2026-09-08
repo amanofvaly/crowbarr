@@ -20,6 +20,11 @@ time in every installation and can publish subtitles the previous policy refused
 operator whose review queue has refilled needs to be able to read why without reading a
 diff. `tests/test_release.py` fails when a current version has no entry.
 
+Pushing a new `APPLICATION_VERSION` to `main` starts the release workflow. It creates
+the matching `v` tag, builds the container images and native Linux package, verifies
+the package, and publishes the GitHub Release. Do not create or move release tags by
+hand.
+
 Write the entry for the person upgrading, not for the person who wrote the patch. Say
 what verdict or behaviour changed and what it now does to their files; a summary of the
 commit is not an entry. Keep the two sections separate — they cost an installation
