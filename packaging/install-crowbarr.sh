@@ -186,7 +186,8 @@ fi
 curl -fL --retry 3 "$RELEASE_URL/crowbarr-linux-x86_64.tar.gz" -o "$TEMP_DIR/package.tar.gz"
 (cd "$TEMP_DIR"; printf '%s  package.tar.gz\n' "$checksum" | sha256sum -c -)
 # Fetch before downtime; this also supports curl | sudo bash installation.
-curl -fL --retry 3 "$RELEASE_URL/install-crowbarr.sh" -o "$TEMP_DIR/updater"
+# A binary rollback must not restore an old updater that forgets persisted settings.
+curl -fL --retry 3 "$LATEST_URL/install-crowbarr.sh" -o "$TEMP_DIR/updater"
 bash -n "$TEMP_DIR/updater"
 install -d -m 0755 "$VERSIONS_DIR"
 secure_path "$TARGET_VERSION"
