@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crowbarr.app import create_app
+from crowbarr.version import APPLICATION_VERSION, AUDIT_POLICY_VERSION
 
 
 @pytest.fixture
@@ -21,7 +22,10 @@ def test_dashboard_and_health_public_but_data_private(client):
     assert client.get("/").status_code == 200
     assert client.get("/health").json()["status"] == "ok"
     assert client.get("/api/status").status_code == 401
-    assert client.get("/api/status", headers=auth(client)).status_code == 200
+    status = client.get("/api/status", headers=auth(client))
+    assert status.status_code == 200
+    assert status.json()["version"] == APPLICATION_VERSION
+    assert status.json()["audit_policy_version"] == AUDIT_POLICY_VERSION
     assert client.get("/static/vendor/bootstrap.min.css").status_code == 200
 
 

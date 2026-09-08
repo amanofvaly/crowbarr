@@ -19,6 +19,7 @@ from .config import ConfigStore, Settings
 from .db import Database
 from .integrations import check_connection
 from .service import Service
+from .version import AUDIT_POLICY_VERSION
 
 
 class BodyLimitMiddleware:
@@ -136,6 +137,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                 "wait_until": service.wait_until,
                 "wait_total": service.wait_total,
                 "version": __version__,
+                "audit_policy_version": AUDIT_POLICY_VERSION,
                 "paused": store.get().paused,
                 "last_scan": service.last_scan,
                 "media_count": data.pop("media_total", service.scan_count),

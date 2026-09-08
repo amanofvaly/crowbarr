@@ -5,7 +5,7 @@ decision. Existing installations persist this value in ``crowbarr.db`` and re-op
 their unresolved work only when it changes.
 """
 
-APPLICATION_VERSION = "0.3.1"
+APPLICATION_VERSION = "0.3.2"
 
 # This starts with the value older releases derived from APPLICATION_VERSION. Keeping
 # it preserves upgrade compatibility: installing the first release with split
