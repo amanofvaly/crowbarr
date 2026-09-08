@@ -1,499 +1,1105 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-let authenticated = false;
-let sessionRevision = 0;
-let configuration = null;
-let snapshot = null;
-let activeView = "activity";
-let polling = false;
-const states = {
-  waiting: ["Waiting for subtitle", "text-bg-light"], queued: ["Queued", "text-bg-light"],
-  retry: ["Retry scheduled", "text-bg-warning"], processing: ["Processing", "text-bg-primary"],
-  // Both of these finished successfully; the difference is whether anything was written.
-  unchanged: ["Checked · left alone", "text-bg-success"],
-  completed: ["Subtitle written", "text-bg-success"], review: ["Needs attention", "text-bg-warning"],
-  failed: ["Failed", "text-bg-danger"], superseded: ["Superseded · restarted", "text-bg-light"],
+const esc = (value) =>
+  String(value ?? "").replace(
+    /[&<>"']/g,
+    (char) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        char
+      ],
+  );
+const paths = {
+  dashboard:
+    '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  library:
+    '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4m-4 6h4m10-6h4m-4 6h4"/>',
+  review: '<path d="M12 3 2 20h20L12 3Z"/><path d="M12 9v5m0 3h.01"/>',
+  history: '<path d="M3 11a9 9 0 1 1 2 7M3 4v7h7m2-4v6l4 2"/>',
+  settings:
+    '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
+  api: '<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  refresh:
+    '<path d="M20 7a9 9 0 0 0-16 2m0-5v5h5M4 17a9 9 0 0 0 16-2m0 5v-5h-5"/>',
+  pause: '<path d="M8 5v14M16 5v14"/>',
+  play: '<path d="m8 4 13 8-13 8V4Z"/>',
+  arrow: '<path d="M4 12h16m-6-6 6 6-6 6"/>',
+  close: '<path d="m6 6 12 12M6 18 18 6"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/>',
+  queue: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
 };
-function element(tag, text, className) {
-  const node = document.createElement(tag);
-  if (text !== undefined) node.textContent = text;
-  if (className) node.className = className;
-  return node;
+const icon = (name) =>
+  `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.activity}</svg>`;
+const button = (label, action, style = "", attrs = "") =>
+  `<button type="button" class="button ${style}" data-action="${action}" ${attrs}>${label}</button>`;
+const link = (label, route, style = "") =>
+  `<a class="button ${style}" href="#${route}">${label}</a>`;
+const labels = {
+  processing: "Processing",
+  queued: "Queued",
+  waiting: "Waiting for subtitle",
+  retry: "Retry scheduled",
+  completed: "Subtitle written",
+  unchanged: "Original retained",
+  review: "Review needed",
+  failed: "Failed",
+  superseded: "Superseded",
+  cancelled: "Cancelled",
+};
+const origins = {
+  manual: "Manual request",
+  import: "New import",
+  bazarr: "Bazarr subtitle",
+  retry: "Retry",
+  backlog: "Library sweep",
+};
+const badge = (state) =>
+  `<span class="badge ${esc(state)}">${state === "processing" ? '<span class="status-dot"></span>' : ""}${esc(labels[state] || state)}</span>`;
+const fmt = (value) => Number(value || 0).toLocaleString();
+const duration = (value) =>
+  value == null
+    ? "Unavailable"
+    : `${Math.floor(Math.max(0, value) / 60)}m ${Math.floor(Math.max(0, value) % 60)}s`;
+const ago = (value) =>
+  !value ? "Not yet" : duration(Date.now() / 1000 - value) + " ago";
+const title = (job) =>
+  job.title || job.media?.split("/").pop() || "Untitled media";
+let savedSettings,
+  settings,
+  status,
+  session = false,
+  busy = false,
+  route = "dashboard",
+  section = "connections",
+  pageOffset = 0;
+let listQuery = "",
+  libraryProvider = "all",
+  historyFilter = "history",
+  routeRevision = 0,
+  listRevision = 0,
+  dirty = false,
+  setup = false,
+  timer;
+let jobs = new Map(),
+  media = [],
+  total = 0,
+  toastTimer;
+const navigation = [
+  ["dashboard", "Dashboard"],
+  ["activity", "Activity"],
+  ["library", "Library"],
+  ["review", "Review"],
+  ["history", "History"],
+  ["settings", "Settings"],
+  ["api", "API & webhooks"],
+];
+function toast(text, error = false) {
+  $("toast").textContent = text;
+  $("toast").className = `toast${error ? " error" : ""}`;
+  $("toast").hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => ($("toast").hidden = true), 6500);
 }
-function message(text, error = false) {
-  $("message").textContent = text;
-  $("message").className = `alert ${error ? "alert-danger" : "alert-success"}`;
-  $("message").hidden = !text;
-}
-async function api(path, method = "GET", data) {
+async function api(path, method = "GET", body) {
   const response = await fetch(`/api${path}`, {
-    method, headers: { "Content-Type": "application/json" },
-    body: data === undefined ? undefined : JSON.stringify(data),
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const result = await response.json();
   if (!response.ok) {
-    if (response.status === 401) endSession();
-    throw new Error(typeof result.detail === "string" ? result.detail : "The request could not be completed.");
+    if (response.status === 401 && session) {
+      session = false;
+      showLogin();
+    }
+    throw new Error(
+      typeof result.detail === "string"
+        ? result.detail
+        : "Request failed. Check your connection and try again.",
+    );
   }
   return result;
 }
-function view(name) {
-  activeView = name;
-  $("activity-view").hidden = name !== "activity";
-  $("settings-view").hidden = name !== "settings";
-  document.querySelectorAll(".nav-button").forEach(button => {
-    button.classList.toggle("active", button.dataset.view === name);
-    if (button.dataset.view === name) button.setAttribute("aria-current", "page");
-    else button.removeAttribute("aria-current");
-  });
+function empty(heading, description, action = "", symbol = "queue") {
+  return `<div class="empty">${icon(symbol)}<h3>${heading}</h3><p>${description}</p>${action}</div>`;
 }
-function endSession() {
-  authenticated = false;
-  sessionRevision += 1;
-  snapshot = null;
-  $("machine-api-key").value = "";
-  $("machine-api-key").type = "password";
-  $("toggle-api-key").textContent = "Show key";
-  $("toggle-api-key").setAttribute("aria-pressed", "false");
-  renderJobs();
-  ["activity-view", "settings-view", "navigation", "logout"].forEach(id => $(id).hidden = true);
-  $("login-view").hidden = false;
-  $("service-state").textContent = "Subtitle automation";
-  showLogin();
+function heading(name, description, actions = "") {
+  return `<div class="page-heading"><div><h1>${name}</h1><p>${description}</p></div><div class="actions">${actions}</div></div>`;
 }
-async function signOut() {
-  await action($("logout"), async () => {
-    const response = await fetch("/api/session", { method: "DELETE" });
-    if (!response.ok) throw new Error("Could not sign out. Please try again.");
-    endSession();
-  });
+function panel(name, body, extra = "") {
+  return `<section class="panel"><div class="panel-header"><h2>${name}</h2>${extra}</div>${body}</section>`;
 }
-function relativeTime(value) {
-  const seconds = Math.round(Date.now() / 1000 - value);
-  if (seconds < 60) return "Just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return new Date(value * 1000).toLocaleDateString();
+function drawNav() {
+  const counts = status?.counts || {};
+  $("navigation").innerHTML = navigation
+    .map(
+      ([key, label], index) =>
+        `${index === 5 ? '<div class="nav-separator"></div>' : ""}<a href="#${key}" class="nav-link ${key === route ? "active" : ""}" ${key === route ? 'aria-current="page"' : ""}>${icon(key)}${label}${key === "activity" ? `<span class="count">${fmt(["processing", "queued", "waiting", "retry"].reduce((sum, k) => sum + (counts[k] || 0), 0))}</span>` : key === "review" ? `<span class="count">${fmt((counts.review || 0) + (counts.failed || 0))}</span>` : ""}</a>`,
+    )
+    .join("");
+  $("breadcrumb").textContent =
+    `Workspace / ${navigation.find(([key]) => key === route)?.[1] || "Dashboard"}`;
 }
-const PENDING = ["queued", "waiting", "retry"];
-const ORIGINS = { manual: "you asked for it", import: "new import", bazarr: "Bazarr subtitle", retry: "retry", backlog: "library sweep" };
-function jobWhy(job) {
-  const source = job.report ? (job.report.mode === "authored_timing" ? "checked against audio" : "transcribed") : null;
-  return [ORIGINS[job.origin] || "library sweep", job.manager, source].filter(Boolean).join(" · ");
+function progressMarkup(job, compact = false) {
+  const measured =
+    Number.isFinite(job.progress_current) && job.progress_total > 0;
+  const percent = measured
+    ? Math.min(
+        100,
+        Math.max(0, (job.progress_current / job.progress_total) * 100),
+      )
+    : null;
+  return measured
+    ? `<div class="${compact ? "inline-progress" : ""}"><div class="progress-label"><span>${compact ? "Audio processed" : esc(job.stage || "Recognizing dialogue")}</span><strong>${percent.toFixed(1)}%</strong></div><progress aria-label="Audio processed during recognition" max="${job.progress_total}" value="${job.progress_current}"></progress>${compact ? "" : `<p class="hint mt-8">${duration(job.progress_current)} of ${duration(job.progress_total)} audio · recognition stage</p>`}</div>`
+    : `<div class="stage-working">${icon("refresh")}<span>${esc(job.stage || "Preparing worker")}</span></div>`;
 }
-let openDetail = null;
-const detailHome = () => $("job-detail").closest("#detail-home") ? null : document.getElementById("detail-home");
-function parkDetails() {
-  // The list re-renders every few seconds; move the panel out first or it is destroyed.
-  const home = document.getElementById("detail-home");
-  if (home && $("job-detail").parentElement !== home) home.append($("job-detail"));
-  $("job-detail").hidden = true;
+function jobButtons(job) {
+  const id = `data-id="${job.id}"`;
+  return `${button("Details", "details", "small", id)}${["queued", "waiting", "retry"].includes(job.state) ? button("Run next", "promote", "small", id) : ""}${["queued", "waiting", "retry", "processing"].includes(job.state) ? button(job.cancel_requested ? "Cancelling…" : "Cancel", "cancel", "small danger", `${id} ${job.cancel_requested ? "disabled" : ""}`) : ["failed", "review", "unchanged", "completed"].includes(job.state) ? button("Retry", "retry", "small", id) : ""}`;
 }
-function jobRow(job, tbody) {
-  const row = element("tr");
-  row.dataset.job = job.id;
-  const media = element("td", undefined, "media-cell");
-  media.append(element("div", job.title, "media-title"));
-  let note = job.state === "processing" ? job.stage : job.error;
-  if (job.state === "waiting") note = `Eligible ${new Date(job.ready * 1000).toLocaleString()}`;
-  if (note) media.append(element("div", note, "job-note"));
-  media.append(element("div", jobWhy(job), "job-note"));
-
-  const status = element("td");
-  const [label, color] = states[job.state] || [job.state, "text-bg-light"];
-  status.append(element("span", label, `badge ${color}`));
-
-  const actions = element("td", undefined, "text-end text-nowrap");
-  const details = element("button", "Details", "btn btn-sm btn-outline-secondary");
-  details.addEventListener("click", () => toggleDetails(job, row, details));
-  actions.append(details);
-  actions.append(jobActions(job));
-  if (["failed", "review", "unchanged", "completed"].includes(job.state)) {
-    const retry = element("button", "Check again", "btn btn-sm btn-outline-secondary ms-2");
-    retry.addEventListener("click", () => action(retry, () => api(`/jobs/${job.id}/retry`, "POST")));
-    actions.append(retry);
-  }
-  row.append(media, status, element("td", relativeTime(job.updated), "text-secondary text-nowrap"), actions);
-  tbody.append(row);
+function activeJob() {
+  const job = status?.jobs.find((j) => j.state === "processing");
+  if (!job)
+    return empty(
+      status?.paused
+        ? "Queue is paused"
+        : status?.wait_reason
+          ? "Waiting to process"
+          : "Worker is ready",
+      status?.wait_reason ||
+        "Eligible jobs will start automatically. You can also request an audit from your library.",
+      link("Browse library", "library"),
+      status?.paused ? "pause" : "check",
+    );
+  const stage = (job.stage || "").toLowerCase();
+  const step = stage.includes("publish")
+    ? 3
+    : /align|audit|match/.test(stage)
+      ? 2
+      : /recogn|sampl/.test(stage)
+        ? 1
+        : 0;
+  return `<div class="panel-body">${badge("processing")}<div class="active-title">${esc(title(job))}</div><p class="active-meta">${esc(origins[job.origin] || "Library sweep")} · ${job.directive === "generate" ? "Fresh generation" : "Subtitle audit & repair"}</p>${progressMarkup(job)}<ol class="pipeline">${["Prepare audio", "Recognize dialogue", "Validate timing", "Publish subtitle"].map((s, i) => `<li class="${i === step ? "current" : ""}" ${i === step ? 'aria-current="step"' : ""}>${s}</li>`).join("")}</ol><div class="active-footer"><span class="hint">${job.started ? `Running for ${duration(Date.now() / 1000 - job.started)}` : "Worker active"} · Single worker</span><div class="actions">${jobButtons(job)}</div></div></div>`;
 }
-function jobActions(job) {
-  const wrap = element("span", undefined, "text-nowrap");
-  const add = (text, cls, path) => {
-    const button = element("button", text, `btn btn-sm ${cls} ms-2`);
-    button.addEventListener("click", () => action(button, () => api(path, "POST")));
-    wrap.append(button);
+function rows(items, compact = false) {
+  items.forEach((j) => jobs.set(j.id, j));
+  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : "<th>Requested</th>"}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
+}
+function systemPanel() {
+  const r = status?.resources || {};
+  return `<div class="panel-body">${[
+    [
+      "Inference device",
+      r.gpu || savedSettings?.device?.toUpperCase() || "Unavailable",
+    ],
+    ["Whisper model", savedSettings?.model || "Unavailable"],
+    [
+      "RAM headroom",
+      r.ram_available_mb == null
+        ? "Unavailable"
+        : `${fmt(r.ram_available_mb)} MB`,
+    ],
+    [
+      "GPU memory free",
+      r.vram_free_mb == null
+        ? "Unavailable"
+        : `${fmt(r.vram_free_mb)} / ${fmt(r.vram_total_mb)} MB`,
+    ],
+    [
+      "CPU load / core",
+      r.cpu_load == null ? "Unavailable" : Number(r.cpu_load).toFixed(2),
+    ],
+    ["CPU fallback", savedSettings?.cpu_fallback ? "Enabled" : "Disabled"],
+  ]
+    .map(
+      ([key, value]) =>
+        `<div class="system-row"><span>${key}</span><strong>${esc(value)}</strong></div>`,
+    )
+    .join(
+      "",
+    )}${status?.wait_reason ? `<p class="hint mt-18">${esc(status.wait_reason)}</p>` : ""}</div>`;
+}
+function connectionsPanel() {
+  return `<div class="panel-body">${["sonarr", "radarr", "bazarr", "plex"]
+    .map((name) => {
+      const sync = status?.integrations?.find((i) => i.provider === name),
+        connected = Boolean(savedSettings?.[name]?.url);
+      return `<div class="service-row"><span class="service-mark">${name[0].toUpperCase()}</span><div><strong>${name[0].toUpperCase() + name.slice(1)}</strong><p>${!connected ? "Not configured" : sync ? (sync.healthy ? `${fmt(sync.file_count)} files · synced ${ago(sync.last_success)}` : "Sync unavailable") : "Configured · test in Settings"}</p></div><span class="status-dot ${!sync?.healthy ? "warning" : ""}"></span></div>`;
+    })
+    .join("")}</div>`;
+}
+function dashboard() {
+  const c = status?.counts || {},
+    pending = (status?.jobs || [])
+      .filter((j) => ["queued", "waiting", "retry"].includes(j.state))
+      .slice(0, 5);
+  const recent = (status?.jobs || [])
+    .filter(
+      (j) => !["processing", "queued", "waiting", "retry"].includes(j.state),
+    )
+    .slice(0, 5);
+  return (
+    heading(
+      "Dashboard",
+      "Your subtitle library, working in sync.",
+      `${button(icon(status?.paused ? "play" : "pause") + (status?.paused ? "Resume queue" : "Pause queue"), "pause")}${button(icon("refresh") + "Sync libraries", "scan", "primary")}`,
+    ) +
+    (!status?.configured
+      ? `<div class="callout"><div><strong>Let’s connect your library</strong><p>Add Sonarr or Radarr, map your folders, and choose a processing device.</p></div>${link("Set up Crowbarr", "settings/connections", "primary")}</div>`
+      : "") +
+    `<div class="stats-strip">${[
+      ["Managed media", status?.media_count, "library"],
+      [
+        "In queue",
+        ["queued", "waiting", "retry"].reduce((n, k) => n + (c[k] || 0), 0),
+        "queue",
+      ],
+      ["Subtitles written", c.completed, "check"],
+      ["Needs attention", (c.review || 0) + (c.failed || 0), "review"],
+    ]
+      .map(
+        ([label, value, symbol]) =>
+          `<div class="stat ${symbol === "review" ? "attention" : ""}"><span>${label}</span><strong>${fmt(value)}</strong>${icon(symbol)}</div>`,
+      )
+      .join(
+        "",
+      )}</div><div class="dashboard-grid"><div>${panel("Currently processing", activeJob(), '<span class="hint">Live worker activity</span>')}${panel("Up next", pending.length ? rows(pending, true) : empty("No pending jobs", "New imports and scheduled library checks will appear here."), '<a href="#activity">View queue →</a>')}${panel("Recent outcomes", recent.length ? rows(recent, true) : empty("Your results will appear here", "Completed audits, repairs, and review candidates are kept in History."), '<a href="#history">View history →</a>')}</div><aside class="dashboard-aside">${panel("System resources", systemPanel(), icon("cpu"))}${panel("Connected services", connectionsPanel(), '<a href="#settings/connections">Manage</a>')}</aside></div>`
+  );
+}
+function pager() {
+  return `<div class="pagination"><span>${total ? `${fmt(pageOffset + 1)}–${fmt(Math.min(pageOffset + 25, total))} of ${fmt(total)}` : "0 results"}</span><div class="actions">${button("Previous", "previous", "small", pageOffset === 0 ? "disabled" : "")}${button("Next", "next", "small", pageOffset + 25 >= total ? "disabled" : "")}</div></div>`;
+}
+function listShell() {
+  const names = {
+    activity: [
+      "Activity queue",
+      "Prioritize requests, follow real progress, and manage pending work.",
+    ],
+    review: [
+      "Needs review",
+      "Inspect uncertain subtitles and failed jobs before taking action.",
+    ],
+    history: [
+      "History",
+      "Every audit, repair, and generation — with its outcome and evidence.",
+    ],
   };
-  if (PENDING.includes(job.state)) add("Process next", "btn-outline-primary", `/jobs/${job.id}/promote`);
-  if ([...PENDING, "processing"].includes(job.state) && !job.cancel_requested) add("Cancel", "btn-outline-danger", `/jobs/${job.id}/cancel`);
-  return wrap;
+  const [name, description] = names[route];
+  return (
+    heading(
+      name,
+      description,
+      route === "activity"
+        ? button(status?.paused ? "Resume queue" : "Pause queue", "pause") +
+            button("Sync libraries", "scan", "primary")
+        : link("Search library", "library"),
+    ) +
+    `<section class="panel"><div class="queue-toolbar"><label class="sr-only" for="queue-query">Search jobs</label><input type="search" id="queue-query" placeholder="Filter by title or file path…" value="${esc(listQuery)}">${route === "history" ? `<label class="sr-only" for="history-filter">Filter outcomes</label><select id="history-filter">${["history", "completed", "unchanged", "review", "failed", "cancelled", "superseded"].map((s) => `<option value="${s}" ${historyFilter === s ? "selected" : ""}>${s === "history" ? "All outcomes" : labels[s]}</option>`).join("")}</select>` : ""}<span class="hint">${route === "activity" ? "Manual requests run ahead of background work" : "Results from your server"}</span></div><div id="list-content" aria-live="polite"><div class="loading">Loading ${name.toLowerCase()}…</div></div></section>`
+  );
 }
-function renderNow(job) {
-  $("now").hidden = !job;
-  $("now-idle").hidden = Boolean(job);
-  if (!job) return;
-  $("now-title").textContent = job.title;
-  $("now-stage").textContent = job.stage || "Starting…";
-  $("now-actions").replaceChildren(jobActions(job));
+function libraryShell() {
+  return (
+    heading(
+      "Library",
+      "Find a movie or episode. Check its subtitles or request a fresh transcript.",
+      button(icon("refresh") + "Sync libraries", "scan"),
+    ) +
+    `<div class="search-hero">${icon("search")}<label class="sr-only" for="library-query">Search library</label><input id="library-query" type="search" placeholder="Search titles, episodes, or file paths…" value="${esc(listQuery)}" autocomplete="off"><label class="sr-only" for="library-provider">Library source</label><select id="library-provider">${[
+      ["all", "All sources"],
+      ["sonarr", "Sonarr · TV"],
+      ["radarr", "Radarr · Movies"],
+      ["folders", "Folders"],
+    ]
+      .map(
+        ([value, label]) =>
+          `<option value="${value}" ${libraryProvider === value ? "selected" : ""}>${label}</option>`,
+      )
+      .join(
+        "",
+      )}</select></div><section class="panel"><div class="panel-header"><h2>Media library</h2><span class="hint">Audit preserves usable authored subtitles</span></div><div id="list-content" aria-live="polite"><div class="loading">Loading your library…</div></div></section>`
+  );
 }
-function renderSummary(counts) {
-  const waiting = (counts.queued || 0) + (counts.waiting || 0) + (counts.retry || 0);
-  const summary = [["Subtitle written", counts.completed || 0], ["Checked · left alone", counts.unchanged || 0],
-    ["Needs attention", (counts.review || 0) + (counts.failed || 0)], ["Waiting", waiting]];
-  $("queue-summary").replaceChildren();
-  for (const [label, value] of summary) {
-    const item = element("span", undefined, "summary-item");
-    item.append(element("b", value.toLocaleString()), element("span", label));
-    $("queue-summary").append(item);
-  }
-}
-function renderNext(next, waiting) {
-  $("next-count").textContent = next.length
-    ? (waiting > next.length ? `Next up — showing ${next.length} of ${waiting.toLocaleString()} waiting` : `Next up — ${waiting} waiting`)
-    : "Nothing waiting";
-  const list = $("next");
-  list.replaceChildren();
-  for (const job of next) {
-    const item = element("li", undefined, "next-item");
-    const label = element("span", undefined, "next-label");
-    label.append(element("span", job.title, "next-title"), element("span", jobWhy(job), "job-note"));
-    item.append(label, jobActions(job));
-    list.append(item);
-  }
-}
-function renderJobs() {
-  if (!snapshot) { $("results").replaceChildren(); return; }
-  parkDetails();
-  const counts = snapshot.counts || {};
-  const all = snapshot.jobs || [];
-  const total = states => states.reduce((sum, state) => sum + (counts[state] || 0), 0);
-
-  renderNow(all.find(job => job.state === "processing"));
-  renderSummary(counts);
-  const next = all.filter(job => PENDING.includes(job.state));
-  renderNext(next, total(PENDING));
-
-  const filter = $("filter").value;
-  const finished = all.filter(job => !PENDING.includes(job.state) && job.state !== "processing");
-  const shown = finished.filter(job => filter === "all" || job.state === filter ||
-    (filter === "attention" && ["review", "failed"].includes(job.state)));
-  const done = total(["completed", "unchanged", "review", "failed", "superseded"]);
-  const body = $("results");
-  body.replaceChildren();
-  for (const job of shown) jobRow(job, body);
-  $("results-empty").hidden = shown.length > 0;
-  $("results-empty").textContent = filter === "all"
-    ? "No results yet. Crowbarr will list what it decided here."
-    : "No results of that kind yet.";
-  $("results-count").textContent = done > finished.length
-    ? `showing the ${shown.length} most recent of ${done.toLocaleString()}`
-    : `${shown.length} of ${done.toLocaleString()}`;
-
-  if (openDetail) {
-    const row = document.querySelector(`tr[data-job="${openDetail}"]`);
-    const job = all.find(item => item.id === openDetail);
-    if (row && job) openDetails(job, row, row.querySelector("button"));
-    else openDetail = null;
-  }
-}
-function closeDetails() {
-  openDetail = null;
-  parkDetails();
-  document.querySelectorAll("tr.detail-row").forEach(node => node.remove());
-  document.querySelectorAll(".activity-table button").forEach(node => {
-    if (node.textContent === "Hide details") node.textContent = "Details";
-  });
-}
-function openDetails(job, row, button) {
-  const holder = element("tr", undefined, "detail-row");
-  const cell = element("td"); cell.colSpan = 4;
-  holder.append(cell);
-  row.after(holder);
-  buildDetails(job);
-  cell.append($("job-detail"));
-  $("job-detail").hidden = false;
-  openDetail = job.id;
-  if (button) button.textContent = "Hide details";
-}
-function toggleDetails(job, row, button) {
-  const isOpen = openDetail === job.id;
-  closeDetails();
-  if (!isOpen) openDetails(job, row, button);
-}
-function buildDetails(job) {
-  $("job-detail").hidden = false;
-  $("detail-title").textContent = job.title;
-  $("detail-path").textContent = job.media;
-  $("detail-description").textContent = job.error || (job.state === "completed" ?
-    "A separate Crowbarr subtitle was saved. Your original subtitle is unchanged." : job.stage || "Waiting for processing.");
-  $("detail-stats").replaceChildren();
-  $("detail-issues").replaceChildren();
-  $("detail-audit").replaceChildren();
-  if (job.report) {
-    const report = job.report;
-    if (report.candidate) {
-      const download = element("button", "Download review subtitle", "btn btn-sm btn-outline-primary mb-3");
-      download.addEventListener("click", () => action(download, async () => {
-        const response = await fetch(`/api/jobs/${job.id}/candidate`);
-        if (!response.ok) throw new Error("Candidate is unavailable");
-        const url = URL.createObjectURL(await response.blob());
-        const link = element("a"); link.href = url; link.download = `crowbarr-${job.id}.srt`; link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }));
-      $("detail-audit").append(download);
-      if (job.state === "review") {
-        const approval = element("div", undefined, "mb-3");
-        const check = element("input", undefined, "form-check-input me-2"); check.type = "checkbox"; check.id = "review-confirm";
-        const label = element("label", "I reviewed the candidate against the video", "form-check-label"); label.htmlFor = check.id;
-        const publish = element("button", "Publish reviewed candidate", "btn btn-sm btn-outline-primary d-block mt-2"); publish.disabled = true;
-        check.addEventListener("change", () => publish.disabled = !check.checked);
-        publish.addEventListener("click", () => action(publish, () => api(`/jobs/${job.id}/approve`, "POST")));
-        approval.append(check,label,publish); $("detail-audit").append(approval);
-      }
+async function loadList(silent = false) {
+  const revision = ++listRevision,
+    view = route;
+  if (!["library", "activity", "review", "history"].includes(view)) return;
+  try {
+    const params = new URLSearchParams({
+      q: listQuery,
+      offset: pageOffset,
+      limit: 25,
+      ...(view === "library"
+        ? { provider: libraryProvider }
+        : {
+            state:
+              view === "activity"
+                ? "queue"
+                : view === "history"
+                  ? historyFilter
+                  : "review",
+          }),
+    });
+    const result = await api(
+      `/${view === "library" ? "media" : "jobs"}?${params}`,
+    );
+    if (revision !== listRevision || view !== route || !session) return;
+    total = result.total;
+    if (pageOffset >= total && pageOffset > 0) {
+      pageOffset = Math.max(0, Math.floor((total - 1) / 25) * 25);
+      return loadList();
     }
-    if (report.plex_delivery) $("detail-audit").append(element("p", `Plex delivery: ${report.plex_delivery.state}${report.plex_delivery.stream ? " · stream " + report.plex_delivery.stream.id + " · " + report.plex_delivery.stream.language : ""}${report.plex_delivery.reason ? " · " + report.plex_delivery.reason : ""}`, "small"));
-    if (report.runtime) $("detail-audit").append(element("p", `Inference: ${report.runtime.backend} · ${report.runtime.compute_type || ""}${report.runtime.fallback_reason ? " · " + report.runtime.fallback_reason : ""}`, "small"));
-    const stats = [["Output cues", report.output_cues], ["Authored cues matched", `${report.preserved_cues} / ${report.source_cues}`],
-      ["Recognized words outside authored cues", `${Math.round(report.generated_word_ratio * 100)}%`], ["Whisper model", report.model]];
-    if (report.audit) {
-      const {before, after, improved} = report.audit;
-      const seconds = value => value == null ? "Insufficient evidence" : `${value.toFixed(2)} s`;
-      stats.push(["Audit result", before.decision === "pass" ? "Passed — original retained" : before.decision === "repair" ? "Timing problem detected" : "Inconclusive"],
-        ["Confident cue coverage", `${before.supported_cues} / ${before.total_cues}`],
-        ["Original p95 boundary difference", seconds(before.p95_error_seconds)]);
-      if (after) stats.push(["Candidate p95 boundary difference", seconds(after.p95_error_seconds)],
-        ["Improvement check", improved ? "Passed" : "Failed"]);
-      $("detail-audit").append(element("p", before.reason, "small"));
-      const evidence = element("details", undefined, "small mb-3");
-      evidence.append(element("summary", "Largest original timing differences (up to 10 cues)"));
-      const list = element("ul", undefined, "mt-2");
-      for (const item of [...before.evidence].sort((a,b) => b.error_seconds-a.error_seconds).slice(0,10)) {
-        list.append(element("li", `Cue ${item.cue}: start ${item.start_delta_seconds.toFixed(2)} s, end ${item.end_delta_seconds.toFixed(2)} s relative to recognized speech.`));
-      }
-      evidence.append(list);
-      const download = element("button", "Download full audit report", "btn btn-sm btn-outline-secondary mb-3");
-      download.type = "button";
-      download.addEventListener("click", () => {
-        const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], {type:"application/json"}));
-        const link = element("a"); link.href = url; link.download = `crowbarr-audit-${job.id}.json`;
-        link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    if (view === "library") {
+      media = result.results;
+      $("list-content").innerHTML = media.length
+        ? `<div class="table-wrap"><table><thead><tr><th>Title / file</th><th>Source</th><th>Subtitle actions</th></tr></thead><tbody>${media.map((item, index) => `<tr><td class="title-cell"><strong>${esc(item.label !== item.path ? item.label : item.title)}</strong><small>${esc(item.path)}</small></td><td><span class="badge">${esc(item.provider === "folders" ? "Folders" : item.provider === "sonarr" ? "Sonarr" : "Radarr")}</span></td><td><div class="row-actions">${button("Audit subtitles", "audit", "small primary", `data-index="${index}"`)}${button("Generate fresh", "generate", "small", `data-index="${index}"`)}</div></td></tr>`).join("")}</tbody></table></div>${pager()}`
+        : empty(
+            listQuery ? "No matching media" : "Your library is waiting",
+            listQuery
+              ? "Try a shorter title, episode number, or another source."
+              : "Connect your media managers or folders, then sync your library.",
+            link("Manage libraries", "settings/connections"),
+            "search",
+          );
+    } else {
+      $("list-content").innerHTML = result.results.length
+        ? rows(result.results) + pager()
+        : empty(
+            listQuery
+              ? "No matching jobs"
+              : view === "review"
+                ? "Nothing needs your attention"
+                : view === "activity"
+                  ? "The queue is clear"
+                  : "No history yet",
+            listQuery
+              ? "Try another title or clear the filter."
+              : view === "review"
+                ? "Uncertain candidates and failed jobs appear here for inspection."
+                : "Results will appear as Crowbarr processes your library.",
+            link("Browse library", "library"),
+            view === "review" ? "check" : "queue",
+          );
+    }
+  } catch (error) {
+    if (revision === listRevision && $("list-content") && !silent)
+      $("list-content").innerHTML = empty(
+        "Couldn’t load this view",
+        esc(error.message),
+        button("Try again", "reload"),
+        "review",
+      );
+  }
+}
+const groups = [
+  ["connections", "Connections"],
+  ["library", "Media & discovery"],
+  ["processing", "Speech processing"],
+  ["resources", "Resources & schedule"],
+  ["quality", "Quality & retries"],
+  ["appearance", "Appearance"],
+];
+const field = (name, label, help = "", type = "text", extra = "") =>
+  `<label>${label}<input name="${name}" type="${type}" value="${esc(settings[name])}" ${extra}><small>${help}</small></label>`;
+const numeric = (name, label, min, max, help = "", step = 1) =>
+  field(
+    name,
+    label,
+    help,
+    "number",
+    `min="${min}" max="${max}" step="${step}" required`,
+  );
+const check = (name, label, help = "") =>
+  `<label class="check-field wide"><input name="${name}" type="checkbox" ${settings[name] ? "checked" : ""}><span>${label}<small>${help}</small></span></label>`;
+const select = (name, label, options, help = "") =>
+  `<label>${label}<select name="${name}">${options
+    .map((value) => {
+      const [id, text] = Array.isArray(value) ? value : [value, value];
+      return `<option value="${id}" ${settings[name] === id ? "selected" : ""}>${text}</option>`;
+    })
+    .join("")}</select><small>${help}</small></label>`;
+function settingPanel(name, description, fields) {
+  return `<section class="panel"><div class="panel-header"><div><h2>${name}</h2><p>${description}</p></div></div><div class="field-grid">${fields}</div></section>`;
+}
+function connectionSettings() {
+  return ["sonarr", "radarr", "bazarr", "plex"]
+    .map((name) => {
+      const arr = ["sonarr", "radarr"].includes(name),
+        c = settings[name];
+      return settingPanel(
+        name[0].toUpperCase() + name.slice(1),
+        arr
+          ? "Library membership, imported media, and monitoring preferences."
+          : name === "bazarr"
+            ? "Authored subtitle discovery and alternative providers."
+            : "Playback awareness and subtitle discovery.",
+        `<label>Service URL<input type="url" name="${name}.url" value="${esc(c.url)}" placeholder="http://${name}:${{ sonarr: 8989, radarr: 7878, bazarr: 6767, plex: 32400 }[name]}" autocomplete="off"><small>Address reachable from the Crowbarr server.</small></label><label>${name === "plex" ? "Plex token" : "API key"}<input type="password" name="${name}.api_key" value="${esc(c.api_key || "")}" placeholder="${c.has_api_key ? "Saved · leave blank to keep" : "Enter service key"}" autocomplete="new-password"><small>Save changes before testing this connection.</small></label>${arr || name === "plex" ? `<label class="wide">Path mappings<textarea name="${name}.mappings" rows="2" placeholder="/remote/path => /local/path">${esc((arr ? c.mappings : settings.plex_mappings).map((m) => `${m.remote} => ${m.local}`).join("\n"))}</textarea><small>${name === "plex" ? "Crowbarr path => Plex path." : "Media manager path => Crowbarr path."} One mapping per line; leave blank when paths match.</small></label>` : ""}${arr ? `<label class="check-field wide"><input type="checkbox" name="${name}.monitored_only" ${c.monitored_only ? "checked" : ""}><span>Only monitored ${name === "sonarr" ? "series and episodes" : "movies"}</span></label>` : ""}<div class="wide actions">${button("Test saved connection", "test", "", `data-name="${name}" ${!c.url ? "disabled" : ""}`)}<span class="hint">${c.url ? "Clear the URL and save to disconnect." : "Not configured"}</span></div>`,
+      );
+    })
+    .join("");
+}
+function settingsPage() {
+  let content = "";
+  if (section === "connections") content = connectionSettings();
+  if (section === "library")
+    content = settingPanel(
+      "Media & discovery",
+      "Define readable media folders and how often the library is reconciled.",
+      `<label class="wide">Media folders<textarea name="roots" rows="4" placeholder="/media/tv&#10;/media/movies">${esc(settings.roots.join("\n"))}</textarea><small>One absolute path per line. Crowbarr needs permission to write subtitles beside videos. Mapped media-manager roots are also authorized.</small></label>${numeric("scan_seconds", "Sync interval (seconds)", 10, 86400)}${numeric("settle_seconds", "File settling time (seconds)", 0, 86400, "Wait for files to stop changing before processing.")}${numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "After this window, check embedded subtitles, then generate.")}`,
+    );
+  if (section === "processing")
+    content = settingPanel(
+      "Speech processing",
+      "English dialogue and same-language subtitles are supported.",
+      select(
+        "model",
+        "Whisper model",
+        ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"],
+        "Larger models need more memory.",
+      ) +
+        select("device", "Processing device", [
+          ["cpu", "CPU"],
+          ["cuda", "NVIDIA GPU · CUDA"],
+        ]) +
+        select(
+          "compute_type",
+          "Compute precision",
+          ["int8", "float32", "int8_float16", "float16"],
+          "CPU supports INT8 and FP32.",
+        ) +
+        numeric("cpu_threads", "CPU threads", 1, 64) +
+        check(
+          "cpu_fallback",
+          "Fall back to CPU",
+          "Use CPU when CUDA initialization fails.",
+        ) +
+        check(
+          "refine_generated",
+          "Refine generated timings with WhisperX",
+          "Requires the optional alignment package and additional memory.",
+        ) +
+        check("allow_untagged_audio", "Try audio without a language tag") +
+        check(
+          "allow_untagged_subtitles",
+          "Treat untagged SRT files as English",
+        ),
+    );
+  if (section === "resources")
+    content =
+      settingPanel(
+        "Resource limits",
+        "A single worker processes inference jobs. Memory limits apply to every job.",
+        numeric("min_free_ram_mb", "Minimum RAM headroom (MB)", 128, 262144) +
+          numeric(
+            "min_free_vram_mb",
+            "Minimum free GPU memory (MB)",
+            128,
+            262144,
+          ) +
+          numeric(
+            "max_cpu_load",
+            "Maximum background CPU load per core",
+            0.1,
+            4,
+            "Normalized load average; 1 means one runnable task per core.",
+            0.1,
+          ),
+      ) +
+      settingPanel(
+        "Background schedule",
+        "Manual and import jobs bypass cooldown, quiet hours, and hourly budget.",
+        numeric(
+          "backlog_cooldown_seconds",
+          "Cooldown between jobs (seconds)",
+          0,
+          86400,
+        ) +
+          numeric(
+            "background_budget_minutes",
+            "Processing budget per hour (minutes)",
+            1,
+            60,
+          ) +
+          numeric(
+            "quiet_hour_start",
+            "Quiet hours start (server hour)",
+            0,
+            23,
+            "Use equal start and end hours to disable quiet hours.",
+          ) +
+          numeric("quiet_hour_end", "Quiet hours end (server hour)", 0, 23) +
+          check(
+            "defer_during_plex",
+            "Defer background processing during Plex playback",
+          ),
+      );
+  if (section === "quality")
+    content = settingPanel(
+      "Audit & recovery",
+      "Control quality thresholds and recovery for uncertain or failed work.",
+      check(
+        "sampled_audit",
+        "Sample dialogue across the runtime",
+        "Escalate inconclusive samples to full dialogue recognition.",
+      ) +
+        check(
+          "bazarr_download_alternatives",
+          "Download alternatives from Bazarr",
+          "Allow alternative authored candidates during processing.",
+        ) +
+        numeric("max_provider_attempts", "Maximum provider attempts", 1, 10) +
+        numeric("max_attempts", "Maximum job attempts", 1, 10) +
+        numeric("job_timeout_minutes", "Job timeout (minutes)", 1, 1440) +
+        numeric(
+          "min_match_ratio",
+          "Minimum authored match ratio",
+          0.5,
+          1,
+          "Fraction of authored cues required to match.",
+          0.01,
+        ) +
+        numeric(
+          "min_alignment_score",
+          "Minimum alignment score",
+          0,
+          1,
+          "Lower confidence is sent for review.",
+          0.01,
+        ) +
+        numeric(
+          "max_generated_ratio",
+          "Maximum generated word ratio",
+          0,
+          1,
+          "Fraction of recognized words outside authored cues.",
+          0.01,
+        ),
+    );
+  if (section === "appearance")
+    content = settingPanel(
+      "Appearance",
+      "Choose a theme for this browser. Your server settings are shared separately.",
+      `<label>Color theme<select id="theme-select"><option value="dark" ${document.documentElement.dataset.theme === "dark" ? "selected" : ""}>Dark · forest</option><option value="light" ${document.documentElement.dataset.theme === "light" ? "selected" : ""}>Light · sage</option></select><small>Saved on this device.</small></label>`,
+    );
+  return (
+    heading(
+      "Settings",
+      "Configure once. Keep your library running on your terms.",
+    ) +
+    `<div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">${groups.map(([id, label]) => `<a href="#settings/${id}" class="nav-link ${id === section ? "active" : ""}" ${id === section ? 'aria-current="page"' : ""}>${label}</a>`).join("")}</nav><form id="settings-form" class="settings-form">${content}${section !== "appearance" ? `<div class="save-bar"><button class="button primary" type="submit">Save changes</button><span id="save-state" class="settings-status">All changes saved</span></div>` : ""}</form></div>`
+  );
+}
+function apiPage() {
+  const endpoints = [
+    [
+      "GET",
+      "/api/status",
+      "Worker progress, queue totals, resources, and integration health.",
+    ],
+    [
+      "GET",
+      "/api/jobs?state=queue&offset=0&limit=25",
+      "Paginated jobs. Filter by state and title using q.",
+    ],
+    ["GET", "/api/jobs/{id}", "Full details and audit evidence for one job."],
+    [
+      "GET",
+      "/api/media?q=title&provider=all",
+      "Search managed media. Supports offset and limit.",
+    ],
+    [
+      "POST",
+      "/api/process",
+      "Request an audit or fresh generation for a managed media path.",
+    ],
+    ["POST", "/api/jobs/{id}/promote", "Prioritize a pending job."],
+    ["POST", "/api/jobs/{id}/cancel", "Request cancellation."],
+    [
+      "POST",
+      "/api/jobs/{id}/retry",
+      "Requeue an eligible completed or failed job.",
+    ],
+    ["GET", "/api/jobs/{id}/candidate", "Download a private review subtitle."],
+    [
+      "POST",
+      "/api/jobs/{id}/approve",
+      "Publish a reviewed subtitle candidate.",
+    ],
+    ["POST", "/api/scan", "Request library reconciliation."],
+    ["POST", "/api/pause", "Toggle queue pause."],
+    [
+      "GET",
+      "/api/settings",
+      "Read configuration. Includes the administrative API key.",
+    ],
+    ["PUT", "/api/settings", "Save server configuration."],
+  ];
+  return (
+    heading(
+      "API & webhooks",
+      "Connect your apps to Crowbarr with an authenticated HTTP API.",
+      '<a class="button" href="/api/openapi.json" download="crowbarr-openapi.json">Download OpenAPI schema</a>',
+    ) +
+    `<div class="api-grid"><div>${panel(
+      "API access",
+      `<div class="panel-body"><p class="muted">Use <code>X-Api-Key</code> or <code>Authorization: Bearer</code>. This key grants administrative access, including settings and publication.</p><div class="api-key"><label class="sr-only" for="api-key">Crowbarr API key</label><input id="api-key" readonly type="password" value="${esc(settings.api_key)}" autocomplete="off">${button("Show", "reveal")}${button(icon("copy") + "Copy", "copy-key")}</div><p class="hint mt-12">Keep this key in your app’s secret storage. Dashboard sessions use a separate login.</p><h3 class="mt-24">Base URL</h3><pre>${esc(location.origin)}/api</pre><h3>Request an audit</h3><pre>curl -X POST '${esc(location.origin)}/api/process' \
+  -H 'X-Api-Key: YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"media":"/media/movies/example.mkv"}'</pre><p class="hint">Use an actual path returned by the library endpoint. Add <code>"directive":"generate"</code> to request fresh generation. A 202 response includes the job ID; poll its details for progress.</p></div>`,
+    )}${panel("Sonarr & Radarr webhooks", `<div class="panel-body"><p class="muted">Add a Webhook connection in each media manager for imports, upgrades, renames, and deletions.</p>${["sonarr", "radarr"].map((name) => `<h3 class="mt-20">${name[0].toUpperCase() + name.slice(1)}</h3><pre>${esc(location.origin)}/api/hooks/${name}</pre>`).join("")}<div class="system-row"><span>Basic auth username</span><strong>crowbarr</strong></div><div class="system-row"><span>Basic auth password</span><strong>Your Crowbarr API key</strong></div><p class="hint mt-16">Replace the host above with an address reachable from your media manager. Scheduled reconciliation covers missed events.</p></div>`)}</div><div>${panel("Endpoint reference", endpoints.map(([method, path, description]) => `<div class="endpoint"><span class="method ${method.toLowerCase()}">${method}</span><code>${esc(path)}</code><p>${description}</p></div>`).join(""))}</div></div>`
+  );
+}
+async function navigate() {
+  if (!session) return;
+  const [next, sub] = location.hash.slice(1).split("/");
+  const target = navigation.some(([id]) => id === next) ? next : "dashboard";
+  if (dirty) {
+    captureSettings();
+    dirty = false;
+  }
+  route = target;
+  section = groups.some(([id]) => id === sub) ? sub : "connections";
+  routeRevision++;
+  listRevision++;
+  pageOffset = 0;
+  listQuery = "";
+  jobs = new Map();
+  $("workspace").classList.remove("menu-open");
+  $("menu").setAttribute("aria-expanded", "false");
+  drawNav();
+  $("page").innerHTML =
+    route === "dashboard"
+      ? dashboard()
+      : route === "settings"
+        ? settingsPage()
+        : route === "api"
+          ? apiPage()
+          : route === "library"
+            ? libraryShell()
+            : listShell();
+  if (route === "settings" && draftDirty) {
+    dirty = true;
+    $("save-state") && ($("save-state").textContent = "Unsaved changes");
+  }
+  document.title = `${navigation.find(([id]) => id === route)[1]} · Crowbarr`;
+  await loadList();
+}
+let draftDirty = false;
+function captureSettings() {
+  const form = $("settings-form");
+  if (!form) return;
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    const [name, key] = el.name.split(".");
+    const value =
+      el.type === "checkbox"
+        ? el.checked
+        : el.type === "number"
+          ? Number(el.value)
+          : el.value;
+    if (key === "mappings") {
+      const lines = value
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const mappings = lines.map((line) => {
+        const parts = line.split("=>");
+        if (parts.length !== 2 || parts.some((v) => !v.trim()))
+          throw new Error(
+            "Each path mapping needs a remote path => local path.",
+          );
+        return { remote: parts[0].trim(), local: parts[1].trim() };
       });
-      $("detail-audit").append(evidence, download);
-    }
-    for (const [key, value] of stats) $("detail-stats").append(element("dt", key, "col-sm-4"), element("dd", String(value), "col-sm-8"));
-    for (const issue of report.issues || []) $("detail-issues").append(element("li", issue));
-    for (const warning of report.warnings || []) $("detail-issues").append(element("li", warning, "text-secondary"));
-    $("detail-issues").append(element("li", report.note, "text-secondary"));
+      if (name === "plex") settings.plex_mappings = mappings;
+      else settings[name].mappings = mappings;
+    } else if (key) settings[name][key] = value;
+    else
+      settings[name] =
+        name === "roots"
+          ? value
+              .split("\n")
+              .map((v) => v.trim())
+              .filter(Boolean)
+          : value;
+  }
+}
+function renderDashboard() {
+  const focused = document.activeElement?.closest("[data-action]");
+  const focusAction = focused?.dataset.action,
+    focusId = focused?.dataset.id;
+  const previous = $("page").querySelector("progress")?.value;
+  const oldTitle = $("page").querySelector(".active-title")?.textContent;
+  $("page").innerHTML = dashboard();
+  const progress = $("page").querySelector("progress"),
+    next = progress?.value;
+  if (
+    progress &&
+    previous != null &&
+    oldTitle === $("page").querySelector(".active-title")?.textContent &&
+    previous < next
+  ) {
+    progress.value = previous;
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        if (progress.isConnected) progress.value = next;
+      }),
+    );
+  }
+  if (focusAction) {
+    const button = [...$("page").querySelectorAll("[data-action]")].find(
+      (b) => b.dataset.action === focusAction && b.dataset.id === focusId,
+    );
+    button?.focus({ preventScroll: true });
   }
 }
 async function refresh() {
-  if (!authenticated || polling) return;
-  const revision = sessionRevision;
-  polling = true;
+  if (!session || busy) return;
+  busy = true;
   try {
-    const status = await api("/status");
-    if (!authenticated || revision !== sessionRevision) return;
-    snapshot = status;
-    $("version").textContent = snapshot.version;
-    const resource = snapshot.resources || {};
-    $("resource-state").textContent = [resource.gpu || "CPU runtime", resource.ram_available_mb != null ? `${resource.ram_available_mb} MB RAM headroom${resource.zfs_arc_reclaimable_mb ? " (including " + resource.zfs_arc_reclaimable_mb + " MB reclaimable ZFS ARC)" : ""}` : "", resource.vram_free_mb != null ? `${resource.vram_free_mb} / ${resource.vram_total_mb} MB GPU memory free` : "", snapshot.wait_reason || ""].filter(Boolean).join(" · ");
-    $("service-state").textContent = snapshot.paused ? "Queue paused" : snapshot.configured ? (snapshot.discovery_mode === "arr" ? "Following arr libraries" : "Watching folders") : "Setup needed";
-    $("activity-subtitle").textContent = snapshot.last_scan ?
-      `${snapshot.media_count} media files found · Last checked ${relativeTime(snapshot.last_scan)}` : "Your library will be checked automatically.";
-    $("setup-callout").hidden = snapshot.configured;
-    $("pause").textContent = snapshot.paused ? "Resume queue" : "Pause queue";
-    $("notices").replaceChildren();
-    for (const notice of snapshot.notices) $("notices").append(element("div", notice.message, "alert alert-warning small"));
-    if (!snapshot.ffmpeg) $("notices").append(element("div", "FFmpeg or ffprobe is missing. Install both before processing media.", "alert alert-warning small"));
-    $("integration-status").replaceChildren();
-    for (const name of snapshot.providers || []) {
-      const sync = (snapshot.integrations || []).find(item => item.provider === name);
-      const label = name === "sonarr" ? "Sonarr" : "Radarr";
-      $("integration-status").append(element("span", !sync ? `${label}: first sync pending` :
-        sync.healthy ? `${label}: ${sync.file_count} eligible files · synced ${relativeTime(sync.last_success)}` :
-        `${label}: sync unavailable · new jobs held`, sync?.healthy ? "text-secondary" : "text-warning-emphasis"));
-    }
-    renderJobs();
+    const next = await api("/status");
+    if (!session) return;
+    status = next;
+    status.jobs.forEach((j) => jobs.set(j.id, j));
+    $("connection-status").textContent = "Live · updated just now";
+    $("worker-state").textContent = status.paused
+      ? "Queue paused"
+      : status.wait_reason
+        ? "Worker deferred"
+        : status.jobs.some((j) => j.state === "processing")
+          ? "Worker processing"
+          : "Worker ready";
+    $("worker-dot").classList.toggle(
+      "warning",
+      status.paused || Boolean(status.wait_reason),
+    );
+    $("version").textContent = `v${status.version} · Self-hosted`;
+    drawNav();
+    const notices = (status.notices || []).map((n) => n.message);
+    if (!status.ffmpeg)
+      notices.push(
+        "FFmpeg is unavailable. Install FFmpeg and ffprobe to process media.",
+      );
+    $("notice").textContent = notices.join(" · ");
+    $("notice").hidden = !notices.length;
+    if (route === "dashboard" && !$("detail-dialog").open) renderDashboard();
+    else if (
+      ["activity", "review", "history"].includes(route) &&
+      !$("detail-dialog").open &&
+      !document.activeElement?.matches("input,select,button:disabled")
+    )
+      await loadList(true);
   } catch (error) {
-    if (authenticated && revision === sessionRevision) {
-      $("activity-subtitle").textContent = "Queue update failed. Retrying automatically…";
-      message(error.message, true);
-    }
-  }
-  finally { polling = false; }
-}
-function fillSettings(settings) {
-  configuration = settings;
-  $("machine-api-key").value = settings.api_key || "";
-  for (const field of $("settings-form").elements) {
-    if (!field.name || !(field.name in settings)) continue;
-    if (field.type === "checkbox") field.checked = settings[field.name];
-    else field.value = field.name === "roots" ? settings.roots.join("\n") : settings[field.name];
-  }
-  $("connections").replaceChildren();
-  for (const name of ["sonarr", "radarr", "bazarr", "plex"]) {
-    const group = element("div", undefined, "connection-row");
-    group.append(element("h3", name[0].toUpperCase() + name.slice(1), "h6 mb-3"));
-    const fields = element("div", undefined, "row g-3");
-    for (const [key, label, type] of [["url", "Service URL", "url"], ["api_key", name === "plex" ? "Plex token" : "API key", "password"]]) {
-      const column = element("div", undefined, "col-sm-6");
-      const inputLabel = element("label", label, "form-label");
-      const input = element("input", undefined, "form-control");
-      input.id = `${name}-${key}`; input.name = input.id; input.type = type; input.autocomplete = "off";
-      inputLabel.htmlFor = input.id;
-      input.value = key === "url" ? settings[name].url : "";
-      if (key === "api_key" && settings[name].has_api_key) input.placeholder = "Saved · leave blank to keep";
-      column.append(inputLabel, input); fields.append(column);
-    }
-    const test = element("button", "Test saved connection", "btn btn-sm btn-outline-secondary mt-3");
-    test.type = "button";
-    test.addEventListener("click", () => action(test, () => api(`/connections/${name}/test`, "POST")));
-    group.append(fields);
-    if (["sonarr", "radarr"].includes(name)) {
-      const mappingLabel = element("label", "Path mappings", "form-label mt-3");
-      const mappings = element("textarea", undefined, "form-control");
-      mappings.id = `${name}-mappings`; mappings.rows = 2;
-      mappings.placeholder = name === "sonarr" ? "/tv => /media/tv" : "/movies => /media/movies";
-      mappings.value = (settings[name].mappings || []).map(m => `${m.remote} => ${m.local}`).join("\n");
-      mappingLabel.htmlFor = mappings.id;
-      const help = element("div", "One mapping per line: path in the media manager => path inside Crowbarr. Leave blank when paths are identical.", "form-text");
-      help.id = `${name}-mapping-help`; mappings.setAttribute("aria-describedby", help.id);
-      const check = element("div", undefined, "form-check mt-3");
-      const input = element("input", undefined, "form-check-input");
-      input.type = "checkbox"; input.id = `${name}-monitored`; input.checked = settings[name].monitored_only !== false;
-      const label = element("label", name === "sonarr" ? "Only monitored series and episodes" : "Only monitored movies", "form-check-label");
-      label.htmlFor = input.id; check.append(input, label);
-      group.append(mappingLabel, mappings, help, check);
-    }
-    group.append(test); $("connections").append(group);
+    $("connection-status").textContent = "Connection interrupted";
+    $("notice").textContent =
+      `Live updates unavailable. Displaying the last received data. ${error.message} Retrying automatically.`;
+    $("notice").hidden = false;
+  } finally {
+    busy = false;
   }
 }
-async function action(button, callback) {
-  button.disabled = true;
-  try { const result = await callback(); if (result?.message) message(result.message); await refresh(); }
-  catch (error) { message(error.message, true); }
-  finally { button.disabled = false; }
+async function detail(id) {
+  const job = await api(`/jobs/${id}`);
+  jobs.set(job.id, job);
+  const report = job.report || {};
+  $("detail-title").textContent = title(job);
+  const facts = [
+    ["Outcome", labels[job.state] || job.state],
+    ["Requested", new Date(job.created * 1000).toLocaleString()],
+    ["Origin", origins[job.origin] || job.origin],
+    ["Attempt", job.attempts],
+    ["Output", job.output || "No published output"],
+    [
+      "Runtime",
+      report.runtime
+        ? `${report.runtime.backend} · ${report.runtime.compute_type || ""}`
+        : "Not reported",
+    ],
+  ];
+  if (report.audit) {
+    const before = report.audit.before;
+    facts.push(
+      ["Audit decision", before.decision],
+      ["Evidence", before.reason],
+      ["Supported cues", `${before.supported_cues} / ${before.total_cues}`],
+      [
+        "Original p95 timing error",
+        before.p95_error_seconds == null
+          ? "Insufficient evidence"
+          : `${before.p95_error_seconds.toFixed(2)} seconds`,
+      ],
+    );
+    if (report.audit.after)
+      facts.push([
+        "Candidate p95 timing error",
+        report.audit.after.p95_error_seconds == null
+          ? "Insufficient evidence"
+          : `${report.audit.after.p95_error_seconds.toFixed(2)} seconds`,
+      ]);
+  }
+  if (report.plex_delivery)
+    facts.push([
+      "Plex delivery",
+      `${report.plex_delivery.state} · ${report.plex_delivery.reason || ""}`,
+    ]);
+  $("detail-content").innerHTML =
+    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${report.warnings?.length ? `<p>${report.warnings.map(esc).join(" · ")}</p>` : ""}<div class="actions mt-22">${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
+  if (!$("detail-dialog").open) $("detail-dialog").showModal();
+}
+function download(data, name) {
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function copy(value) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  document.body.append(input);
+  input.select();
+  const ok = document.execCommand("copy");
+  input.remove();
+  if (!ok)
+    throw new Error("Copy unavailable. Reveal the key and copy it manually.");
+}
+async function perform(target) {
+  const action = target.dataset.action,
+    id = Number(target.dataset.id);
+  target.disabled = true;
+  try {
+    if (action === "pause" || action === "scan") {
+      const response = await api(`/${action}`, "POST");
+      if (action === "pause") {
+        settings.paused = response.paused;
+        toast(
+          response.paused
+            ? "Queue paused. Active processing continues."
+            : "Queue resumed.",
+        );
+      } else toast(response.message);
+    } else if (["promote", "cancel", "retry", "approve"].includes(action)) {
+      const response = await api(`/jobs/${id}/${action}`, "POST");
+      toast(response.message);
+      if (action === "approve") await detail(id);
+    } else if (action === "details") await detail(id);
+    else if (action === "audit" || action === "generate") {
+      const item = media[Number(target.dataset.index)];
+      const response = await api("/process", "POST", {
+        media: item.path,
+        directive: action === "generate" ? "generate" : "",
+      });
+      toast(`${response.message}. Job #${response.job_id}.`);
+    } else if (action === "previous" || action === "next") {
+      pageOffset += action === "next" ? 25 : -25;
+      await loadList();
+    } else if (action === "reload") await loadList();
+    else if (action === "test") {
+      const result = await api(
+        `/connections/${target.dataset.name}/test`,
+        "POST",
+      );
+      toast(result.message || `${target.dataset.name} connection passed.`);
+    } else if (action === "reveal") {
+      $("api-key").type =
+        $("api-key").type === "password" ? "text" : "password";
+      target.textContent = $("api-key").type === "password" ? "Show" : "Hide";
+    } else if (action === "copy-key") {
+      await copy(settings.api_key);
+      toast("API key copied.");
+    } else if (action === "download-report")
+      download(jobs.get(id).report || {}, `crowbarr-audit-${id}.json`);
+    else if (action === "providers") {
+      const result = await api(`/jobs/${id}/providers`, "POST");
+      $("provider-results").innerHTML =
+        `<h3 class="mt-20">Bazarr alternatives</h3><pre>${esc(JSON.stringify(result, null, 2))}</pre>`;
+    }
+    await refresh();
+    if (["promote", "cancel", "retry"].includes(action)) await loadList();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    if (target.isConnected) target.disabled = false;
+  }
+}
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try {
+    localStorage.setItem("crowbarr-theme", theme);
+  } catch {}
+  $("theme-button").textContent =
+    `Switch to ${theme === "dark" ? "light" : "dark"} theme`;
+}
+async function showLogin() {
+  session = false;
+  settings = savedSettings = null;
+  status = null;
+  jobs.clear();
+  media = [];
+  draftDirty = dirty = false;
+  $("page").replaceChildren();
+  $("detail-content").replaceChildren();
+  $("detail-dialog").close();
+  $("workspace").hidden = true;
+  $("login").hidden = false;
+  try {
+    setup = !(await api("/session")).configured;
+  } catch {
+    setup = false;
+  }
+  $("login-title").textContent = setup
+    ? "Set up your workspace"
+    : "Welcome back";
+  $("login-description").textContent = setup
+    ? "Create a local login. Use a password of at least 8 characters."
+    : "Sign in to your subtitle workspace.";
+  $("login-submit").textContent = setup ? "Create workspace" : "Sign in";
+  $("login-form").elements.password.autocomplete = setup
+    ? "new-password"
+    : "current-password";
 }
 async function enter() {
-  const settings = await api("/settings");
-  fillSettings(settings);
-  authenticated = true;
-  sessionRevision += 1;
-  $("password").value = "";
-  $("login-view").hidden = true;
-  $("navigation").hidden = false;
-  $("logout").hidden = false;
-  message(""); view(activeView); await refresh();
+  settings = await api("/settings");
+  savedSettings = structuredClone(settings);
+  session = true;
+  $("login").hidden = true;
+  $("workspace").hidden = false;
+  await refresh();
+  await navigate();
 }
-let accountConfigured = true;
-async function showLogin() {
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  $("login-submit").disabled = true;
+  $("login-error").textContent = "";
   try {
-    accountConfigured = (await (await fetch("/api/session")).json()).configured;
-  } catch { accountConfigured = true; }
-  $("login-heading").textContent = accountConfigured ? "Welcome to Crowbarr" : "Create your Crowbarr login";
-  $("login-intro").textContent = accountConfigured
-    ? "Automatic subtitles for your media library. Sign in to connect your folders and services."
-    : "Choose a username and password for this dashboard. Nothing is sent anywhere; it is stored on your server.";
-  $("key-help").textContent = accountConfigured
-    ? "This is only for this dashboard. Sonarr, Radarr and Bazarr use the API key in Settings instead."
-    : "At least 8 characters. You can change it later by deleting /config/dashboard.json.";
-  $("login-submit").textContent = accountConfigured ? "Sign in" : "Create login";
-  $("username").autocomplete = accountConfigured ? "username" : "off";
-  $("password").autocomplete = accountConfigured ? "current-password" : "new-password";
-}
-$("login-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  const credentials = { username: $("username").value, password: $("password").value };
-  await action(event.submitter, async () => {
-    const response = await fetch(accountConfigured ? "/api/session" : "/api/setup", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(credentials),
+    await api(setup ? "/setup" : "/session", "POST", {
+      username: form.elements.username.value,
+      password: form.elements.password.value,
     });
-    const result = await response.json();
-    if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "Sign in failed.");
-    $("password").value = "";
+    form.elements.password.value = "";
     await enter();
-    return result;
-  });
-});
-$("settings-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  const payload = structuredClone(configuration);
-  for (const field of $("settings-form").elements) {
-    if (!field.name || !(field.name in payload)) continue;
-    payload[field.name] = field.type === "checkbox" ? field.checked : field.type === "number" ? Number(field.value) : field.value;
+  } catch (error) {
+    $("login-error").textContent = error.message;
+  } finally {
+    $("login-submit").disabled = false;
   }
-  payload.roots = $("roots").value.split("\n").map(value => value.trim()).filter(Boolean);
-  for (const name of ["sonarr", "radarr", "bazarr", "plex"]) {
-    payload[name] = { url: $(`${name}-url`).value.trim(), api_key: $(`${name}-api_key`).value.trim() };
-    if (["sonarr", "radarr"].includes(name)) {
-      const lines = $(`${name}-mappings`).value.split("\n").map(line => line.trim()).filter(Boolean);
-      if (lines.some(line => line.split("=>").length !== 2 || line.split("=>").some(part => !part.trim()))) {
-        message(`Check ${name} mappings: each line must contain remote path => local path.`, true);
-        $(`${name}-mappings`).focus(); return;
-      }
-      payload[name].mappings = lines.map(line => {const [remote, local] = line.split("=>").map(part => part.trim()); return {remote, local};});
-      payload[name].monitored_only = $(`${name}-monitored`).checked;
+});
+document.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-action]");
+  if (target) perform(target);
+});
+document.addEventListener("input", (event) => {
+  if (event.target.closest("#settings-form") && event.target.name) {
+    dirty = draftDirty = true;
+    $("save-state").textContent = "Unsaved changes";
+  }
+  if (["library-query", "queue-query"].includes(event.target.id)) {
+    listQuery = event.target.value;
+    pageOffset = 0;
+    listRevision++;
+    clearTimeout(timer);
+    timer = setTimeout(() => loadList(), 250);
+  }
+});
+document.addEventListener("change", (event) => {
+  if (event.target.id === "library-provider") {
+    libraryProvider = event.target.value;
+    pageOffset = 0;
+    loadList();
+  }
+  if (event.target.id === "history-filter") {
+    historyFilter = event.target.value;
+    pageOffset = 0;
+    loadList();
+  }
+  if (event.target.id === "theme-select") setTheme(event.target.value);
+  if (event.target.id === "review-confirm")
+    $("publish-candidate").disabled = !event.target.checked;
+});
+document.addEventListener("submit", async (event) => {
+  if (event.target.id !== "settings-form") return;
+  event.preventDefault();
+  const submit = event.submitter;
+  submit.disabled = true;
+  try {
+    captureSettings();
+    settings = await api("/settings", "PUT", settings);
+    savedSettings = structuredClone(settings);
+    dirty = draftDirty = false;
+    toast("Settings saved. Library reconciliation requested.");
+    await navigate();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    if (submit.isConnected) submit.disabled = false;
+  }
+});
+$("sign-out").addEventListener("click", async () => {
+  try {
+    await api("/session", "DELETE");
+    await showLogin();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$("theme-button").addEventListener("click", () =>
+  setTheme(
+    document.documentElement.dataset.theme === "dark" ? "light" : "dark",
+  ),
+);
+$("menu").innerHTML = icon("menu");
+$("search-icon").innerHTML = icon("search");
+$("close-detail").innerHTML = icon("close");
+$("menu").addEventListener("click", () => {
+  $("workspace").classList.toggle("menu-open");
+  $("menu").setAttribute(
+    "aria-expanded",
+    String($("workspace").classList.contains("menu-open")),
+  );
+});
+$("close-detail").addEventListener("click", () => $("detail-dialog").close());
+window.addEventListener("hashchange", () =>
+  navigate().catch((error) => toast(error.message, true)),
+);
+window.addEventListener("beforeunload", (event) => {
+  if (draftDirty) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (
+    event.key === "/" &&
+    session &&
+    !/INPUT|TEXTAREA|SELECT/.test(event.target.tagName) &&
+    !$("detail-dialog").open
+  ) {
+    event.preventDefault();
+    if (route === "library") $("library-query").focus();
+    else {
+      location.hash = "library";
+      setTimeout(() => $("library-query")?.focus(), 50);
     }
   }
-  await action(event.submitter, async () => {
-    fillSettings(await api("/settings", "PUT", payload));
-    $("save-state").textContent = "Saved. Library check requested.";
-    return { message: "Settings saved." };
-  });
+  if (event.key === "Escape") {
+    $("workspace").classList.remove("menu-open");
+    $("menu").setAttribute("aria-expanded", "false");
+  }
 });
-document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => view(button.dataset.view)));
-$("logout").addEventListener("click", signOut);
-$("toggle-api-key").addEventListener("click", event => {
-  const reveal = $("machine-api-key").type === "password";
-  $("machine-api-key").type = reveal ? "text" : "password";
-  event.currentTarget.textContent = reveal ? "Hide key" : "Show key";
-  event.currentTarget.setAttribute("aria-pressed", String(reveal));
-});
-$("pause").addEventListener("click", event => action(event.currentTarget, () => api("/pause", "POST")));
-$("scan").addEventListener("click", event => action(event.currentTarget, () => api("/scan", "POST")));
-let searchTimer = null;
-async function renderMediaResults(term) {
-  const list = $("media-results");
-  list.replaceChildren();
-  if (term.trim().length < 2) return;
-  let results;
-  try {
-    results = (await api(`/media?q=${encodeURIComponent(term.trim())}`)).results;
-  } catch (error) {
-    list.append(element("li", error.message, "list-group-item text-danger small"));
-    return;
-  }
-  if (!results.length) {
-    list.append(element("li", "No managed media matches that name.", "list-group-item text-secondary small"));
-    return;
-  }
-  for (const item of results) {
-    const row = element("li", undefined, "list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2");
-    row.append(element("span", item.title, "text-break"));
-    const buttons = element("span", undefined, "d-flex gap-2");
-    const request = (label, className, directive) => {
-      const button = element("button", label, `btn btn-sm ${className}`);
-      button.addEventListener("click", () => action(button, async () => {
-        const result = await api("/process", "POST", { media: item.path, directive });
-        await refresh();
-        return result;
-      }));
-      return button;
-    };
-    buttons.append(request("Audit", "btn-outline-primary", ""));
-    buttons.append(request("Generate fresh", "btn-outline-secondary", "generate"));
-    row.append(buttons);
-    list.append(row);
-  }
+try {
+  setTheme(localStorage.getItem("crowbarr-theme") || "dark");
+} catch {
+  setTheme("dark");
 }
-$("media-search").addEventListener("input", event => {
-  const term = event.target.value;
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => renderMediaResults(term), 250);
-});
-$("filter").addEventListener("change", renderJobs);
-$("close-detail").addEventListener("click", closeDetails);
-// The session lives in an httpOnly cookie, so resume straight into the dashboard
-// when one is still valid and fall back to the sign-in panel when it is not.
-enter().catch(() => showLogin());
-setInterval(refresh, 5000);
+enter().catch(showLogin);
+setInterval(refresh, 3000);

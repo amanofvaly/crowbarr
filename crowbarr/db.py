@@ -56,6 +56,9 @@ class Database:
                 "priority": "INTEGER NOT NULL DEFAULT 0",
                 "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
                 "directive": "TEXT NOT NULL DEFAULT ''",
+                "progress_current": "REAL",
+                "progress_total": "REAL",
+                "started": "REAL",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
@@ -124,7 +127,8 @@ class Database:
             pending = db.execute(
                 "SELECT origin,priority FROM jobs WHERE media=? "
                 "AND state IN ('waiting','queued','retry','processing') "
-                "ORDER BY priority DESC LIMIT 1", (media,)
+                "ORDER BY priority DESC LIMIT 1",
+                (media,),
             ).fetchone()
             if pending and pending["priority"] > priority:
                 origin, priority = pending["origin"], pending["priority"]
@@ -156,10 +160,13 @@ class Database:
             # A policy change re-queues the whole library. Media that previously needed
             # attention is the reason the policy changed, so revisit it ahead of the
             # untouched backlog instead of behind every file that was already fine.
-            if origin == "backlog" and db.execute(
-                "SELECT 1 FROM jobs WHERE media=? AND signature!=? AND state IN ('review','failed') LIMIT 1",
-                (media, signature),
-            ).fetchone():
+            if (
+                origin == "backlog"
+                and db.execute(
+                    "SELECT 1 FROM jobs WHERE media=? AND signature!=? AND state IN ('review','failed') LIMIT 1",
+                    (media, signature),
+                ).fetchone()
+            ):
                 priority, origin = 40, "retry"
             db.execute(
                 "UPDATE jobs SET priority=?,origin=? WHERE media=? AND signature=? AND priority<? AND state IN ('waiting','queued','retry')",
@@ -267,8 +274,8 @@ class Database:
                 return None
             db.execute(
                 "UPDATE jobs SET state='processing',stage='Preparing audio',attempts=attempts+1,"
-                "updated=?,error=NULL WHERE id=?",
-                (now, row["id"]),
+                "updated=?,started=?,progress_current=NULL,progress_total=NULL,error=NULL WHERE id=?",
+                (now, now, row["id"]),
             )
             return dict(db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
@@ -303,9 +310,14 @@ class Database:
             "priority",
             "cancel_requested",
             "directive",
+            "progress_current",
+            "progress_total",
+            "started",
         }
         if not values or not set(values) <= allowed:
             raise ValueError("Invalid job update")
+        if "stage" in values and "progress_current" not in values:
+            values.update(progress_current=None, progress_total=None)
         values["updated"] = time.time()
         with self.connect() as db:
             db.execute(
@@ -408,8 +420,7 @@ class Database:
         now = time.time()
         with self.connect() as db:
             jobs = [
-                dict(row)
-                for row in db.execute(select + "WHERE state='processing' ORDER BY updated DESC")
+                dict(row) for row in db.execute(select + "WHERE state='processing' ORDER BY updated DESC")
             ]
             jobs += [
                 dict(row)
@@ -425,15 +436,15 @@ class Database:
             jobs += [
                 dict(row)
                 for row in db.execute(
-                    select
-                    + f"WHERE state NOT IN {pending} AND state<>'processing' "
+                    select + f"WHERE state NOT IN {pending} AND state<>'processing' "
                     "ORDER BY updated DESC LIMIT 75"
                 )
             ]
             counts = dict(db.execute("SELECT state,COUNT(*) FROM jobs GROUP BY state"))
-            media_total = db.execute("SELECT COUNT(*) FROM managed_media").fetchone()[0] or db.execute(
-                "SELECT COUNT(DISTINCT media) FROM jobs"
-            ).fetchone()[0]
+            media_total = (
+                db.execute("SELECT COUNT(*) FROM managed_media").fetchone()[0]
+                or db.execute("SELECT COUNT(DISTINCT media) FROM jobs").fetchone()[0]
+            )
             notices = [dict(row) for row in db.execute("SELECT * FROM notices ORDER BY name")]
             integrations = [
                 dict(row)

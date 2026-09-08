@@ -209,7 +209,10 @@ def test_previously_unresolved_media_is_revisited_before_untouched_backlog(tmp_p
     db.enqueue("never-looked-at.mkv", "policy-v2", None, 0)
     # A policy change gives every file a new signature.
     revisit = db.enqueue("needs-attention.mkv", "policy-v2", None, 0)
-    assert db.get(revisit)["priority"] > db.get(db.enqueue("never-looked-at.mkv", "policy-v2", None, 0))["priority"]
+    assert (
+        db.get(revisit)["priority"]
+        > db.get(db.enqueue("never-looked-at.mkv", "policy-v2", None, 0))["priority"]
+    )
     assert db.claim()["id"] == revisit
 
 
@@ -224,3 +227,17 @@ def test_waiting_for_bazarr_does_not_permanently_demote_media(tmp_path):
     db.update(2, state="completed")
     # Once its wait expires it takes its place by arrival, not last.
     assert db.claim()["id"] == no_subtitle
+
+
+def test_progress_is_numeric_and_resets_when_stage_changes(tmp_path):
+    from crowbarr.db import Database
+
+    db = Database(tmp_path / "progress.db")
+    identifier = db.enqueue("/media/test.mkv", "sig", None, 0)
+    job = db.claim()
+    assert job["started"] and job["progress_current"] is None
+    db.update(identifier, stage="Recognizing dialogue", progress_current=10, progress_total=40)
+    assert db.get(identifier)["progress_current"] == 10
+    db.update(identifier, stage="Aligning words to audio")
+    assert db.get(identifier)["progress_current"] is None
+    assert db.get(identifier)["progress_total"] is None
