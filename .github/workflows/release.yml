@@ -158,7 +158,7 @@ jobs:
           python -m pip check
           pyinstaller --clean --noconfirm --onedir --name crowbarr --paths packaging \
             --collect-all crowbarr --collect-all faster_whisper --collect-all ctranslate2 \
-            --collect-all whisperx --collect-all transformers \
+            --collect-all whisperx --collect-all transformers --collect-all scipy \
             --hidden-import uvicorn.logging --hidden-import uvicorn.loops.auto \
             --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto \
             --hidden-import uvicorn.lifespan.on packaging/package_entry.py
