@@ -1,9 +1,9 @@
+# Use with compose.yaml for NVIDIA GPU acceleration:
+#   docker compose -f compose.yaml -f compose.cuda.yaml up -d
+# Requires the NVIDIA Container Toolkit on the host.
 services:
   crowbarr:
-    build:
-      context: .
-      dockerfile: Dockerfile.cuda
-    image: crowbarr:local-cuda
+    image: ghcr.io/amanofvaly/crowbarr:latest-cuda
     deploy:
       resources:
         reservations:

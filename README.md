@@ -61,73 +61,90 @@ For a detailed walkthrough of the entire pipeline, see [workflow.html](workflow.
 
 ---
 
-## Quick Start (Docker Compose)
+## Installation
 
-### Prerequisites
+### Docker Compose
 
-- Docker Engine with Compose v2
-- A media library accessible via filesystem mounts
-- Free disk space for speech models and temporary audio extraction (~115 MB per audio hour)
+Save this as `compose.yaml`, change the two marked lines, then run `docker compose up -d`.
 
-### 1. Configure environment
+```yaml
+services:
+  crowbarr:
+    image: ghcr.io/amanofvaly/crowbarr:latest
+    container_name: crowbarr
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"            # the user and group that own your media
+    ports:
+      - "8449:8449"
+    volumes:
+      - ./config:/config
+      - /path/to/media:/media    # your library
+    stop_grace_period: 45s
+```
 
-Create your `.env` file from the example:
+For an NVIDIA GPU, use the `-cuda` image and add the device reservation. This needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host.
+
+```yaml
+    image: ghcr.io/amanofvaly/crowbarr:latest-cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+### Docker Run
 
 ```sh
-cp .env.example .env
+docker run -d \
+  --name crowbarr \
+  --restart unless-stopped \
+  --user 1000:1000 \
+  -p 8449:8449 \
+  -v ./config:/config \
+  -v /path/to/media:/media \
+  ghcr.io/amanofvaly/crowbarr:latest
 ```
 
-Edit `.env` to match your paths and user permissions:
+### Parameters
 
-```env
-CONFIG_PATH=./data
-MEDIA_PATH=/path/to/media
-PUID=1000
-PGID=1000
-CROWBARR_BIND=0.0.0.0
-CROWBARR_PORT=8449
-```
+| Parameter | Purpose |
+| --- | --- |
+| `-p 8449:8449` | Web dashboard |
+| `-v /config` | Database, settings, models and cached transcripts |
+| `-v /media` | Your library. Crowbarr writes subtitles beside your video files |
+| `--user` | Runs as this uid and gid so published subtitles are readable |
 
-### 2. Start Crowbarr
+Allow disk space for speech models and temporary audio extraction, roughly 115 MB per hour of audio.
 
-**CPU (Default):**
-```sh
-docker compose up -d --build
-```
+### First run
 
-**NVIDIA GPU (CUDA):**
-Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host.
-```sh
-docker compose -f compose.yaml -f compose.cuda.yaml up -d --build
-```
+Open `http://localhost:8449`.
 
-### 3. Initial Setup
-
-Open **http://localhost:8449** in your browser:
-
-1. **Set Admin Password**: On first visit, set your dashboard credentials (stored securely in `/config/dashboard.json`).
-2. **Connect Media Managers**: Go to **Settings → Media managers** and enter your Sonarr and/or Radarr URL and API key.
-3. **Configure Path Mappings**: If paths inside Crowbarr differ from Sonarr/Radarr (e.g. Sonarr uses `/tv` and Crowbarr mounts `/media/tv`), add mappings under settings (e.g. `/tv => /media/tv`).
-4. **Hardware Acceleration**: In **Settings**, choose your model size and compute backend (CPU INT8 or CUDA).
+1. Set your dashboard password. It is stored in `/config/dashboard.json`.
+2. Under **Settings, Media managers**, enter your Sonarr and Radarr URL and API key.
+3. If paths differ between Crowbarr and Sonarr, add a mapping under settings. For example `/tv => /media/tv`.
+4. Under **Settings**, choose the model size and compute backend.
 
 ---
 
 ## Updating
 
 ```sh
-git pull
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
-For CUDA, use `docker compose -f compose.yaml -f compose.cuda.yaml up -d --build`.
-
-Your `CONFIG_PATH` folder holds the queue, settings, downloaded models and cached transcripts, and is preserved across updates.
+The `/config` volume holds the queue, settings, downloaded models and cached transcripts, and is preserved across updates.
 
 Updating with jobs queued is safe. A job that was running is requeued and runs again on startup.
 
 Some releases change the audit policy version, shown in the dashboard footer. Crowbarr then re-audits everything in review or failed, which takes processing time and may publish subtitles an earlier version rejected. Results that passed, and results you skipped, are not touched. See [CHANGELOG.md](CHANGELOG.md).
 
-To roll back, check out an earlier release and rebuild. A rollback does not undo an audit policy change, because the database keeps the newer policy version.
+To roll back, pin an earlier tag such as `ghcr.io/amanofvaly/crowbarr:0.3.3` and run `docker compose up -d`. A rollback does not undo an audit policy change, because the database keeps the newer policy version.
 
 ---
 
@@ -218,6 +235,12 @@ crowbarr --host 127.0.0.1 --port 8449
 To process real media locally, install inference dependencies:
 ```sh
 pip install -e '.[inference]'
+```
+
+Release images are built by GitHub Actions on a `v*` tag. To build one locally:
+```sh
+docker build -t crowbarr:dev .                          # CPU
+docker build -f Dockerfile.cuda -t crowbarr:dev-cuda .   # NVIDIA
 ```
 
 ---

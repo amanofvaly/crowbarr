@@ -593,7 +593,7 @@ function settingsPage() {
         check(
           "refine_generated",
           "Refine generated timings with WhisperX",
-          "Requires the optional alignment package and additional memory.",
+          "Not included in the CUDA image, which would need a second GPU torch stack for it. Where it is unavailable Crowbarr uses Whisper word timestamps instead.",
         ) +
         check(
           "allow_untagged_subtitles",

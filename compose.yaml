@@ -1,21 +1,18 @@
 services:
   crowbarr:
-    platform: linux/amd64
-    build: .
-    image: crowbarr:local
+    image: ghcr.io/amanofvaly/crowbarr:latest
     container_name: crowbarr
     restart: unless-stopped
     init: true
-    user: "${PUID:-1000}:${PGID:-1000}"
+    # The user and group that own your media files.
+    user: "1000:1000"
     ports:
-      - "${CROWBARR_BIND:-127.0.0.1}:8449:8449"
-    environment:
-      CROWBARR_API_KEY: "${CROWBARR_API_KEY:-}"
+      - "8449:8449"
     volumes:
-      - ${CONFIG_PATH:-./data}:/config
-      - ${MEDIA_PATH:?Set MEDIA_PATH in .env}:/media
-    cpus: "${CPU_LIMIT:-2}"
-    mem_limit: ${MEMORY_LIMIT:-0}
+      # Crowbarr's own storage: database, settings, models, cached transcripts.
+      - ./config:/config
+      # Your media library. Change the left side to your own path.
+      - /path/to/media:/media
     stop_grace_period: 45s
     security_opt:
       - no-new-privileges:true
