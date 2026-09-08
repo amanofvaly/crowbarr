@@ -3,7 +3,7 @@
 # Requires the NVIDIA Container Toolkit on the host.
 services:
   crowbarr:
-    image: ghcr.io/amanofvaly/crowbarr:latest-cuda
+    image: ghcr.io/amanofvaly/crowbarr:${CROWBARR_IMAGE_TAG:-latest}-cuda
     deploy:
       resources:
         reservations:
