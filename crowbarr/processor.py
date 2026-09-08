@@ -682,10 +682,8 @@ def process(
                 try:
                     aligned, alignment_issues = aligner(audio, alignment_passages, settings, cache)
                 except ImportError as error:
-                    # The CUDA image ships recognition without WhisperX, which would pull
-                    # a second CUDA torch stack for an off-by-default refinement. A build
-                    # that cannot honour the setting must fall back to Whisper's own word
-                    # timestamps and say so, not fail the job on an import.
+                    # Minimal source installs can omit optional refinement dependencies.
+                    # Keep usable Whisper timings and report the missing capability.
                     warnings.append(
                         f"WhisperX refinement is not installed in this image ({error}); "
                         "used Whisper word timestamps instead"

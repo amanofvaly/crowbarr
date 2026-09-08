@@ -1,14 +1,20 @@
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     CROWBARR_DATA=/config HF_HOME=/config/models/huggingface \
     TORCH_HOME=/config/models/torch NLTK_DATA=/config/models/nltk HOME=/config \
-    PATH=/opt/venv/bin:$PATH
+    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-venv ffmpeg libgomp1 \
-    && rm -rf /var/lib/apt/lists/* && python3.11 -m venv /opt/venv
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml README.md LICENSE ./
 COPY crowbarr ./crowbarr
-RUN pip install --no-cache-dir '.[asr]'
+# PyTorch supplies the CUDA 12 libraries. Expose cuBLAS/cuDNN to CTranslate2 too.
+# cu126 is the oldest CUDA wheel supported by the pinned Torch/WhisperX pair.
+RUN pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/cu126 \
+    && pip install --no-cache-dir '.[inference]' torchcodec==0.7.0 \
+    && pip check
 RUN mkdir -p /config && chown 1000:1000 /config
 USER 1000:1000
 EXPOSE 8449

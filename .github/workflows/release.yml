@@ -9,13 +9,23 @@ on:
 
 permissions: {}
 
+env:
+  GH_TOKEN: ${{ github.token }}
+
 concurrency:
   group: crowbarr-release
   cancel-in-progress: false
 
 jobs:
+  tests:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
   release-version:
     name: Read release version
+    needs: tests
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -28,23 +38,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - id: version
-        name: Create version tag when needed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          python packaging/release_tools.py guard
           version="$(python -c 'from crowbarr.version import APPLICATION_VERSION; print(APPLICATION_VERSION)')"
-          series="${version%.*}"
           tag="v$version"
           publish=false
-
-          git fetch --tags --force
+          git fetch --tags
           if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
-            tagged_commit="$(git rev-list -n 1 "$tag")"
-            if [[ "$tagged_commit" == "$GITHUB_SHA" ]] && ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              publish=true
-            fi
+            test "$(git rev-list -n 1 "$tag")" = "$GITHUB_SHA"
+            publish=true
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -52,16 +57,15 @@ jobs:
             git push origin "$tag"
             publish=true
           fi
-
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "series=$series" >> "$GITHUB_OUTPUT"
+          echo "series=${version%.*}" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
   image:
     if: needs.release-version.outputs.publish == 'true'
     needs: release-version
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -69,50 +73,65 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: cpu
+          - variant: cpu-amd64
             dockerfile: Dockerfile
-            suffix: ""
-          - variant: cuda
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - variant: cuda-amd64
             dockerfile: Dockerfile.cuda
-            suffix: "-cuda"
+            platform: linux/amd64
+            runner: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      # The CUDA image is over 4 GB built and a hosted runner starts with roughly 14 GB
-      # free, which the build layers can exhaust.
       - name: Free runner disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
           sudo docker image prune -af
-          df -h /
-
       - uses: docker/setup-buildx-action@v3
-
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ needs.release-version.outputs.version }}${{ matrix.suffix }}
-            type=raw,value=${{ needs.release-version.outputs.series }}${{ matrix.suffix }}
-            type=raw,value=latest${{ matrix.suffix }}
-
-      - uses: docker/build-push-action@v6
+      - name: Build candidate locally
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: crowbarr:verify
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+      - name: Verify installed dependencies and spawned processing
+        run: |
+          docker run --rm --entrypoint python crowbarr:verify -m pip check
+          docker run --rm --entrypoint python -v "$PWD/packaging:/checks:ro" crowbarr:verify /checks/packaging_smoke.py
+          docker run -d --name verify-server crowbarr:verify
+          trap 'docker logs verify-server; docker rm -f verify-server' EXIT
+          for attempt in {1..30}; do
+            if docker exec verify-server python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8449/health', timeout=3)"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Push verified candidate and record digest
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          candidate="$image:candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$VARIANT"
+          docker tag crowbarr:verify "$candidate"
+          docker push "$candidate"
+          digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          mkdir -p digests
+          echo "$image@$digest" > "digests/$VARIANT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.variant }}
+          path: digests/*
+          if-no-files-found: error
 
   native-linux:
     name: Build Linux x86_64 package
@@ -123,41 +142,26 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
-      - name: Build application
+      - name: Build application with CPU inference
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller==6.16.0 '.[asr]'
-          pyinstaller \
-            --clean \
-            --noconfirm \
-            --onedir \
-            --name crowbarr \
-            --collect-all crowbarr \
-            --collect-all faster_whisper \
-            --collect-all ctranslate2 \
-            crowbarr/__main__.py
-
-      - name: Verify packaged server
-        run: |
-          data_dir="$(mktemp -d)"
-          CROWBARR_DATA="$data_dir" dist/crowbarr/crowbarr --host 127.0.0.1 --port 18449 >crowbarr.log 2>&1 &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          for attempt in {1..20}; do
-            if curl -fsS http://127.0.0.1:18449/health | grep -F '"status":"ok"'; then
-              exit 0
-            fi
-            sleep 1
-          done
-          cat crowbarr.log
-          exit 1
-
+          python -m pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install pyinstaller==6.16.0 '.[inference]' torchcodec==0.7.0
+          python -m pip check
+          pyinstaller --clean --noconfirm --onedir --name crowbarr --paths packaging \
+            --collect-all crowbarr --collect-all faster_whisper --collect-all ctranslate2 \
+            --collect-all whisperx --collect-all transformers \
+            --hidden-import uvicorn.logging --hidden-import uvicorn.loops.auto \
+            --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto \
+            --hidden-import uvicorn.lifespan.on packaging/package_entry.py
       - name: Package release assets
         run: |
           mkdir -p release-assets/staging
@@ -169,49 +173,118 @@ jobs:
           cd release-assets
           sha256sum crowbarr-linux-x86_64.tar.gz > crowbarr-linux-x86_64.tar.gz.sha256
           rm -rf staging
-
+      - name: Verify archive in clean runtime
+        run: |
+          python packaging/release_tools.py verify-assets release-assets
+          mkdir unpacked
+          tar -C unpacked -xzf release-assets/crowbarr-linux-x86_64.tar.gz
+          # No build environment or source tree is mounted into this runtime.
+          docker run --rm -v "$PWD/unpacked:/package:ro" ubuntu:22.04 bash -ec '
+            apt-get update >/dev/null
+            apt-get install -y ffmpeg curl libgomp1 >/dev/null
+            /package/crowbarr/crowbarr --packaging-smoke
+            CROWBARR_DATA=/tmp/config /package/crowbarr/crowbarr --host 127.0.0.1 --port 18449 >/tmp/server.log 2>&1 &
+            pid=$!
+            trap "kill $pid 2>/dev/null || true; cat /tmp/server.log" EXIT
+            for attempt in {1..30}; do
+              if curl -fsS http://127.0.0.1:18449/health; then exit 0; fi
+              sleep 1
+            done
+            exit 1'
       - uses: actions/upload-artifact@v4
         with:
           name: native-linux
           path: release-assets/*
           if-no-files-found: error
 
-  github-release:
-    name: Publish GitHub release
+  publish:
+    name: Publish verified assets
     if: needs.release-version.outputs.publish == 'true'
     needs: [release-version, image, native-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: native-linux
           path: release-assets
-
-      - name: Create release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify all assets and reject stale runs before promotion
+        env:
+          VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          python packaging/release_tools.py guard
+          python packaging/release_tools.py verify-assets release-assets
+          python packaging/release_tools.py verify-digests digests
+          python packaging/release_tools.py manifests "$VERSION" deploy-files
+      - name: Publish immutable version references
+        env:
+          VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          python packaging/release_tools.py version-image "$image:$VERSION" digests/cpu-amd64
+          python packaging/release_tools.py version-image "$image:$VERSION-cuda" digests/cuda-amd64
+          docker buildx imagetools inspect "$image:$VERSION"
+          docker buildx imagetools inspect "$image:$VERSION-cuda"
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
           RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
-          INSTALL_NOTES: |
-            ## Install on Linux x86_64
-
-            ```sh
-            curl -fsSL https://github.com/amanofvaly/crowbarr/releases/latest/download/install-crowbarr.sh | sudo bash
-            ```
-
-            Open `http://localhost:8449` after installation. Update later with `sudo crowbarr-update`.
         run: |
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-assets/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
-          else
-            gh release create "$RELEASE_TAG" release-assets/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --generate-notes \
-              --notes "$INSTALL_NOTES" \
-              --title "Crowbarr $RELEASE_VERSION"
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --generate-notes --title "Crowbarr $RELEASE_VERSION"
           fi
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir downloaded-assets
+          python packaging/release_tools.py verify-assets downloaded-assets
+          diff -r release-assets downloaded-assets
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+      - name: Promote channels only after all assets succeeded
+        env:
+          VERSION: ${{ needs.release-version.outputs.version }}
+          SERIES: ${{ needs.release-version.outputs.series }}
+        run: |
+          python packaging/release_tools.py guard
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx imagetools create -t "$image:$SERIES" -t "$image:latest" "$image:$VERSION"
+          docker buildx imagetools create -t "$image:$SERIES-cuda" -t "$image:latest-cuda" "$image:$VERSION-cuda"
+      - name: Generate release-only GitOps branch
+        env:
+          VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          python packaging/release_tools.py guard
+          if git ls-remote --exit-code origin refs/heads/release; then
+            git fetch origin release
+          else
+            test "$?" = 2
+          fi
+          parent="$(git rev-parse --verify refs/remotes/origin/release 2>/dev/null || true)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/release-index"
+          rm -f "$GIT_INDEX_FILE"
+          git read-tree --empty
+          GIT_WORK_TREE="$PWD/deploy-files" git add --all
+          tree="$(git write-tree)"
+          if [[ -n "$parent" ]]; then
+            commit="$(git commit-tree "$tree" -p "$parent" -m "Release $VERSION")"
+          else
+            commit="$(git commit-tree "$tree" -m "Release $VERSION")"
+          fi
+          git push origin "$commit:refs/heads/release"

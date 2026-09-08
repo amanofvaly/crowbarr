@@ -1,18 +1,25 @@
 services:
   crowbarr:
-    image: ghcr.io/amanofvaly/crowbarr:latest
-    container_name: crowbarr
+    image: ghcr.io/amanofvaly/crowbarr:${CROWBARR_IMAGE_TAG:-latest}
     restart: unless-stopped
     init: true
     # The user and group that own your media files.
-    user: "1000:1000"
+    user: "${CROWBARR_UID:-1000}:${CROWBARR_GID:-1000}"
     ports:
-      - "8449:8449"
+      - "${CROWBARR_PORT:-8449}:8449"
     volumes:
       # Crowbarr's own storage: database, settings, models, cached transcripts.
-      - ./config:/config
+      - type: bind
+        source: ${CROWBARR_CONFIG_DIR:?Set an absolute persistent config directory}
+        target: /config
+        bind:
+          create_host_path: false
       # Your media library. Change the left side to your own path.
-      - /path/to/media:/media
+      - type: bind
+        source: ${CROWBARR_MEDIA_DIR:?Set an absolute media directory}
+        target: ${CROWBARR_MEDIA_MOUNT:-/media}
+        bind:
+          create_host_path: false
     stop_grace_period: 45s
     security_opt:
       - no-new-privileges:true

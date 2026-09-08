@@ -56,7 +56,7 @@ class BodyLimitMiddleware:
 
 
 def create_app(directory: Path | None = None, background: bool = True) -> FastAPI:
-    store = ConfigStore(directory or Path(os.environ.get("CROWBARR_DATA", "data")).resolve())
+    store = ConfigStore((directory or Path(os.environ.get("CROWBARR_DATA", "data"))).resolve())
     db = Database(store.directory / "crowbarr.db")
     service = Service(store, db)
 
@@ -64,9 +64,11 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     async def lifespan(app):
         if background:
             service.start()
-        yield
-        if background:
-            service.close()
+        try:
+            yield
+        finally:
+            if background:
+                service.close()
 
     app = FastAPI(
         title="Crowbarr",
@@ -168,7 +170,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
 
         async def stream():
             previous, beat = None, 0.0
-            while True:
+            while not service.stop_event.is_set():
                 payload = await asyncio.to_thread(build_status)
                 encoded = _json.dumps(payload, default=str)
                 now = time.monotonic()

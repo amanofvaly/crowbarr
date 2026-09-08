@@ -82,6 +82,27 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.3.6
+
+- Published containers include the optional WhisperX refinement dependencies on CPU
+  and NVIDIA. Refinement remains off by default; the audit policy is unchanged.
+- Portainer can follow the public `release` branch for unattended, versioned
+  upgrades. Ordinary source pushes do not redeploy installations. Release channels
+  advance only after the test suite and packaged runtime checks pass.
+- Installs use persistent host storage with configurable UID/GID, ports and media
+  mounts. Missing directories fail before deployment. Migration instructions retain
+  the existing database, credentials, reports, models and cached transcription work.
+- Restarting with an open dashboard now drains within the service stop deadline.
+  Administrative interruptions refund their attempt and resume queued work; repeated
+  crashes stop at the configured retry limit. Invalid cached chunks are recomputed.
+- A replaced job request cannot be overwritten by an older worker. Legacy duplicate
+  job migration retains subtitle ownership and historical outcomes.
+- Native Linux upgrades retain installation paths and service identity, default new
+  installs to an unprivileged service account, and retain the prior binary for failed
+  start recovery. Daily updates are opt-in. Database rollback still requires a backup.
+- Native packages verify multiprocessing and processing imports in a clean runtime,
+  rather than testing only the dashboard health endpoint.
+
 ### 0.3.5
 
 - Linux x86_64 releases now include a runnable Crowbarr package and installer. The
