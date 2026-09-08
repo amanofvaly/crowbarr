@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crowbarr"
-version = "0.3.1"
+dynamic = ["version"]
 description = "Automatic audio-grounded subtitles for the arr ecosystem"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -24,6 +24,9 @@ include = ["crowbarr*"]
 
 [tool.setuptools.package-data]
 crowbarr = ["static/*", "static/vendor/*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "crowbarr.version.APPLICATION_VERSION"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -8,22 +8,9 @@ import math
 from statistics import median
 
 from .subtitles import Cue, Word, match_passages, tokens, validate_cues
+from .version import AUDIT_POLICY_VERSION
 
-
-def _policy_signature() -> str:
-    """Identify the decision policy by the released version.
-
-    Publishing a release is what changes verdicts for people who install it, so that is
-    what re-evaluates their library -- automatically, with nobody bumping a separate
-    constant. Deriving it from the source instead would re-check every file on any edit,
-    including ones that cannot change a decision.
-    """
-    from . import __version__
-
-    return __version__
-
-
-AUDIT_VERSION = _policy_signature()
+AUDIT_VERSION = AUDIT_POLICY_VERSION
 
 
 def _distributed(evidence: list[dict], duration: float) -> bool:
