@@ -1,8 +1,8 @@
-"""Exercise installed/frozen imports and real job processing in a spawned child.
+"""Exercise packaged inference and real job processing in a spawned child.
 
-No models or user media are needed. This validates packaging, not model accuracy
-or GPU execution. Missing alignment imports must fail instead of being softened
-into the processor's optional-refinement warning.
+Release checks download the tiny speech model and decode generated audio on CPU.
+This validates packaging, not recognition accuracy or GPU execution. Missing
+alignment imports fail instead of becoming an optional-refinement warning.
 """
 
 import multiprocessing
@@ -33,6 +33,17 @@ def process_fixture(directory, check_inference=True):
     from crowbarr.service import run_job
 
     root = Path(directory)
+    if check_inference:
+        import numpy as np
+        from faster_whisper import WhisperModel
+
+        model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=2,
+                             download_root=str(root / "models"))
+        audio = (0.1 * np.sin(2 * np.pi * 440 * np.arange(16000) / 16000)).astype(np.float32)
+        segments, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=False)
+        # Exhaust the lazy iterator to execute the encoder and decoder.
+        list(segments)
+        del model
     media = root / "library" / "fixture.mkv"
     media.parent.mkdir()
     subprocess.run(
