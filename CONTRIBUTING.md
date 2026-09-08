@@ -1,5 +1,3 @@
-# Contributing
-
 ## Release versions
 
 Crowbarr maintains two independent versions in `crowbarr/version.py`:
