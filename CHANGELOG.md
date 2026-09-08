@@ -84,6 +84,9 @@ re-audits anything.
 
 ### 0.3.7
 
+- Native packages include SciPy's dynamically imported compatibility modules, which
+  are required by the alignment runtime. Clean-runtime verification caught the
+  missing module before 0.3.6 could publish; that version was not released.
 - Selecting an older native binary retains the current updater instead of installing
   an older script that can forget the service account and data directory on its next
   run. Existing data and the audit policy are unchanged.
