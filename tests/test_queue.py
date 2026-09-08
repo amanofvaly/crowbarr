@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -6,6 +7,16 @@ from concurrent.futures import ThreadPoolExecutor
 from crowbarr.config import Settings
 from crowbarr.db import Database
 from crowbarr.library import scan, source_subtitle
+
+
+def test_application_release_does_not_change_audit_policy(monkeypatch):
+    import crowbarr
+    import crowbarr.audit as audit
+
+    policy = audit.AUDIT_VERSION
+    monkeypatch.setattr(crowbarr, "__version__", "99.0.0")
+
+    assert importlib.reload(audit).AUDIT_VERSION == policy
 
 
 def test_duplicate_jobs_converge_and_claim_once(tmp_path):
