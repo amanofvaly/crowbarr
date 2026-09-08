@@ -8,7 +8,7 @@ All processed subtitles are published alongside your media as separate `.crowbar
 
 > **Visual Guide**: Check out [workflow.html](workflow.html) for an end-to-end walkthrough of the entire pipeline, file changes, and triggers.
 >
-> **Upgrading**: See [CHANGELOG.md](CHANGELOG.md). Crowbarr versions its audit policy separately from the application, because a policy change re-audits the unresolved results already in your library and can publish subtitles the previous policy declined to. The dashboard footer shows both.
+> **Updating**: See [Updating](#updating). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -112,6 +112,25 @@ Open **http://localhost:8449** in your browser:
 
 ---
 
+## Updating
+
+```sh
+git pull
+docker compose up -d --build
+```
+
+For CUDA, use `docker compose -f compose.yaml -f compose.cuda.yaml up -d --build`.
+
+Your `CONFIG_PATH` folder holds the queue, settings, downloaded models and cached transcripts, and is preserved across updates.
+
+Updating with jobs queued is safe. A job that was running is requeued and runs again on startup.
+
+Some releases change the audit policy version, shown in the dashboard footer. Crowbarr then re-audits everything in review or failed, which takes processing time and may publish subtitles an earlier version rejected. Results that passed, and results you skipped, are not touched. See [CHANGELOG.md](CHANGELOG.md).
+
+To roll back, check out an earlier release and rebuild. A rollback does not undo an audit policy change, because the database keeps the newer policy version.
+
+---
+
 ## Connecting Your Services
 
 ### Sonarr & Radarr
@@ -174,10 +193,9 @@ The web UI provides real-time visibility into the queue and library:
 
 ## Development
 
-Crowbarr requires Python 3.11+ and FFmpeg/ffprobe. Changes that can alter an audit
-verdict must move `AUDIT_POLICY_VERSION` and record what changed in
-[CHANGELOG.md](CHANGELOG.md); the test suite enforces the entry. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Crowbarr requires Python 3.11+ and FFmpeg/ffprobe. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+A change that can alter an audit result must bump `AUDIT_POLICY_VERSION` and add a [CHANGELOG.md](CHANGELOG.md) entry. The test suite checks for this.
 
 ```sh
 # Set up virtual environment
