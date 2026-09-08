@@ -82,6 +82,12 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.3.7
+
+- Selecting an older native binary retains the current updater instead of installing
+  an older script that can forget the service account and data directory on its next
+  run. Existing data and the audit policy are unchanged.
+
 ### 0.3.6
 
 - Published containers include the optional WhisperX refinement dependencies on CPU

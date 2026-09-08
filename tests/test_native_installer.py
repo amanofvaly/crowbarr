@@ -268,6 +268,16 @@ def test_download_failure_does_not_stop_old_service(native, settings):
     assert ["systemctl", "stop", "crowbarr.service"] not in native.commands[before:]
 
 
+def test_selecting_older_binary_keeps_current_updater(native):
+    succeeded(native.run(CROWBARR_VERSION="0.3.5"))
+    urls = [arg for command in native.commands if command[0] == "curl"
+            for arg in command if arg.startswith("https://")]
+    assert any("/download/v0.3.5/" in url and url.endswith(".tar.gz") for url in urls)
+    assert next(url for url in urls if url.endswith("install-crowbarr.sh")).endswith(
+        "/releases/latest/download/install-crowbarr.sh"
+    )
+
+
 def test_legacy_unit_migration(native):
     native.install.mkdir(parents=True)
     binary = native.install / "crowbarr"
