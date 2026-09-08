@@ -373,9 +373,31 @@ class Database:
         with self.connect() as db:
             result = db.execute(
                 "UPDATE jobs SET state='queued',origin='manual',priority=100,cancel_requested=0,ready=?,updated=?,attempts=0,error=NULL "
-                "WHERE id=? AND state IN ('failed','review')",
+                "WHERE id=? AND state IN ('failed','review','skipped')",
                 (time.time(), time.time(), job_id),
             )
+            return bool(result.rowcount)
+
+    def skip(self, job_id: int) -> bool:
+        """Record that a person looked at an unresolved result and chose to leave it.
+
+        Without this the only exits from review are running the same policy again,
+        which reaches the same verdict, and publishing, which endorses a subtitle the
+        audit refused. A deliberate decision is a third outcome and has to be storable,
+        or every upgrade asks the same settled question again.
+        """
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE jobs SET state='skipped',stage='Set aside',cancel_requested=0,updated=? "
+                "WHERE id=? AND state IN ('failed','review')",
+                (time.time(), job_id),
+            )
+            if result.rowcount:
+                row = db.execute("SELECT media,error,output FROM jobs WHERE id=?", (job_id,)).fetchone()
+                db.execute(
+                    "INSERT INTO history(job_id,media,state,error,output,finished) VALUES (?,?,?,?,?,?)",
+                    (job_id, row["media"], "skipped", row["error"], row["output"], time.time()),
+                )
             return bool(result.rowcount)
 
     def direct(self, job_id: int, directive: str) -> bool:

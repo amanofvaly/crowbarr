@@ -32,6 +32,7 @@ const paths = {
   cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/>',
   queue: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
+  skip: '<path d="M5 12h14"/><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>',
 };
 const icon = (name) =>
   `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.activity}</svg>`;
@@ -48,6 +49,7 @@ const labels = {
   unchanged: "Original retained",
   review: "Review needed",
   failed: "Failed",
+  skipped: "Set aside",
   superseded: "Superseded",
   cancelled: "Cancelled",
 };
@@ -189,8 +191,8 @@ function empty(heading, description, action = "", symbol = "queue") {
 function heading(name, description, actions = "") {
   return `<div class="page-heading"><div><h1>${name}</h1><p>${description}</p></div><div class="actions">${actions}</div></div>`;
 }
-function panel(name, body, extra = "") {
-  return `<section class="panel"><div class="panel-header"><h2>${name}</h2>${extra}</div>${body}</section>`;
+function panel(name, body, extra = "", style = "") {
+  return `<section class="panel ${style}"><div class="panel-header"><h2>${name}</h2>${extra}</div>${body}</section>`;
 }
 function drawNav() {
   const counts = status?.counts || {};
@@ -252,7 +254,7 @@ function progressMarkup(job, compact = false) {
 }
 function jobButtons(job) {
   const id = `data-id="${job.id}"`;
-  return `${button("Details", "details", "small", id)}${["queued", "waiting", "retry"].includes(job.state) ? button("Run next", "promote", "small", id) : ""}${["queued", "waiting", "retry", "processing"].includes(job.state) ? button(job.cancel_requested ? "Cancelling…" : "Cancel", "cancel", "small danger", `${id} ${job.cancel_requested ? "disabled" : ""}`) : ["failed", "review", "unchanged", "completed"].includes(job.state) ? button("Retry", "retry", "small", id) : ""}`;
+  return `${button("Details", "details", "small", id)}${["queued", "waiting", "retry"].includes(job.state) ? button("Run next", "promote", "small", id) : ""}${["queued", "waiting", "retry", "processing"].includes(job.state) ? button(job.cancel_requested ? "Cancelling…" : "Cancel", "cancel", "small danger", `${id} ${job.cancel_requested ? "disabled" : ""}`) : ["failed", "review", "skipped", "unchanged", "completed"].includes(job.state) ? button("Retry", "retry", "small", id) : ""}`;
 }
 function activeJob() {
   const job = status?.jobs.find((j) => j.state === "processing");
@@ -328,14 +330,10 @@ function dashboard() {
       (j) => !["processing", "queued", "waiting", "retry"].includes(j.state),
     )
     .slice(0, 5);
-  const attention = (status?.jobs || [])
-    .filter((j) => ["review", "failed"].includes(j.state))
-    .slice(0, 3);
   const waiting = ["queued", "waiting", "retry"].reduce(
     (sum, key) => sum + (counts[key] || 0),
     0,
   );
-  const attentionCount = (counts.review || 0) + (counts.failed || 0);
   return (
     heading(
       "Dashboard",
@@ -353,11 +351,11 @@ function dashboard() {
       : "") +
     `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><span><strong>${fmt(counts.unchanged)}</strong> checked, already correct</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
     activeJob() +
-    `<section class="attention-line ${attentionCount ? "needs-attention" : "clear"}">${icon(attentionCount ? "review" : "check")}<div><strong>${attentionCount ? `${fmt(attentionCount)} ${attentionCount === 1 ? "item needs" : "items need"} review` : "Nothing needs review"}</strong><span>${attentionCount ? "Inspect uncertain and failed results before deciding what to do." : "Crowbarr has no unresolved results waiting for you."}</span></div><a href="#review">${attentionCount ? "Open review" : "View review"}</a></section>` +
     panel(
       "System readiness",
       readinessPanel(),
       '<a href="#settings/resources">Resource settings</a>',
+      "readiness-panel",
     ) +
     `<div class="dashboard-split">${panel(
       "Recent outcomes",
@@ -371,14 +369,7 @@ function dashboard() {
         ? dashboardJobList(pending)
         : empty("Queue is empty", "Imported media will be queued automatically."),
       `<a href="#activity">View all ${fmt(waiting)} pending jobs</a>`,
-    )}</div>` +
-    (attention.length
-      ? panel(
-          "Waiting for your decision",
-          dashboardJobList(attention, true),
-          '<a href="#review">View all unresolved results</a>',
-        )
-      : "")
+    )}</div>`
   );
 }
 
@@ -410,7 +401,7 @@ function listShell() {
             button("Sync libraries", "scan", "primary")
         : link("Search library", "library"),
     ) +
-    `<section class="panel"><div class="queue-toolbar"><label class="sr-only" for="queue-query">Search jobs</label><input type="search" id="queue-query" placeholder="Filter by title or file path…" value="${esc(listQuery)}">${route === "history" ? `<label class="sr-only" for="history-filter">Filter outcomes</label><select id="history-filter">${["history", "completed", "unchanged", "review", "failed", "cancelled", "superseded"].map((s) => `<option value="${s}" ${historyFilter === s ? "selected" : ""}>${s === "history" ? "All outcomes" : labels[s]}</option>`).join("")}</select>` : ""}<span class="hint">${route === "activity" ? "Manual requests run ahead of background work" : "Results from your server"}</span></div><div id="list-content" aria-live="polite"><div class="loading">Loading ${name.toLowerCase()}…</div></div></section>`
+    `<section class="panel"><div class="queue-toolbar"><label class="sr-only" for="queue-query">Search jobs</label><input type="search" id="queue-query" placeholder="Filter by title or file path…" value="${esc(listQuery)}">${route === "history" ? `<label class="sr-only" for="history-filter">Filter outcomes</label><select id="history-filter">${["history", "completed", "unchanged", "review", "failed", "skipped", "cancelled", "superseded"].map((s) => `<option value="${s}" ${historyFilter === s ? "selected" : ""}>${s === "history" ? "All outcomes" : labels[s]}</option>`).join("")}</select>` : ""}<span class="hint">${route === "activity" ? "Manual requests run ahead of background work" : "Results from your server"}</span></div><div id="list-content" aria-live="polite"><div class="loading">Loading ${name.toLowerCase()}…</div></div></section>`
   );
 }
 function libraryShell() {
@@ -595,6 +586,11 @@ function settingsPage() {
           "Use CPU when CUDA initialization fails.",
         ) +
         check(
+          "generate_over_mismatch",
+          "Replace a subtitle that cannot be repaired",
+          "When the audio proves a subtitle is for other content, or for a shorter cut of this episode, write a fresh one instead of asking you to look. The rejected file is left on disk.",
+        ) +
+        check(
           "refine_generated",
           "Refine generated timings with WhisperX",
           "Requires the optional alignment package and additional memory.",
@@ -735,6 +731,11 @@ function apiPage() {
       "POST",
       "/api/jobs/{id}/retry",
       "Requeue an eligible completed or failed job.",
+    ],
+    [
+      "POST",
+      "/api/jobs/{id}/skip",
+      "Set aside an unresolved result; policy upgrades will not reopen it.",
     ],
     ["GET", "/api/jobs/{id}/candidate", "Download a private review subtitle."],
     [
@@ -893,12 +894,13 @@ function renderDashboard() {
   }
 }
 const TERMINAL = ["completed", "unchanged", "review", "failed"];
-const FINISHED = ["completed", "unchanged", "review", "failed", "superseded", "cancelled"];
+const FINISHED = ["completed", "unchanged", "review", "failed", "skipped", "superseded", "cancelled"];
 const verdicts = {
   completed: "Subtitle written",
   unchanged: "Already correct",
   review: "Needs attention",
   failed: "Failed",
+  skipped: "Set aside",
 };
 let announced = null;
 function verdictToast(job) {
@@ -1062,7 +1064,11 @@ async function detail(id) {
           ? "Passed — original subtitle retained"
           : before.decision === "repair"
             ? "Repair needed"
-            : "Inconclusive — review needed",
+            : before.decision === "mismatched"
+              ? "Wrong content — this subtitle is not this recording"
+              : before.decision === "different_cut"
+                ? "Different cut — written for a shorter version of this episode"
+                : "Inconclusive — review needed",
       ],
       ["Evidence", before.reason],
       ["Supported cues", `${before.supported_cues} / ${before.total_cues}`],
@@ -1111,8 +1117,11 @@ async function detail(id) {
           result.reason.charAt(0).toLowerCase() + result.reason.slice(1),
         );
         const original = measureTable(result.checks, "The original subtitle");
+        const untidy = (result.structural_issues || []).filter(
+          (issue) => !issue.includes("unsuitable reading duration"),
+        );
         if (result.decision === "pass")
-          return `<section class="audit-explanation pass"><h3>Why the original was retained</h3><p>${esc(result.reason)}. ${anchors} Weak recognition regions were excluded from this evidence.</p>${original}</section>`;
+          return `<section class="audit-explanation pass"><h3>Why the original was retained</h3><p>${esc(result.reason)}. ${anchors} Weak recognition regions were excluded from this evidence.${untidy.length ? ` Crowbarr also noted ${untidy.length === 1 ? "one line" : `${untidy.length} lines`} it would have written differently — ${esc(untidy.slice(0, 3).join("; "))}${untidy.length > 3 ? ", and others" : ""}. Timing is what this audit measures, and none of those change it.` : ""}</p>${original}</section>`;
         // Jobs audited before verdicts carried their reasoning still report `improved`,
         // so fall back to it rather than describing a repair that never shipped.
         const withheld = verdict
@@ -1122,11 +1131,21 @@ async function detail(id) {
           return `<section class="audit-explanation warning"><h3>Why the repair was withheld</h3><p>The subtitle was flagged because ${flagged}. ${anchors} Crowbarr built a corrected version and measured it against those same anchors, then discarded it${verdict ? ` because ${esc(verdict.reason)}` : " because it did not improve the timing enough to justify replacing the original"}. Your original subtitle is untouched.</p>${original}${verdict ? measureTable(verdict.checks, "The repair Crowbarr built and rejected") : ""}</section>`;
         if (result.decision === "repair")
           return `<section class="audit-explanation"><h3>Why Crowbarr repaired the timing</h3><p>${esc(result.reason)}. ${anchors} The authored text is preserved while its cue timing is adjusted.</p>${original}${verdict ? measureTable(verdict.checks, "The repair Crowbarr accepted") : ""}</section>`;
+        if (result.decision === "different_cut") {
+          const replaced = report.replaced_source;
+          const name = replaced ? esc(String(replaced).split("/").pop()) : "";
+          return `<section class="audit-explanation warning"><h3>${replaced ? "Why the subtitle was replaced" : "Why this subtitle cannot be repaired"}</h3><p>${esc(result.reason)}. A repair shifts or stretches every line by one rule, so it can move a subtitle that is uniformly late — it cannot put back scenes the subtitle never had lines for. ${replaced ? `Crowbarr generated a fresh subtitle covering the whole recording and published it alongside <code>${name}</code>, which is untouched on disk.` : "Automatic replacement is switched off, so nothing was changed."}</p>${measureTable(result.cut_checks, "What showed the cut differs")}</section>`;
+        }
+        if (result.decision === "mismatched") {
+          const replaced = report.replaced_source;
+          const name = replaced ? esc(String(replaced).split("/").pop()) : "";
+          return `<section class="audit-explanation warning"><h3>${replaced ? "Why the subtitle was replaced" : "Why this subtitle was rejected"}</h3><p>${esc(result.reason)}. This is not a timing fault: a subtitle minutes out of sync still shares its words with the dialogue, and this one shares almost none. ${replaced ? `Crowbarr generated a fresh subtitle from the speech it recognized and published it alongside <code>${name}</code>, which is untouched on disk.` : "Automatic replacement is switched off, so nothing was changed."}</p>${measureTable(result.mismatch_checks, "What proved the subtitle wrong")}</section>`;
+        }
         return `<section class="audit-explanation warning"><h3>Why this needs review</h3><p>${esc(result.reason)}. ${anchors} Without that, Crowbarr cannot tell whether the timing is right, so your subtitle was left exactly as it was.</p>${measureTable(result.coverage_checks, "What the evidence had to clear")}</section>`;
       })()
     : "";
   $("detail-content").innerHTML =
-    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}${auditExplanation}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<section class="recognition-notes"><h3>Recognition regions excluded from the verdict</h3><p>Crowbarr ignored these weak regions when forming timing evidence. They remain here so you can inspect what the recognizer encountered.</p><ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul></section>` : ""}<div class="actions mt-22">${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
+    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}${auditExplanation}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<section class="recognition-notes"><h3>Recognition regions excluded from the verdict</h3><p>Crowbarr ignored these weak regions when forming timing evidence. They remain here so you can inspect what the recognizer encountered.</p><ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul></section>` : ""}<div class="actions mt-22">${["review", "failed"].includes(job.state) ? `${button("Generate a fresh subtitle", "regenerate", "primary", `data-id="${id}"`)}${button("Set aside", "skip", "", `data-id="${id}"`)}` : ""}${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
 }
 function download(data, name) {
@@ -1168,10 +1187,24 @@ async function perform(target) {
             : "Queue resumed.",
         );
       } else toast(response.message);
-    } else if (["promote", "cancel", "retry", "approve"].includes(action)) {
+    } else if (["promote", "cancel", "retry", "approve", "skip"].includes(action)) {
       const response = await api(`/jobs/${id}/${action}`, "POST");
       toast(response.message);
-      if (action === "approve") await detail(id);
+      if (["approve", "skip"].includes(action)) {
+        await detail(id);
+        await loadList();
+      }
+    } else if (action === "regenerate") {
+      const response = await api("/process", "POST", {
+        media: jobs.get(Number(id)).media,
+        directive: "generate",
+      });
+      toast(
+        `Crowbarr will transcribe the audio and write a new subtitle. Job #${response.job_id}.`,
+        false,
+        "Fresh generation queued",
+      );
+      $("detail-dialog").close();
     } else if (action === "details") await detail(id);
     else if (action === "audit" || action === "generate") {
       const item = media[Number(target.dataset.index)];

@@ -7,6 +7,8 @@ Crowbarr connects to your Sonarr and Radarr libraries to keep subtitles in sync 
 All processed subtitles are published alongside your media as separate `.crowbarr.en.srt` sidecar files—your original media and provider subtitles are never overwritten or modified.
 
 > **Visual Guide**: Check out [workflow.html](workflow.html) for an end-to-end walkthrough of the entire pipeline, file changes, and triggers.
+>
+> **Upgrading**: See [CHANGELOG.md](CHANGELOG.md). Crowbarr versions its audit policy separately from the application, because a policy change re-audits the unresolved results already in your library and can publish subtitles the previous policy declined to. The dashboard footer shows both.
 
 ---
 
@@ -172,7 +174,10 @@ The web UI provides real-time visibility into the queue and library:
 
 ## Development
 
-Crowbarr requires Python 3.11+ and FFmpeg/ffprobe.
+Crowbarr requires Python 3.11+ and FFmpeg/ffprobe. Changes that can alter an audit
+verdict must move `AUDIT_POLICY_VERSION` and record what changed in
+[CHANGELOG.md](CHANGELOG.md); the test suite enforces the entry. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```sh
 # Set up virtual environment

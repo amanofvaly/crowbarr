@@ -357,8 +357,14 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     @app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(authenticate)])
     def retry(job_id: int):
         if not db.retry(job_id):
-            raise HTTPException(409, "Only failed or attention-needed jobs can be retried")
+            raise HTTPException(409, "Only failed, attention-needed, or set-aside jobs can be retried")
         return {"message": "Job queued again"}
+
+    @app.post("/api/jobs/{job_id}/skip", dependencies=[Depends(authenticate)])
+    def skip(job_id: int):
+        if not db.skip(job_id):
+            raise HTTPException(409, "Only failed or attention-needed jobs can be set aside")
+        return {"message": "Set aside; it will not come back on a policy upgrade"}
 
     @app.post("/api/process", dependencies=[Depends(authenticate)], status_code=202)
     def process_now(payload: dict):

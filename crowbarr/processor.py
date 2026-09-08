@@ -201,6 +201,11 @@ def _sample_windows(cues: list[Cue], duration: float) -> list[tuple[float, float
     return windows
 
 
+# Verdicts that leave nothing for a repair to correct, and that the full transcript
+# already in hand can answer by writing a subtitle of its own.
+UNUSABLE = ("mismatched", "different_cut")
+
+
 def _audit_source(cues, words, duration, windows, indices=None):
     if not windows:
         return audit(cues, words, duration)
@@ -214,6 +219,14 @@ def _audit_source(cues, words, duration, windows, indices=None):
         )
     ]
     result = audit([cue for _, cue in selected], words, duration)
+    if result["decision"] in UNUSABLE:
+        # Three windows can land on music, a silent stretch, or the one scene the
+        # sampler chose badly, and they cannot show a staircase that only appears across
+        # the whole runtime. Declaring either verdict from a sample is not a finding, it
+        # is a guess -- so hand it back as inconclusive and let the escalation to the
+        # full file decide. Sampling only ever defers the verdict; it never makes one.
+        result["decision"] = "inconclusive"
+        result["reason"] = "The sample could not settle this subtitle; auditing the full file"
     for item in result["evidence"]:
         item["cue"] = selected[item["cue"] - 1][0] + 1
     result["sample_cue_indices"] = [index for index, _ in selected]
@@ -370,6 +383,7 @@ def process(
                 for path in embedded_subtitles(media, Path(temporary), metadata, settings)
             )
         candidates = []
+        unreadable = []
         for kind, source, label in candidate_paths:
             try:
                 candidates.append(
@@ -381,9 +395,14 @@ def process(
                     }
                 )
             except (ValueError, UnicodeError) as error:
+                unreadable.append(f"{Path(label).name}: {error}")
                 warnings.append(f"Ignored unreadable {label}: {error}")
         if candidate_paths and not candidates:
-            raise ReviewRequired("No discovered subtitle source could be read")
+            # This refusal ends the job before a report is written, so the reason has to
+            # travel in the message. Saying only that nothing could be read leaves the
+            # one fact that would explain it -- what the parser actually objected to --
+            # in a warnings list that is then discarded.
+            raise ReviewRequired("No discovered subtitle source could be read. " + "; ".join(unreadable))
         # An English track Crowbarr cannot decode is still worth reporting: without this
         # the job looks as though the file had no English subtitle at all.
         for label in unreadable_subtitles(metadata):
@@ -464,7 +483,9 @@ def process(
 
         def candidate_rank(candidate):
             candidate_audit = candidate["audit"]
-            decision = {"inconclusive": 0, "repair": 1, "pass": 2}[candidate_audit["decision"]]
+            decision = {"mismatched": 0, "different_cut": 1, "inconclusive": 2, "repair": 3, "pass": 4}[
+                candidate_audit["decision"]
+            ]
             p95 = candidate_audit["p95_error_seconds"]
             return (
                 decision,
@@ -530,7 +551,26 @@ def process(
             db.update(job["id"], stage="Auditing existing subtitle")
             before = selected["audit"]
             report["audit"] = {"before": before, "after": None, "improved": False}
-            if before["decision"] != "repair":
+            if before["decision"] in UNUSABLE and settings.generate_over_mismatch:
+                # The audit did not fail to reach a verdict here; it reached a definite
+                # one, and neither verdict leaves anything a repair could act on: the
+                # subtitle is for other content, or for a cut this recording is not.
+                # Recognition has already produced every word this file speaks, so a
+                # fresh subtitle costs nothing beyond what proving that spent, and
+                # parking the episode would throw the transcript away. The rejected
+                # sidecar is left on disk exactly as it was; Crowbarr publishes beside it.
+                if selected["kind"] == "external" and settings.bazarr.url and settings.providers():
+                    from .bazarr import reject_source
+
+                    report["rejected_source_hash"] = reject_source(
+                        directory, str(media), selected["path"], before["reason"]
+                    )
+                report["replaced_source"] = selected["label"]
+                db.update(job["id"], stage="Generating a fresh subtitle for mismatched content")
+                original, selected = [], None
+                passages, rewritten = match_passages(original, words, settings.min_match_ratio)
+                report.update(rewritten, mode="generated")
+            elif before["decision"] != "repair":
                 passed = before["decision"] == "pass"
                 report.update(
                     issues=issues,
@@ -553,16 +593,10 @@ def process(
                             directory, str(media), selected["path"], before["reason"]
                         )
                     report["bazarr"] = try_alternative(settings, db, media, directory, job["id"])
-                if not passed:
-                    candidate = directory / "candidates" / f"{job['id']}.srt"
-                    rendered = render_srt(original)
-                    atomic_write(candidate, rendered)
-                    report.update(
-                        candidate=str(candidate),
-                        output_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
-                        output_cues=len(original),
-                    )
-                    atomic_write(directory / "reports" / f"{job['id']}.json", json.dumps(report, indent=2))
+                # No candidate is written for a verdict that is not a repair. The only
+                # thing there was to offer was the original subtitle re-rendered, so
+                # "publish reviewed candidate" published the subtitle the audit had just
+                # declined to endorse -- and left it owned by Crowbarr afterwards.
                 if not current(job, settings):
                     return {
                         "state": "superseded",

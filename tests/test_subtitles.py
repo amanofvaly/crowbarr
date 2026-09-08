@@ -109,3 +109,43 @@ def test_generated_numbers_have_spoken_form_but_keep_display_form():
 def test_integer_normalization_is_bounded_and_preserves_contextual_numbers():
     assert alignment_text("Room 42 has 105 seats") == "Room forty two has one hundred five seats"
     assert alignment_text("$13.60 and 3.14") == "$13.60 and 3.14"
+
+
+def test_a_subtitle_carrying_screen_coordinates_is_still_read():
+    """SubRip appends the original bitmap's on-screen box when a subtitle came from OCR
+    of a DVD stream. Every player ignores it; rejecting it discards a correct file."""
+    text = (
+        "1\n00:00:01,000 --> 00:00:04,074  X1:182 X2:534 Y1:466 Y2:535\nFirst line\n\n"
+        "2\n00:00:05,000 --> 00:00:07,500 X1:81 X2:636 Y1:467 Y2:535\nSecond line\n"
+    )
+    assert parse_srt(text) == [Cue(1.0, 4.074, "First line"), Cue(5.0, 7.5, "Second line")]
+
+
+def test_trailing_junk_on_a_timing_line_is_still_rejected():
+    """Tolerating the documented extension must not become tolerating anything."""
+    with pytest.raises(ValueError):
+        parse_srt("1\n00:00:01,000 --> 00:00:04,000 and then some\nLine\n")
+
+
+def test_one_impossible_cue_does_not_discard_the_whole_subtitle():
+    """A zero-length duplicate or an uploader's credit with reversed timestamps shows
+    nothing in a player, exactly like the empty block below it. Refusing the file over
+    one of them throws away every good cue around it, and the file is never audited."""
+    good = "".join(
+        f"{i}\n00:00:{i:02},000 --> 00:00:{i:02},500\nLine {i}\n\n" for i in range(1, 12)
+    )
+    assert len(parse_srt(good)) == 11
+    duplicate = "12\n00:00:20,000 --> 00:00:20,000\nRepeated line\n\n13\n00:00:20,000 --> 00:00:21,500\nRepeated line\n"
+    cues = parse_srt(good + duplicate)
+    assert [c.text for c in cues] == [f"Line {i}" for i in range(1, 12)] + ["Repeated line"]
+    assert cues[-1].end > cues[-1].start
+
+
+def test_timestamps_broken_throughout_are_still_rejected():
+    """One artefact is authoring. A file where the timing is broken everywhere has no
+    timing to audit, and pretending otherwise measures nothing."""
+    text = "".join(
+        f"{i}\n00:00:{i + 10:02},000 --> 00:00:{i:02},000\nLine {i}\n\n" for i in range(1, 12)
+    )
+    with pytest.raises(ValueError):
+        parse_srt(text)

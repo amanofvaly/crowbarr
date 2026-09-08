@@ -27,6 +27,24 @@ def _distributed(evidence: list[dict], duration: float) -> bool:
 SUFFICIENT_MATCH_RATIO = 0.65
 SUFFICIENT_SPEECH_WORDS = 12
 SUFFICIENT_DIALOGUE_COVERAGE = 0.1
+# Evidence can fall short in two different ways, and only one of them is the app's own
+# uncertainty. When recognition is strong and the subtitle still matches almost none of
+# what was heard, nothing is unclear: the subtitle is not this recording. That finding
+# is the only one that may replace an authored subtitle with a generated one, so it is
+# held to the quality of the recognition as well as to the size of the disagreement.
+MISMATCH_MATCH_RATIO = 0.05
+MISMATCH_RECOGNIZED_WORDS = 200
+MISMATCH_LOW_CONFIDENCE = 0.5
+# A recording that carries scenes the subtitle has no lines for leaves a staircase: the
+# text is this episode, but every later cue falls further behind the dialogue and none
+# comes back. Shift and scale cannot remove a staircase, so calling it a repair only
+# produces one that fails its own audit.
+DIFFERENT_CUT_RESIDUAL = 10.0
+DIFFERENT_CUT_OUTLIERS = 0.5
+DIFFERENT_CUT_DRIFT_SHARE = 0.8
+# How much of a subtitle has to be structurally broken before the damage says something
+# about the timing rather than about the typing.
+STRUCTURAL_SHARE = 0.05
 ALIGNED_START_MEDIAN = 0.5
 ALIGNED_START_P95 = 1.25
 ALIGNED_TRUNCATION = 1.0
@@ -45,6 +63,22 @@ TRUNCATION_SHARE = 0.1
 SEVERE_TRUNCATION = 1.5
 IMPROVEMENT_FACTOR = 0.8
 IMPROVEMENT_MARGIN = 0.25
+
+
+def _one_way_drift(evidence: list[dict]) -> tuple[float, float]:
+    """How much of the disagreement runs one way only, and how far it travels.
+
+    Missing scenes push every later cue further from its speech and never pull one
+    back. Ordinary anchor noise scatters in both directions, so the share of steps
+    heading the same way separates a cut difference from a badly matched subtitle.
+    """
+    ordered = sorted(evidence, key=lambda item: item["subtitle_start"])
+    deltas = [item["start_delta_seconds"] for item in ordered]
+    if len(deltas) < 2:
+        return 0.0, 0.0
+    steps = [later - earlier for earlier, later in zip(deltas, deltas[1:], strict=False)]
+    forward = max(sum(step <= 0.5 for step in steps), sum(step >= -0.5 for step in steps))
+    return forward / len(steps), max(deltas) - min(deltas)
 
 
 def _fit_start(evidence: list[dict]) -> dict:
@@ -121,7 +155,22 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
     errors = sorted(e["error_seconds"] for e in evidence)
     p95 = errors[math.ceil(len(errors) * 0.95) - 1] if errors else None
     structural = validate_cues(cues, duration)
-    blocking_structural = [issue for issue in structural if "unsuitable reading duration" not in issue]
+    # A pass publishes nothing; it leaves the original exactly where it is. So a
+    # structural nit in a file Crowbarr is not touching cannot make correct timing
+    # wrong, and no review action exists that would fix one -- an uploader's trailing
+    # advertisement that overruns the video by half a second, or two lines overlapping
+    # by 0.4 s, are reported and no more. Two things still block, because they
+    # undermine the measurement rather than the tidiness: a cue whose timing is
+    # impossible, and damage spread across the whole file.
+    malformed = [issue for issue in structural if "invalid timing" in issue]
+    untidy = [
+        issue
+        for issue in structural
+        if "unsuitable reading duration" not in issue and "invalid timing" not in issue
+    ]
+    blocking_structural = malformed + (
+        untidy if len(untidy) > max(3, len(cues) * STRUCTURAL_SHARE) else []
+    )
     dialogue_cues = sum(bool(tokens(cue.text)) for cue in cues)
     required_anchors = min(30, max(3, math.ceil(dialogue_cues * 0.1)))
     dialogue_coverage = len(evidence) / max(1, dialogue_cues)
@@ -173,8 +222,39 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
         },
     ]
     sufficient = bool(cues) and all(check["passed"] for check in coverage_checks)
+    # Measured whatever the verdict, so a report can show why a mismatch was not
+    # declared as readily as why it was.
+    mismatch_checks = [
+        {
+            "name": "Subtitle text matching recognized speech",
+            "measured": f"{match['matched_token_ratio']:.1%}",
+            "limit": f"at most {MISMATCH_MATCH_RATIO:.0%}",
+            "passed": match["matched_token_ratio"] <= MISMATCH_MATCH_RATIO,
+        },
+        {
+            "name": "Recognized speech words",
+            "measured": f"{len(words)}",
+            "limit": f"at least {MISMATCH_RECOGNIZED_WORDS}",
+            "passed": len(words) >= MISMATCH_RECOGNIZED_WORDS,
+        },
+        {
+            "name": "Words the recognizer was unsure of",
+            "measured": f"{low_confidence_ratio:.1%}",
+            "limit": f"at most {MISMATCH_LOW_CONFIDENCE:.0%}",
+            "passed": low_confidence_ratio <= MISMATCH_LOW_CONFIDENCE,
+        },
+    ]
+    mismatched = bool(cues) and not sufficient and all(check["passed"] for check in mismatch_checks)
     checks: list[dict] = []
-    if not sufficient:
+    cut_checks: list[dict] = []
+    if mismatched:
+        decision = "mismatched"
+        reason = (
+            f"Recognized {len(words)} words of dialogue clearly, and only "
+            f"{match['matched_token_ratio']:.1%} of the subtitle text appears anywhere in them; "
+            "this subtitle was not written for this recording"
+        )
+    elif not sufficient:
         short = [check for check in coverage_checks if not check["passed"]]
         decision = "inconclusive"
         reason = (
@@ -270,11 +350,41 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
                 "passed": fit["residual_outlier_ratio"] <= SETTLED_OUTLIER_RATIO,
             },
         ]
+        drift_share, drift_span = _one_way_drift(evidence)
+        cut_checks = [
+            {
+                "name": "Scatter the fit cannot remove",
+                "measured": f"{fit['residual_median_seconds']:.1f} s",
+                "limit": f"more than {DIFFERENT_CUT_RESIDUAL:.0f} s",
+                "passed": fit["residual_median_seconds"] > DIFFERENT_CUT_RESIDUAL,
+            },
+            {
+                "name": "Anchors the fit cannot place",
+                "measured": f"{fit['residual_outlier_ratio']:.0%}",
+                "limit": f"more than {DIFFERENT_CUT_OUTLIERS:.0%}",
+                "passed": fit["residual_outlier_ratio"] > DIFFERENT_CUT_OUTLIERS,
+            },
+            {
+                "name": "Disagreement that only ever grows",
+                "measured": f"{drift_share:.0%}",
+                "limit": f"at least {DIFFERENT_CUT_DRIFT_SHARE:.0%}",
+                "passed": drift_share >= DIFFERENT_CUT_DRIFT_SHARE,
+            },
+        ]
+        different_cut = all(check["passed"] for check in cut_checks)
         if not blocking_structural and (aligned or settled):
             decision, reason = (
                 ("pass", "Cue starts sit on the recognized dialogue")
                 if aligned
                 else ("pass", "Already aligned; the remainder is reading time and anchor noise")
+            )
+        elif different_cut:
+            decision, reason = (
+                "different_cut",
+                f"The subtitle is this episode -- {match['matched_token_ratio']:.0%} of its text was "
+                f"recognized in the audio -- but it falls {drift_span:.0f} s further behind the "
+                "dialogue by the end than at the start, in steps. The recording carries scenes the "
+                "subtitle has no lines for, and no shift or stretch can line the two up",
             )
         elif start_p95 > 2.0 or start_outlier_ratio >= 0.2 or abs(start_median) > 0.5:
             decision, reason = "repair", "Cue starts are offset from the recognized dialogue"
@@ -304,6 +414,8 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
         "tolerances": {"start_seconds": 0.75, "end_seconds": 1.0},
         "checks": checks,
         "coverage_checks": coverage_checks,
+        "mismatch_checks": mismatch_checks,
+        "cut_checks": cut_checks,
         "recognized_words": len(words),
         "low_confidence_ratio": low_confidence_ratio,
         "structural_issues": structural,

@@ -324,3 +324,153 @@ def test_a_correct_shift_counts_as_improvement_despite_unmovable_outliers():
     assert before["decision"] == "repair"
     assert after["decision"] == "pass"
     assert improved(before, after), "removing a real 1.4 s lag is an improvement"
+
+
+def unrelated(word_count=400, probability=0.95, duration=600.0, cue_count=60):
+    """Recognized dialogue and an authored subtitle that share no vocabulary.
+
+    This is the shape of a subtitle downloaded for the wrong episode: the audio is
+    heard perfectly well, and almost none of what was heard appears in the text.
+    """
+    step = duration / word_count
+    words = [
+        Word(i * step, i * step + step * 0.6, f"alpha{i}", probability) for i in range(word_count)
+    ]
+    cues = [
+        Cue(i * duration / cue_count, i * duration / cue_count + 2.0, f"bravo{i} charlie{i} delta{i}")
+        for i in range(cue_count)
+    ]
+    return cues, words, duration
+
+
+def test_a_subtitle_for_different_content_is_named_a_mismatch():
+    cues, words, duration = unrelated()
+    result = audit(cues, words, duration)
+    assert result["decision"] == "mismatched"
+    assert result["matched_token_ratio"] == 0
+
+
+def test_a_mismatch_says_what_it_measured_rather_than_a_label():
+    cues, words, duration = unrelated()
+    result = audit(cues, words, duration)
+    assert "400" in result["reason"] and "0.0%" in result["reason"]
+    assert [check["passed"] for check in result["mismatch_checks"]] == [True, True, True]
+
+
+def test_audio_the_recognizer_could_not_hear_is_inconclusive_not_a_mismatch():
+    # Every word is a guess. Nothing matching it proves nothing about the subtitle,
+    # so this must never license replacing an authored subtitle with a generated one.
+    cues, words, duration = unrelated(probability=0.2)
+    result = audit(cues, words, duration)
+    assert result["decision"] == "inconclusive"
+
+
+def test_too_little_recognized_speech_is_inconclusive_not_a_mismatch():
+    cues, words, duration = unrelated(word_count=40)
+    assert audit(cues, words, duration)["decision"] == "inconclusive"
+
+
+def test_a_partial_text_match_is_inconclusive_not_a_mismatch():
+    # A subtitle that agrees on a third of its text is a hard case for a human, not a
+    # proven wrong episode. Only a floored match may be called one.
+    cues, words = fixture()
+    cues.append(Cue(20.0, 22.0, "zulu yankee xray whisky victor uniform"))
+    result = audit(cues + [Cue(30.0, 32.0, "tango sierra romeo")], words, 40)
+    assert result["decision"] != "mismatched"
+
+
+def test_a_mismatch_publishes_no_timing_measurements_it_did_not_take():
+    cues, words, duration = unrelated()
+    result = audit(cues, words, duration)
+    assert result["start_fit"] is None and result["start_p95_seconds"] is None
+
+
+def cut_fixture(cue_count=60, duration=1800.0, missing=()):
+    """A subtitle written for a shorter cut of the recording it is paired with.
+
+    ``missing`` gives (subtitle_second, scene_length) pairs: scenes the recording holds
+    and the subtitle has no lines for. The subtitle's own timeline stays ordered and
+    evenly paced -- it is a valid file -- while the speech it describes sits further and
+    further later in the video. With no missing scenes this is simply a correct subtitle.
+    """
+    words, cues = [], []
+    absent = sum(length for _, length in missing)
+    for i in range(cue_count):
+        text = f"line{i} alpha{i} bravo{i}"
+        written = 10.0 + i * (duration - absent - 20.0) / cue_count
+        lag = sum(length for at, length in missing if written > at)
+        moment = written + lag
+        for token in text.split():
+            words.append(Word(moment, moment + 0.4, token, 0.95))
+            moment += 0.5
+        cues.append(Cue(written, written + (moment - written - lag), text))
+    return cues, words, duration
+
+
+CASINO_NIGHT = (
+    (60.0, 5.3), (90.0, 33.6), (160.0, 60.4), (180.0, 90.2), (360.0, 21.0),
+    (440.0, 27.5), (460.0, 10.0), (530.0, 47.4), (880.0, 40.6),
+)
+
+
+def test_a_subtitle_for_a_shorter_cut_is_named_as_one():
+    cues, words, duration = cut_fixture(missing=CASINO_NIGHT)
+    result = audit(cues, words, duration)
+    assert result["decision"] == "different_cut"
+    assert result["matched_token_ratio"] == 1.0, "the text is this episode; only the cut differs"
+
+
+def test_a_different_cut_says_how_far_apart_the_two_run():
+    cues, words, duration = cut_fixture(missing=CASINO_NIGHT)
+    result = audit(cues, words, duration)
+    assert "336" in result["reason"]
+    assert [check["passed"] for check in result["cut_checks"]] == [True, True, True]
+
+
+def test_a_plain_offset_is_a_repair_not_a_different_cut():
+    """One gap before everything shifts every cue equally; that is what repair is for."""
+    cues, words, duration = cut_fixture(missing=((5.0, 30.0),))
+    assert audit(cues, words, duration)["decision"] == "repair"
+
+
+def test_scattered_disagreement_is_not_a_different_cut():
+    """Missing scenes only ever push later cues further behind. Noise goes both ways."""
+    cues, words, duration = cut_fixture(missing=CASINO_NIGHT)
+    for index, cue in enumerate(cues):
+        nudge = 90.0 if index % 2 else -90.0
+        cue.start += nudge
+        cue.end += nudge
+    assert audit(cues, words, duration)["decision"] != "different_cut"
+
+
+def test_one_overlapping_line_does_not_veto_a_correctly_timed_subtitle():
+    """Two people talking over each other is authoring, not a timing fault -- and a pass
+    publishes nothing, so a nit in a file being left alone cannot change the answer."""
+    cues, words, duration = cut_fixture()
+    cues[10].end = cues[11].start + 0.5
+    result = audit(cues, words, duration)
+    assert result["decision"] == "pass"
+    assert any("overlapping" in issue for issue in result["structural_issues"])
+
+
+def test_a_trailing_advertisement_does_not_veto_a_correctly_timed_subtitle():
+    cues, words, duration = cut_fixture()
+    cues.append(Cue(duration - 2.0, duration + 0.6, "Download subtitles from example dot invalid"))
+    result = audit(cues, words, duration)
+    assert result["decision"] == "pass"
+    assert any("ends after the video" in issue for issue in result["structural_issues"])
+
+
+def test_structural_damage_across_the_whole_file_still_blocks():
+    """A handful of nits is authoring; a fifth of the file is a broken subtitle."""
+    cues, words, duration = cut_fixture()
+    for cue in cues[::3]:
+        cue.end = duration + 5.0
+    assert audit(cues, words, duration)["decision"] != "pass"
+
+
+def test_an_impossible_cue_still_blocks():
+    """Zero-length and reversed cues make the measurement itself untrustworthy."""
+    cues, words, duration = cut_fixture()
+    cues[7].end = cues[7].start
+    assert audit(cues, words, duration)["decision"] != "pass"

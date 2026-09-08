@@ -1,13 +1,13 @@
 """Versions with different upgrade consequences.
 
-Keep the audit policy identifier unchanged for releases that cannot change an audit
-decision. Existing installations persist this value in ``crowbarr.db`` and re-open
-their unresolved work only when it changes.
+``APPLICATION_VERSION`` identifies a published release. ``AUDIT_POLICY_VERSION``
+identifies behaviour that can change an audit verdict: every installation persists it
+in ``crowbarr.db`` and re-opens its unresolved work when it changes, so a release that
+cannot change a decision must leave it alone.
+
+What each value means for an installation is recorded in ``CHANGELOG.md``, not here.
+Changing either without an entry there fails ``tests/test_release.py``.
 """
 
-APPLICATION_VERSION = "0.3.2"
-
-# This starts with the value older releases derived from APPLICATION_VERSION. Keeping
-# it preserves upgrade compatibility: installing the first release with split
-# versioning does not requeue existing review and failed jobs.
-AUDIT_POLICY_VERSION = "0.3.1"
+APPLICATION_VERSION = "0.3.4"
+AUDIT_POLICY_VERSION = "0.3.4"
