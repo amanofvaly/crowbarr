@@ -268,43 +268,53 @@ function rows(items, compact = false) {
     : "Requested";
   return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${timeHeading}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
 }
-function systemPanel() {
+function dashboardJobList(items, finished = false) {
+  items.forEach((job) => jobs.set(job.id, job));
+  return `<div class="dashboard-job-list">${items
+    .map(
+      (job) =>
+        `<div class="dashboard-job"><div><button class="title-link" data-action="details" data-id="${job.id}">${esc(title(job))}</button><small>${esc(finished ? `${labels[job.state] || job.state} · ${ago(job.updated)}` : origins[job.origin] || "Library sweep")}</small></div><div>${badge(job.state)}${button("Details", "details", "small", `data-id="${job.id}"`)}</div></div>`,
+    )
+    .join("")}</div>`;
+}
+function readinessPanel() {
   const r = status?.resources || {};
-  return `<div class="panel-body">${[
-    ["Detected GPU", r.gpu || "Not detected"],
-    ["Whisper model", savedSettings?.model || "Unavailable"],
+  const resources = [
+    ["GPU", r.gpu || "Not detected"],
     [
-      "RAM headroom",
-      r.ram_available_mb == null
-        ? "Unavailable"
-        : `${fmt(r.ram_available_mb)} MB`,
-    ],
-    [
-      "GPU memory free",
+      "GPU memory",
       r.vram_free_mb == null
         ? "Unavailable"
-        : `${fmt(r.vram_free_mb)} / ${fmt(r.vram_total_mb)} MB`,
+        : `${fmt(r.vram_free_mb)} / ${fmt(r.vram_total_mb)} MB free`,
     ],
     [
-      "CPU load / core",
-      r.cpu_load == null ? "Unavailable" : Number(r.cpu_load).toFixed(2),
+      "RAM available",
+      r.ram_available_mb == null ? "Unavailable" : `${fmt(r.ram_available_mb)} MB`,
     ],
-    ["CPU fallback", savedSettings?.cpu_fallback ? "Enabled" : "Disabled"],
-  ]
+    ["Speech model", savedSettings?.model || "Unavailable"],
+  ];
+  return `<div class="readiness-grid">${resources
     .map(
-      ([key, value]) =>
-        `<div class="system-row"><span>${key}</span><strong>${esc(value)}</strong></div>`,
+      ([label, value]) =>
+        `<div class="readiness-item"><span>${label}</span><strong>${esc(value)}</strong></div>`,
     )
-    .join(
-      "",
-    )}${status?.wait_reason ? `<p class="hint mt-18">${esc(status.wait_reason)}</p>` : ""}</div>`;
-}
-function connectionsPanel() {
-  return `<div class="panel-body">${["sonarr", "radarr", "bazarr", "plex"]
+    .join("")}</div>${status?.wait_reason ? `<div class="resource-wait">${icon("clock")}<div><strong>Worker is waiting</strong><span>${esc(status.wait_reason)}</span></div></div>` : ""}<div class="service-summary">${[
+    "sonarr",
+    "radarr",
+    "bazarr",
+    "plex",
+  ]
     .map((name) => {
-      const sync = status?.integrations?.find((i) => i.provider === name),
-        connected = Boolean(savedSettings?.[name]?.url);
-      return `<div class="service-row"><span class="service-mark">${name[0].toUpperCase()}</span><div><strong>${name[0].toUpperCase() + name.slice(1)}</strong><p>${!connected ? "Not configured" : sync ? (sync.healthy ? `${fmt(sync.file_count)} files · synced ${ago(sync.last_success)}` : "Sync unavailable") : "Configured · test in Settings"}</p></div><span class="status-dot ${!sync?.healthy ? "warning" : ""}"></span></div>`;
+      const sync = status?.integrations?.find((item) => item.provider === name);
+      const connected = Boolean(savedSettings?.[name]?.url);
+      const state = !connected
+        ? "Not configured"
+        : sync?.healthy
+          ? `${fmt(sync.file_count)} files`
+          : sync
+            ? "Sync unavailable"
+            : "Configured";
+      return `<div class="service-summary-item"><span class="status-dot ${!connected ? "neutral" : !sync?.healthy ? "warning" : ""}"></span><strong>${name[0].toUpperCase() + name.slice(1)}</strong><span>${esc(state)}</span></div>`;
     })
     .join("")}</div>`;
 }
@@ -312,17 +322,20 @@ function dashboard() {
   const counts = status?.counts || {};
   const pending = (status?.jobs || [])
     .filter((j) => ["queued", "waiting", "retry"].includes(j.state))
-    .slice(0, 10);
+    .slice(0, 3);
   const recent = (status?.jobs || [])
     .filter(
       (j) => !["processing", "queued", "waiting", "retry"].includes(j.state),
     )
     .slice(0, 5);
+  const attention = (status?.jobs || [])
+    .filter((j) => ["review", "failed"].includes(j.state))
+    .slice(0, 3);
   const waiting = ["queued", "waiting", "retry"].reduce(
     (sum, key) => sum + (counts[key] || 0),
     0,
   );
-  const r = status?.resources || {};
+  const attentionCount = (counts.review || 0) + (counts.failed || 0);
   return (
     heading(
       "Dashboard",
@@ -340,25 +353,32 @@ function dashboard() {
       : "") +
     `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><span><strong>${fmt(counts.unchanged)}</strong> checked, already correct</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
     activeJob() +
+    `<section class="attention-line ${attentionCount ? "needs-attention" : "clear"}">${icon(attentionCount ? "review" : "check")}<div><strong>${attentionCount ? `${fmt(attentionCount)} ${attentionCount === 1 ? "item needs" : "items need"} review` : "Nothing needs review"}</strong><span>${attentionCount ? "Inspect uncertain and failed results before deciding what to do." : "Crowbarr has no unresolved results waiting for you."}</span></div><a href="#review">${attentionCount ? "Open review" : "View review"}</a></section>` +
     panel(
-      "Queue",
-      pending.length
-        ? rows(pending)
-        : empty(
-            "Queue is empty",
-            "Imported media will be queued automatically.",
-          ),
-      `<a href="#activity">View all ${fmt(waiting)} pending jobs</a>`,
+      "System readiness",
+      readinessPanel(),
+      '<a href="#settings/resources">Resource settings</a>',
     ) +
-    `<div class="system-line"><span>${icon("cpu")} ${esc(r.gpu || "No GPU detected")}</span><span>RAM available: ${r.ram_available_mb == null ? "Unavailable" : fmt(r.ram_available_mb) + " MB"}</span><span>GPU memory free: ${r.vram_free_mb == null ? "Unavailable" : fmt(r.vram_free_mb) + " MB"}</span><span>Model: ${esc(savedSettings?.model || "Unavailable")}</span><a href="#settings/resources">Resource settings</a></div>` +
-    panel(
-      "Recent activity",
+    `<div class="dashboard-split">${panel(
+      "Recent outcomes",
       recent.length
-        ? rows(recent, true)
-        : empty("No activity yet", "Finished jobs will appear here."),
+        ? dashboardJobList(recent, true)
+        : empty("No outcomes yet", "Finished jobs will appear here."),
       '<a href="#history">View history</a>',
-    ) +
-    `<details class="service-disclosure"><summary>Services & system information</summary><div class="system-details">${systemPanel()}${connectionsPanel()}</div></details>`
+    )}${panel(
+      "Next in queue",
+      pending.length
+        ? dashboardJobList(pending)
+        : empty("Queue is empty", "Imported media will be queued automatically."),
+      `<a href="#activity">View all ${fmt(waiting)} pending jobs</a>`,
+    )}</div>` +
+    (attention.length
+      ? panel(
+          "Waiting for your decision",
+          dashboardJobList(attention, true),
+          '<a href="#review">View all unresolved results</a>',
+        )
+      : "")
   );
 }
 
@@ -830,6 +850,11 @@ function dashboardKey() {
     status?.paused,
     status?.wait_reason,
     status?.media_count,
+    status?.last_scan,
+    status?.audit_policy_version,
+    status?.resources,
+    status?.integrations,
+    savedSettings?.model,
     Object.keys(c).sort().map((k) => [k, c[k]]),
     (status?.jobs || []).map((j) => [j.id, j.state, j.stage, j.error, j.priority, j.origin, j.progress_current, j.progress_total]),
     (status?.notices || []).length,
@@ -925,7 +950,9 @@ function apply(next) {
     "warning",
     status.paused || Boolean(status.wait_reason),
   );
-  $("version").textContent = `v${status.version} · Self-hosted`;
+  $("version").textContent = `v${status.version}`;
+  $("audit-policy-version").textContent =
+    `v${status.audit_policy_version}`;
   drawNav();
   const notices = (status.notices || []).map((n) => n.message);
   if (!status.ffmpeg)
@@ -1197,8 +1224,8 @@ function setTheme(theme) {
   try {
     localStorage.setItem("crowbarr-arr-theme", theme);
   } catch {}
-  $("theme-button").textContent =
-    `Switch to ${theme === "dark" ? "light" : "dark"} theme`;
+  $("theme-choice").textContent =
+    `Use ${theme === "dark" ? "light" : "dark"} theme`;
 }
 async function showLogin() {
   session = false;

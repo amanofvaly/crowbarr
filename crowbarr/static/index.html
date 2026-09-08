@@ -52,14 +52,29 @@
         >
         <nav id="navigation" aria-label="Main navigation"></nav>
         <div class="sidebar-bottom">
-          <div class="worker-status">
-            <span class="status-dot" id="worker-dot"></span
-            ><span id="worker-state">Connecting</span>
+          <div class="worker-status" role="status" aria-live="polite">
+            <span class="status-dot" id="worker-dot"></span>
+            <span
+              ><small>Worker</small
+              ><strong id="worker-state">Connecting</strong></span
+            >
           </div>
-          <span id="version" class="hint"></span
-          ><button class="nav-link" id="theme-button">
-            Switch to light theme</button
-          ><button class="nav-link" id="sign-out">Sign out</button>
+          <div class="release-meta" aria-label="Installed versions">
+            <span><small>Application</small><strong id="version">—</strong></span>
+            <span
+              ><small>Audit policy</small
+              ><strong id="audit-policy-version">—</strong></span
+            >
+          </div>
+          <div class="sidebar-actions">
+            <button type="button" id="theme-button">
+              <span>Appearance</span
+              ><strong id="theme-choice">Use light theme</strong>
+            </button>
+            <button type="button" id="sign-out" class="sign-out">
+              Sign out
+            </button>
+          </div>
         </div>
       </aside>
       <div class="main-shell">
