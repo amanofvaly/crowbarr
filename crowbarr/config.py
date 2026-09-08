@@ -124,6 +124,11 @@ class Settings(BaseModel):
     refine_generated: bool = False
     sampled_audit: bool = True
     bazarr_download_alternatives: bool = False
+    # A proven mismatch is the one refusal Crowbarr can answer by itself, because the
+    # transcript that proved it is the transcript a fresh subtitle is built from. Left
+    # available to switch off for libraries where an authored subtitle, however wrong,
+    # is preferred to a generated one.
+    generate_over_mismatch: bool = True
     max_provider_attempts: int = Field(default=3, ge=1, le=10)
     # Retained so existing installs keep loading and their cached transcripts stay
     # valid. Track selection no longer consults it: recognition establishes the spoken

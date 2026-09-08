@@ -490,3 +490,104 @@ def test_an_english_image_subtitle_is_reported_rather_than_ignored():
     ]}
     reported = unreadable_subtitles(metadata)
     assert reported == ["embedded stream 2 (dvd_subtitle)"]
+
+
+@pytest.fixture
+def long_video(tmp_path):
+    """Long enough to hold a plausible amount of dialogue.
+
+    Proving a mismatch needs a substantial transcript, and a substantial transcript
+    inside eight seconds would be hundreds of words a second -- a shape no real file
+    has, and one that fails the reading-duration checks for reasons of its own.
+    """
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is required for media integration tests")
+    path = tmp_path / "library" / "feature.mkv"
+    path.parent.mkdir()
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error",
+            "-f", "lavfi", "-i", "color=c=black:s=160x90:d=180",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=180",
+            "-c:v", "mpeg4", "-c:a", "pcm_s16le",
+            "-metadata:s:a:0", "language=eng", "-shortest", str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
+def wrong_episode(video):
+    """A sidecar whose text appears nowhere in the recognized dialogue."""
+    from test_audit import unrelated
+
+    cues, words, _ = unrelated(word_count=250, duration=180.0, cue_count=30)
+    video.with_suffix(".en.srt").write_text(render_srt(cues))
+    return lambda *args: (words, [])
+
+
+def test_a_subtitle_for_other_content_is_replaced_rather_than_parked(long_video, tmp_path):
+    """The transcript that proved the subtitle wrong is the transcript a fresh one needs."""
+    transcriber = wrong_episode(long_video)
+    settings, db, job = queued(long_video, tmp_path)
+    result = process(job, settings, db.path.parent, db, transcriber, alignment_stub)
+    report = json.loads(result["report"])
+    assert report["audit"]["before"]["decision"] == "mismatched"
+    assert result["state"] == "completed"
+    assert report["mode"] == "generated"
+    assert report["replaced_source"]
+    output = long_video.with_suffix(".crowbarr.en.srt")
+    assert output.exists()
+    assert "alpha0" in output.read_text()
+
+
+def test_the_rejected_subtitle_is_left_on_disk_untouched(long_video, tmp_path):
+    transcriber = wrong_episode(long_video)
+    original = long_video.with_suffix(".en.srt").read_text()
+    settings, db, job = queued(long_video, tmp_path)
+    process(job, settings, db.path.parent, db, transcriber, alignment_stub)
+    assert long_video.with_suffix(".en.srt").read_text() == original
+
+
+def test_generation_over_a_mismatch_can_be_refused(long_video, tmp_path):
+    transcriber = wrong_episode(long_video)
+    settings, db, job = queued(long_video, tmp_path)
+    settings = settings.model_copy(update={"generate_over_mismatch": False})
+    result = process(job, settings, db.path.parent, db, transcriber, alignment_stub)
+    assert result["state"] == "review"
+    assert json.loads(result["report"])["audit"]["before"]["decision"] == "mismatched"
+
+
+def test_an_inconclusive_audit_offers_no_candidate_to_publish(video, tmp_path):
+    """The candidate written for an inconclusive verdict was the original subtitle, so
+    approving it published exactly what the audit had refused to endorse."""
+    video.with_suffix(".en.srt").write_text("1\n00:00:01,000 --> 00:00:04,000\nPlease open the front door\n")
+    settings, db, job = queued(video, tmp_path)
+    result = process(job, settings, db.path.parent, db, inference_stub, alignment_stub)
+    assert result["state"] == "review"
+    assert "candidate" not in json.loads(result["report"])
+
+
+def test_a_subtitle_for_a_shorter_cut_is_replaced_rather_than_parked(long_video, tmp_path):
+    """The recording holds scenes the subtitle never covers; a shift cannot add them."""
+    from test_audit import cut_fixture
+
+    cues, words, _ = cut_fixture(cue_count=40, duration=180.0, missing=((40, 15), (70, 20), (100, 25)))
+    long_video.with_suffix(".en.srt").write_text(render_srt(cues))
+    settings, db, job = queued(long_video, tmp_path)
+    result = process(job, settings, db.path.parent, db, lambda *a: (words, []), alignment_stub)
+    report = json.loads(result["report"])
+    assert report["audit"]["before"]["decision"] == "different_cut"
+    assert result["state"] == "completed"
+    assert report["mode"] == "generated" and report["replaced_source"]
+
+
+def test_an_unreadable_subtitle_says_what_was_wrong_with_it(video, tmp_path):
+    """This refusal ends the job before a report exists, so if the parser's objection is
+    not in the message it is nowhere, and the operator is told only that it failed."""
+    video.with_suffix(".en.srt").write_text("1\n00:00:01,000 --> 00:00:04,000 nonsense\nLine\n")
+    settings, db, job = queued(video, tmp_path)
+    with pytest.raises(ReviewRequired) as refusal:
+        process(job, settings, db.path.parent, db, inference_stub, alignment_stub)
+    assert "Invalid SRT timestamp" in str(refusal.value)
+    assert "sample.en.srt" in str(refusal.value)

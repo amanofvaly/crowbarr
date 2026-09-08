@@ -37,6 +37,11 @@ class Passage:
 TIMING = re.compile(
     r"(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
     r"(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})"
+    # SubRip writes the original bitmap's on-screen box after the timestamps when a
+    # subtitle was produced by OCR of a DVD or VobSub stream. Players ignore it, and
+    # refusing it throws away an entire correct file over a coordinate. Accepted
+    # explicitly rather than by loosening the match, so genuine junk is still junk.
+    r"(?:\s+X1:\d+\s+X2:\d+\s+Y1:\d+\s+Y2:\d+)?\s*"
 )
 
 
@@ -84,7 +89,9 @@ def tokens(text: str) -> list[str]:
 
 def parse_srt(text: str) -> list[Cue]:
     cues = []
-    for block in re.split(r"\n\s*\n", text.lstrip("\ufeff").replace("\r\n", "\n").strip()):
+    impossible = 0
+    blocks = re.split(r"\n\s*\n", text.lstrip("\ufeff").replace("\r\n", "\n").strip())
+    for block in blocks:
         lines = block.splitlines()
         timing_index = next((i for i, line in enumerate(lines[:2]) if "-->" in line), None)
         if timing_index is None:
@@ -99,12 +106,21 @@ def parse_srt(text: str) -> list[Cue]:
         end = values[4] * 3600 + values[5] * 60 + values[6] + values[7] / 1000
         body = "\n".join(lines[timing_index + 1 :]).strip()
         if end <= start:
-            raise ValueError("Non-positive SRT cue")
+            # A cue ending before it starts displays nothing, exactly like the empty
+            # block below: a duplicated line left with a zero length, or an uploader's
+            # credit given nonsense times. One is an artefact, and refusing the file
+            # over it discards every good cue around it and audits none of them.
+            impossible += 1
+            continue
         # Provider files can contain an empty timed block (e.g. a removed advert).
         # It displays nothing and must not invalidate the remaining dialogue.
         if not body:
             continue
         cues.append(Cue(start, end, body))
+    # Timing broken throughout is a different matter: there is no timing to audit, and
+    # measuring whatever survived would report a verdict about a file that has none.
+    if impossible > max(3, len(blocks) * 0.05):
+        raise ValueError(f"{impossible} of {len(blocks)} cues end before they start")
     if not cues:
         raise ValueError("Subtitle has no cues")
     return cues

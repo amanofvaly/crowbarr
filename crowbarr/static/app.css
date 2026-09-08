@@ -10,6 +10,8 @@
   --green: #237949;
   --green-strong: #268353;
   --green-soft: #e7f2eb;
+  --readiness-bg: #eef4f0;
+  --readiness-line: #c8d9ce;
   --olive: #747b28;
   --warn: #926812;
   --danger: #ba3d3d;
@@ -37,6 +39,8 @@
   --green: #71c18f;
   --green-strong: #268353;
   --green-soft: #304c3b;
+  --readiness-bg: #29372f;
+  --readiness-line: #40594a;
   --olive: #bbc269;
   --warn: #e5bd63;
   --danger: #eb9292;
@@ -724,41 +728,17 @@ tbody tr:hover {
 .inline-progress .progress-label {
   font-size: 10px;
 }
-.attention-line {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  margin: 0 0 22px;
-  background: var(--raised);
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  font-size: 12px;
+.readiness-panel {
+  padding: 16px 18px 4px;
+  background: var(--readiness-bg);
+  border: 1px solid var(--readiness-line);
 }
-.attention-line > .icon {
-  flex: none;
-  width: 17px;
-  height: 17px;
+.readiness-panel .panel-header {
+  border-bottom-color: var(--readiness-line);
 }
-.attention-line.needs-attention > .icon,
-.attention-line.needs-attention > div > strong {
-  color: var(--warn);
-}
-.attention-line.clear > .icon,
-.attention-line.clear > div > strong {
+.readiness-panel .panel-header h2 {
   color: var(--green);
-}
-.attention-line > div {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-.attention-line > div > span {
-  color: var(--muted);
-}
-.attention-line > a {
-  margin-left: auto;
-  white-space: nowrap;
+  font-weight: 500;
 }
 .readiness-grid {
   display: grid;
@@ -771,7 +751,7 @@ tbody tr:hover {
   gap: 5px;
   min-width: 0;
   padding: 0 18px;
-  border-left: 1px solid var(--line);
+  border-left: 1px solid var(--readiness-line);
 }
 .readiness-item:first-child {
   padding-left: 0;
@@ -795,7 +775,7 @@ tbody tr:hover {
   gap: 9px;
   padding: 10px 0;
   color: var(--warn);
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--readiness-line);
   font-size: 12px;
 }
 .resource-wait > .icon {
@@ -813,7 +793,7 @@ tbody tr:hover {
 .service-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--readiness-line);
 }
 .service-summary-item {
   display: grid;
@@ -1554,15 +1534,8 @@ dialog::backdrop {
   .worker-band.idle span {
     flex-basis: 100%;
   }
-  .attention-line {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-  .attention-line > div {
-    flex: 1;
-  }
-  .attention-line > a {
-    margin-left: 29px;
+  .readiness-panel {
+    padding: 14px 13px 2px;
   }
   .readiness-grid,
   .service-summary {
@@ -1570,7 +1543,7 @@ dialog::backdrop {
   }
   .readiness-item {
     padding: 10px 14px;
-    border-top: 1px solid var(--line);
+    border-top: 1px solid var(--readiness-line);
   }
   .readiness-item:nth-child(odd) {
     padding-left: 0;

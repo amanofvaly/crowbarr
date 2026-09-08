@@ -320,3 +320,45 @@ def test_history_rows_open_the_job_they_describe(client):
     row = client.get("/api/jobs", headers=auth(client), params={"state": "history"}).json()["results"][0]
     assert row["id"] == job, "the row points at its job, not at the history entry"
     assert client.get(f"/api/jobs/{row['id']}", headers=auth(client)).status_code == 200
+
+
+def review_job(client, media="show.mkv"):
+    db = client.app.state.db
+    job = db.enqueue(media, "inputs-one", None, 0)
+    db.update(job, state="review", stage="Audit inconclusive", error="could not decide")
+    return db, job
+
+
+def test_a_reviewed_result_can_be_set_aside_without_publishing_anything(client):
+    """Review had two doors: run the same policy again, or publish. Neither is 'I looked'."""
+    db, job = review_job(client)
+    assert client.post(f"/api/jobs/{job}/skip", headers=auth(client)).status_code == 200
+    assert db.get(job)["state"] == "skipped"
+    assert client.get("/api/jobs", headers=auth(client), params={"state": "review"}).json()["total"] == 0
+
+
+def test_a_policy_upgrade_does_not_reopen_what_was_deliberately_set_aside(client):
+    """Re-auditing every unresolved verdict is right; re-asking a settled question is not."""
+    db, job = review_job(client)
+    client.post(f"/api/jobs/{job}/skip", headers=auth(client))
+    db.adopt_policy("some-newer-policy")
+    assert db.get(job)["state"] == "skipped"
+
+
+def test_setting_aside_is_reversible(client):
+    db, job = review_job(client)
+    client.post(f"/api/jobs/{job}/skip", headers=auth(client))
+    assert client.post(f"/api/jobs/{job}/retry", headers=auth(client)).status_code == 200
+    assert db.get(job)["state"] == "queued"
+
+
+def test_only_an_unresolved_result_can_be_set_aside(client):
+    db = client.app.state.db
+    job = db.enqueue("show.mkv", "inputs-one", None, 0)
+    db.update(job, state="completed", output="show.crowbarr.en.srt")
+    assert client.post(f"/api/jobs/{job}/skip", headers=auth(client)).status_code == 409
+
+
+def test_a_review_with_no_candidate_cannot_be_published(client):
+    _, job = review_job(client)
+    assert client.post(f"/api/jobs/{job}/approve", headers=auth(client)).status_code == 409
