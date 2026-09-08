@@ -115,8 +115,8 @@ class Settings(BaseModel):
     min_free_ram_mb: int = Field(default=1536, ge=128, le=262144)
     min_free_vram_mb: int = Field(default=1024, ge=128, le=262144)
     max_cpu_load: float = Field(default=0.75, ge=0.1, le=4)
-    backlog_cooldown_seconds: int = Field(default=120, ge=0, le=86400)
-    background_budget_minutes: int = Field(default=30, ge=1, le=60)
+    backlog_cooldown_seconds: int = Field(default=30, ge=0, le=86400)
+    background_budget_minutes: int = Field(default=45, ge=1, le=60)
     quiet_hour_start: int = Field(default=0, ge=0, le=23)
     quiet_hour_end: int = Field(default=0, ge=0, le=23)
     defer_during_plex: bool = True
@@ -198,9 +198,13 @@ class Settings(BaseModel):
         return value
 
     def fingerprint(self) -> str:
-        import hashlib
+        """Identify the inputs to a verdict: the media, its subtitles, and these settings.
 
-        from .audit import AUDIT_VERSION
+        The release deliberately is not part of this. Upgrading must not invalidate
+        verdicts a previous version already reached, or every release would re-check a
+        whole library. Policy changes are handled by reopening unresolved work instead.
+        """
+        import hashlib
 
         keys = (
             "language",
@@ -216,7 +220,7 @@ class Settings(BaseModel):
         )
         return hashlib.sha256(
             json.dumps(
-                {**{k: getattr(self, k) for k in keys}, "audit_version": AUDIT_VERSION}, sort_keys=True
+                {k: getattr(self, k) for k in keys}, sort_keys=True
             ).encode()
         ).hexdigest()
 

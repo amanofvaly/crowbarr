@@ -4,6 +4,7 @@ import base64
 import hmac
 import os
 import shutil
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -126,13 +127,14 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             raise HTTPException(503, "A background service stopped")
         return {"status": "ok", "version": __version__}
 
-    @app.get("/api/status", dependencies=[Depends(authenticate)])
-    def status():
+    def build_status():
         data = db.snapshot()
         data.update(
             {
                 "resources": service.resources,
                 "wait_reason": service.wait_reason,
+                "wait_until": service.wait_until,
+                "wait_total": service.wait_total,
                 "version": __version__,
                 "paused": store.get().paused,
                 "last_scan": service.last_scan,
@@ -144,6 +146,44 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             }
         )
         return data
+
+    @app.get("/api/status", dependencies=[Depends(authenticate)])
+    def status():
+        return build_status()
+
+    @app.get("/api/events", dependencies=[Depends(authenticate)])
+    def events():
+        """Push state to the browser when it changes, instead of being asked on a timer.
+
+        The interface should never poll: a shell that redraws on a clock cannot help but
+        feel like it is buffering. This watches the snapshot server-side and emits only
+        when something actually differs, so an idle library costs one heartbeat a minute.
+        """
+        import asyncio
+        import json as _json
+
+        from fastapi.responses import StreamingResponse
+
+        async def stream():
+            previous, beat = None, 0.0
+            while True:
+                payload = await asyncio.to_thread(build_status)
+                encoded = _json.dumps(payload, default=str)
+                now = time.monotonic()
+                if encoded != previous:
+                    previous = encoded
+                    beat = now
+                    yield f"event: status\ndata: {encoded}\n\n"
+                elif now - beat > 20:
+                    beat = now
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/openapi.json", dependencies=[Depends(authenticate)], include_in_schema=False)
     def api_schema():
@@ -163,7 +203,6 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     def jobs(
         state: str = "queue", q: str = "", offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)
     ):
-        import json
         import time
 
         groups = {
@@ -174,6 +213,39 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         valid = set(sum(groups.values(), []))
         if state not in groups and state not in valid and state != "all":
             raise HTTPException(422, "Unknown job state")
+        if state == "history":
+            # What happened, newest first -- not the current state of each file.
+            where, args = [], []
+            for word in q.split():
+                where.append("media LIKE ? ESCAPE '!'")
+                args.append("%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
+            condition = " AND ".join(where) or "1"
+            with db.connect() as connection:
+                total = connection.execute(
+                    f"SELECT COUNT(*) FROM history WHERE {condition}", args
+                ).fetchone()[0]
+                rows = connection.execute(
+                    f"SELECT * FROM history WHERE {condition} ORDER BY finished DESC, id DESC LIMIT ? OFFSET ?",
+                    (*args, limit, offset),
+                ).fetchall()
+            return {
+                "results": [
+                    {
+                        **dict(row),
+                        # Details opens the job this outcome belongs to, not the history row.
+                        "id": row["job_id"] or row["id"],
+                        "history_id": row["id"],
+                        "title": Path(row["media"]).stem,
+                        "updated": row["finished"],
+                        "created": row["finished"],
+                        "has_report": bool(row["job_id"]),
+                    }
+                    for row in rows
+                ],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            }
         selected = groups.get(state, [state])
         where, args = [], []
         if state != "all":
@@ -198,7 +270,8 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         result = []
         for row in rows:
             job = dict(row)
-            job.update(title=Path(job["media"]).stem, report=json.loads(job["report"] or "null"))
+            # Same reason as the status payload: the list shows none of it.
+            job.update(title=Path(job["media"]).stem, has_report=bool(job.pop("report", None)))
             result.append(job)
         return {"results": result, "total": total, "offset": offset, "limit": limit}
 

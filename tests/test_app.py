@@ -275,3 +275,44 @@ def test_openapi_is_authenticated_and_describes_machine_auth(client):
     schema = client.get("/api/openapi.json", headers=auth(client)).json()
     assert schema["components"]["securitySchemes"]["ApiKey"]["name"] == "X-Api-Key"
     assert schema["paths"]["/api/process"]["post"]["security"] == [{"ApiKey": []}, {"Bearer": []}]
+
+
+def test_a_file_appears_once_across_every_view(client, tmp_path):
+    """One row per file: a re-queued file cannot also be listed under an old verdict."""
+    db = client.app.state.db
+    job = db.enqueue("show.mkv", "inputs-one", None, 0)
+    db.update(job, state="review", stage="Needs attention", error="could not decide")
+    assert client.get("/api/jobs", headers=auth(client), params={"state": "review"}).json()["total"] == 1
+
+    db.enqueue("show.mkv", "inputs-two", None, 0)   # its subtitle changed; re-check it
+    review = client.get("/api/jobs", headers=auth(client), params={"state": "review"}).json()
+    queue = client.get("/api/jobs", headers=auth(client), params={"state": "queue"}).json()
+    assert review["total"] == 0, "its review verdict is no longer current"
+    assert [j["signature"] for j in queue["results"]] == ["inputs-two"]
+    assert client.get("/api/status", headers=auth(client)).json()["counts"] == {"queued": 1}
+
+
+def test_history_records_what_happened_even_after_a_file_is_rechecked(client):
+    """Current state and past outcomes are different questions; both must be answerable."""
+    db = client.app.state.db
+    job = db.enqueue("show.mkv", "inputs-one", None, 0)
+    db.update(job, state="completed", output="show.crowbarr.en.srt")
+    db.update(job, state="unchanged")
+
+    db.enqueue("show.mkv", "inputs-two", None, 0)   # its subtitle changed; re-check it
+    assert db.snapshot()["counts"] == {"queued": 1}, "current state is a single queued file"
+
+    history = client.get("/api/jobs", headers=auth(client), params={"state": "history"}).json()
+    assert [row["state"] for row in history["results"]] == ["unchanged", "completed"]
+    assert history["total"] == 2, "re-checking a file does not erase what happened to it"
+
+
+def test_history_rows_open_the_job_they_describe(client):
+    """A history row is not a job row; Details must still resolve to the real job."""
+    db = client.app.state.db
+    job = db.enqueue("show.mkv", "inputs-one", None, 0)
+    db.update(job, state="completed", output="show.crowbarr.en.srt")
+
+    row = client.get("/api/jobs", headers=auth(client), params={"state": "history"}).json()["results"][0]
+    assert row["id"] == job, "the row points at its job, not at the history entry"
+    assert client.get(f"/api/jobs/{row['id']}", headers=auth(client)).status_code == 200

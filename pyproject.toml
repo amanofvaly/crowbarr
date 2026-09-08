@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crowbarr"
-version = "0.3.0"
+version = "0.3.1"
 description = "Automatic audio-grounded subtitles for the arr ecosystem"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

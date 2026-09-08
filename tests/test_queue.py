@@ -38,10 +38,13 @@ def test_subtitle_upgrade_supersedes_waiting_fallback(tmp_path):
     media.with_suffix(".en.srt").write_text("authored")
     scan(settings, db)
     jobs = db.snapshot()["jobs"]
-    assert len(jobs) == 2
-    assert sorted(job["state"] for job in jobs) == ["queued", "superseded"]
+    # One file is one row: the arriving subtitle replaces the wait in place rather
+    # than leaving a superseded duplicate behind.
+    assert len(jobs) == 1
+    assert jobs[0]["state"] == "queued"
+    assert jobs[0]["source"].endswith(".en.srt")
     scan(settings, db)
-    assert len(db.snapshot()["jobs"]) == 2
+    assert len(db.snapshot()["jobs"]) == 1
 
 
 def test_own_output_and_forced_subtitles_are_not_sources(tmp_path):
@@ -84,7 +87,8 @@ def test_video_replacement_retires_only_verified_own_output(tmp_path):
     scan(settings, db)
     assert not output.exists()
     assert (db.path.parent / "backups" / f"retired-{job['id']}.srt").read_text() == "old subtitle"
-    assert db.get(job["id"])["state"] == "superseded"
+    # The retired output is gone and the file is queued again for the new video.
+    assert db.get(job["id"])["state"] == "queued"
 
 
 def test_externally_edited_output_is_not_deleted(tmp_path):
@@ -241,3 +245,48 @@ def test_progress_is_numeric_and_resets_when_stage_changes(tmp_path):
     db.update(identifier, stage="Aligning words to audio")
     assert db.get(identifier)["progress_current"] is None
     assert db.get(identifier)["progress_total"] is None
+
+
+def test_a_policy_change_reopens_unresolved_work_without_manual_intervention(tmp_path):
+    """Installing an update must revisit what it could not decide, on its own."""
+    db = Database(tmp_path / "queue.db")
+    stuck = db.enqueue("unclear.mkv", "sig", None, 0)
+    db.update(stuck, state="review", stage="Needs attention", error="could not decide")
+    settled = db.enqueue("fine.mkv", "sig", None, 0)
+    db.update(settled, state="unchanged", stage="Audit passed")
+
+    assert db.adopt_policy("policy-one") == 0          # first run reconsiders nothing
+    assert db.adopt_policy("policy-one") == 0          # unchanged policy is a no-op
+    assert db.adopt_policy("policy-two") == 1          # only the unresolved one comes back
+
+    assert db.get(stuck)["state"] == "queued"          # reconsidered under the new rules
+    assert db.get(settled)["state"] == "unchanged"     # an upgrade does not undo this
+
+
+def test_counts_describe_files_not_job_rows(tmp_path):
+    """A re-queued file must not be counted as both finished and pending."""
+    db = Database(tmp_path / "queue.db")
+    first = db.enqueue("episode.mkv", "policy-one", None, 0)
+    db.update(first, state="unchanged", stage="Audit passed")
+    db.enqueue("episode.mkv", "policy-two", None, 0)      # an update re-queues it
+    db.enqueue("other.mkv", "policy-two", None, 0)
+
+    counts = db.snapshot()["counts"]
+    assert sum(counts.values()) == 2, "two files, two counts"
+    assert counts.get("unchanged") is None, "its old verdict is no longer current"
+    assert counts["queued"] == 2
+
+
+def test_a_changed_file_is_a_new_request_but_an_unchanged_one_keeps_waiting(tmp_path):
+    """`created` drives ageing and the "requested" column, so it must mean something."""
+    db = Database(tmp_path / "queue.db")
+    job = db.enqueue("movie.mkv", "inputs-one", None, 0)
+    db.update(job, state="unchanged")
+    first = db.get(job)["created"]
+
+    db.enqueue("movie.mkv", "inputs-one", None, 0)          # nothing changed
+    assert db.get(job)["created"] == first
+
+    time.sleep(0.01)
+    db.enqueue("movie.mkv", "inputs-two", None, 0)          # its subtitle changed
+    assert db.get(job)["created"] > first, "a changed file is a fresh request"

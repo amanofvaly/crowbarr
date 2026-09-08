@@ -9,7 +9,21 @@ from statistics import median
 
 from .subtitles import Cue, Word, match_passages, tokens, validate_cues
 
-AUDIT_VERSION = 6
+
+def _policy_signature() -> str:
+    """Identify the decision policy by the released version.
+
+    Publishing a release is what changes verdicts for people who install it, so that is
+    what re-evaluates their library -- automatically, with nobody bumping a separate
+    constant. Deriving it from the source instead would re-check every file on any edit,
+    including ones that cannot change a decision.
+    """
+    from . import __version__
+
+    return __version__
+
+
+AUDIT_VERSION = _policy_signature()
 
 
 def _distributed(evidence: list[dict], duration: float) -> bool:
@@ -46,6 +60,9 @@ def _fit_start(evidence: list[dict]) -> dict:
         "offset_seconds": offset,
         "residual_median_seconds": median(residuals),
         "residual_p95_seconds": residuals[math.ceil(len(residuals) * 0.95) - 1],
+        # How much of the evidence disagrees, rather than how badly the worst point does.
+        # A handful of mismatched anchors is normal; a substantial minority is a fault.
+        "residual_outlier_ratio": sum(value > 1.5 for value in residuals) / len(residuals),
     }
 
 
@@ -139,7 +156,7 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
         settled = (
             near_identity
             and fit["residual_median_seconds"] <= 0.75
-            and residual_p95 <= 2.5
+            and fit["residual_outlier_ratio"] <= 0.15
         )
         if not blocking_structural and (aligned or settled):
             decision, reason = (
@@ -206,7 +223,8 @@ def improved(before: dict, after: dict) -> bool:
         for original, candidate in zip(before["evidence"], after["evidence"], strict=True)
     ) > 0.5:
         return False
-    index = math.ceil(len(before["evidence"]) * 0.95) - 1
-    was = sorted(abs(e["start_delta_seconds"]) for e in before["evidence"])[index]
-    now = sorted(abs(e["start_delta_seconds"]) for e in after["evidence"])[index]
-    return now <= was * 0.8 and was - now >= 0.5
+    # Judge the middle, not the tail. Anchors that were mismatched stay mismatched after
+    # a shift, so they dominate a p95 and make a correct repair look like no improvement.
+    was = median(abs(e["start_delta_seconds"]) for e in before["evidence"])
+    now = median(abs(e["start_delta_seconds"]) for e in after["evidence"])
+    return now <= was * 0.8 and was - now >= 0.25

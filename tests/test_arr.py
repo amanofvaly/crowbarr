@@ -201,7 +201,7 @@ def test_upgrade_replaces_pending_revision(catalog_library):
     video.write_bytes(b"upgraded-release-with-a-different-cut")
     factory.files = [ManagedFile("radarr", 11, 1, str(video), "/movies/movie.mkv", "Movie")]
     scan_arr(settings, db, factory)
-    assert sorted(j["state"] for j in db.snapshot()["jobs"]) == ["queued", "superseded"]
+    assert [j["state"] for j in db.snapshot()["jobs"]] == ["queued"]
 
 
 def test_invisible_import_is_reported_not_queued(catalog_library):

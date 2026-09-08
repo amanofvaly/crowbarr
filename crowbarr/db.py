@@ -58,6 +58,7 @@ class Database:
                 "directive": "TEXT NOT NULL DEFAULT ''",
                 "progress_current": "REAL",
                 "progress_total": "REAL",
+                "cached": "INTEGER",
                 "started": "REAL",
             }.items():
                 if name not in columns:
@@ -65,6 +66,25 @@ class Database:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS resource_usage (started REAL NOT NULL, seconds REAL NOT NULL)"
             )
+            db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            # `jobs` holds what is true now; `history` holds what happened. Keeping both
+            # in one table is what made a re-queued file erase its own past.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS history ("
+                " id INTEGER PRIMARY KEY, job_id INTEGER, media TEXT NOT NULL, state TEXT NOT NULL,"
+                " error TEXT, output TEXT, finished REAL NOT NULL)"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS history_finished ON history(finished DESC)")
+            if "job_id" not in {row[1] for row in db.execute("PRAGMA table_info(history)")}:
+                db.execute("ALTER TABLE history ADD COLUMN job_id INTEGER")
+            # One row per media file, holding its current state -- not one row per
+            # (file, inputs) pair. A row per revision turns a state question into an
+            # ever-growing log: files get counted twice, finished verdicts are buried
+            # under re-queued duplicates, and ids climb without bound.
+            db.execute(
+                "DELETE FROM jobs WHERE id NOT IN (SELECT MAX(id) FROM jobs GROUP BY media)"
+            )
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_media ON jobs(media)")
             if "generation" not in {row[1] for row in db.execute("PRAGMA table_info(provider_sync)")}:
                 db.execute("ALTER TABLE provider_sync ADD COLUMN generation TEXT NOT NULL DEFAULT ''")
 
@@ -119,62 +139,55 @@ class Database:
     def enqueue(
         self, media: str, signature: str, source: str | None, ready: float, origin: str = "backlog"
     ) -> int:
+        """Record what this file needs now. One row per file, updated in place."""
         priority = {"manual": 100, "import": 80, "bazarr": 60, "retry": 40, "backlog": 0}[origin]
+        pending = ("waiting", "queued", "retry", "processing")
         now = time.time()
+        state = "waiting" if ready > now else "queued"
         with self.connect() as db:
-            # A provider arrival changes the signature, not the user's reason for
-            # waiting. Carry pending import/manual priority into its replacement.
-            pending = db.execute(
-                "SELECT origin,priority FROM jobs WHERE media=? "
-                "AND state IN ('waiting','queued','retry','processing') "
-                "ORDER BY priority DESC LIMIT 1",
-                (media,),
-            ).fetchone()
-            if pending and pending["priority"] > priority:
-                origin, priority = pending["origin"], pending["priority"]
+            row = db.execute("SELECT * FROM jobs WHERE media=?", (media,)).fetchone()
+            if row is None:
+                db.execute(
+                    "INSERT INTO jobs(media,signature,source,state,created,updated,ready,origin,priority)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (media, signature, source, state, now, now, ready, origin, priority),
+                )
+                return db.execute("SELECT id FROM jobs WHERE media=?", (media,)).fetchone()[0]
+
+            if row["signature"] == signature:
+                # Nothing about this file changed. A settled verdict stands, but work
+                # that was abandoned rather than decided is revived by asking again.
+                if row["state"] in ("superseded", "cancelled"):
+                    db.execute(
+                        "UPDATE jobs SET state=?,ready=?,updated=?,stage='',attempts=0,error=NULL,"
+                        "cancel_requested=0,origin=?,priority=? WHERE id=?",
+                        (state, ready, now, origin, priority, row["id"]),
+                    )
+                    return row["id"]
+                if row["state"] in pending and priority > row["priority"]:
+                    db.execute(
+                        "UPDATE jobs SET priority=?,origin=?,updated=? WHERE id=?",
+                        (priority, origin, now, row["id"]),
+                    )
+                return row["id"]
+
+            # The media or its subtitles changed, so the previous verdict no longer
+            # applies. Keep a waiting user's urgency, and revisit unresolved work sooner
+            # than untouched backlog.
+            if row["state"] in pending and row["priority"] > priority:
+                origin, priority = row["origin"], row["priority"]
+            elif row["state"] in ("review", "failed") and priority < 40:
+                origin, priority = "retry", 40
+            # Its inputs changed, so this is a new request: restart the clock. Ageing and
+            # the "requested" column both read created, and a row that lives forever would
+            # otherwise report the day it was first seen and accrue endless priority.
             db.execute(
-                "UPDATE jobs SET state='superseded',updated=? WHERE media=? AND signature!=? "
-                "AND state IN ('waiting','queued','retry')",
-                (now, media, signature),
+                "UPDATE jobs SET signature=?,source=?,state=?,ready=?,created=?,updated=?,origin=?,priority=?,"
+                "stage='',attempts=0,error=NULL,cancel_requested=0,directive='',"
+                "progress_current=NULL,progress_total=NULL,started=NULL WHERE id=?",
+                (signature, source, state, ready, now, now, origin, priority, row["id"]),
             )
-            db.execute(
-                "INSERT OR IGNORE INTO jobs(media,signature,source,state,created,updated,ready,origin,priority) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (
-                    media,
-                    signature,
-                    source,
-                    "waiting" if ready > now else "queued",
-                    now,
-                    now,
-                    ready,
-                    origin,
-                    priority,
-                ),
-            )
-            db.execute(
-                "UPDATE jobs SET state=?,ready=?,updated=?,attempts=0,error=NULL "
-                "WHERE media=? AND signature=? AND state='superseded'",
-                ("waiting" if ready > now else "queued", ready, now, media, signature),
-            )
-            # A policy change re-queues the whole library. Media that previously needed
-            # attention is the reason the policy changed, so revisit it ahead of the
-            # untouched backlog instead of behind every file that was already fine.
-            if (
-                origin == "backlog"
-                and db.execute(
-                    "SELECT 1 FROM jobs WHERE media=? AND signature!=? AND state IN ('review','failed') LIMIT 1",
-                    (media, signature),
-                ).fetchone()
-            ):
-                priority, origin = 40, "retry"
-            db.execute(
-                "UPDATE jobs SET priority=?,origin=? WHERE media=? AND signature=? AND priority<? AND state IN ('waiting','queued','retry')",
-                (priority, origin, media, signature, priority),
-            )
-            return db.execute(
-                "SELECT id FROM jobs WHERE media=? AND signature=?", (media, signature)
-            ).fetchone()[0]
+            return row["id"]
 
     def replace_catalog(self, provider: str, records: list[dict], generation: str = "") -> None:
         now = time.time()
@@ -313,6 +326,7 @@ class Database:
             "progress_current",
             "progress_total",
             "started",
+            "cached",
         }
         if not values or not set(values) <= allowed:
             raise ValueError("Invalid job update")
@@ -324,6 +338,18 @@ class Database:
                 "UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?",
                 (*values.values(), job_id),
             )
+            if values.get("state") in ("completed", "unchanged", "review", "failed"):
+                row = db.execute("SELECT media,state,error,output FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if row:
+                    db.execute(
+                        "INSERT INTO history(job_id,media,state,error,output,finished)"
+                        " VALUES (?,?,?,?,?,?)",
+                        (job_id, row["media"], row["state"], row["error"], row["output"], values["updated"]),
+                    )
+                    db.execute(
+                        "DELETE FROM history WHERE id NOT IN "
+                        "(SELECT id FROM history ORDER BY finished DESC LIMIT 5000)"
+                    )
 
     def recover(self) -> None:
         # Called only after the service acquires the exclusive process lock.
@@ -398,6 +424,29 @@ class Database:
                 (now, now - 3600),
             ).fetchone()[0]
 
+    def adopt_policy(self, policy: str) -> int:
+        """Re-open unresolved work when the installed decision policy changes.
+
+        An upgrade should benefit an existing library without anyone re-queueing by
+        hand. Jobs that could not be decided are exactly the ones a policy change is
+        likely to resolve, so they come back; settled verdicts are left alone rather
+        than re-running the whole library on every release.
+        """
+        with self.connect() as db:
+            previous = db.execute("SELECT value FROM meta WHERE key='policy'").fetchone()
+            if previous and previous[0] == policy:
+                return 0
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('policy',?)", (policy,))
+            if not previous:
+                return 0  # first run: nothing to reconsider
+            # Settled verdicts survive an upgrade; only work the previous version
+            # could not resolve is worth reconsidering under new rules.
+            return db.execute(
+                "UPDATE jobs SET state='queued',stage='',origin='retry',priority=40,"
+                "attempts=0,error=NULL,ready=?,updated=? WHERE state IN ('review','failed')",
+                (time.time(), time.time()),
+            ).rowcount
+
     def prune(self, keep: int = 200) -> int:
         """Superseded rows are bookkeeping. Policy changes can create one per file per
         revision, so retain a recent window instead of growing the table forever."""
@@ -440,7 +489,8 @@ class Database:
                     "ORDER BY updated DESC LIMIT 75"
                 )
             ]
-            counts = dict(db.execute("SELECT state,COUNT(*) FROM jobs GROUP BY state"))
+            # A row is a file, so this is simply how many files are in each state.
+            counts = dict(db.execute("SELECT state, COUNT(*) FROM jobs GROUP BY state"))
             media_total = (
                 db.execute("SELECT COUNT(*) FROM managed_media").fetchone()[0]
                 or db.execute("SELECT COUNT(DISTINCT media) FROM jobs").fetchone()[0]
@@ -454,7 +504,11 @@ class Database:
             ]
         for job in jobs:
             job["title"] = Path(job["media"]).stem
-            job["report"] = json.loads(job["report"]) if job["report"] else None
+            # Audit reports carry per-cue evidence and run to six figures of JSON. No
+            # list renders them, and shipping a hundred of them on every update is what
+            # made the interface feel like it was buffering. The detail view fetches the
+            # one report it needs from /api/jobs/{id}.
+            job["has_report"] = bool(job.pop("report", None))
         return {
             "jobs": jobs,
             "counts": counts,
