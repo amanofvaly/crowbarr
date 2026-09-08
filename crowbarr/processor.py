@@ -679,18 +679,32 @@ def process(
             baseline = _generated_baseline(passages)
             if refine_generated:
                 alignment_passages = _distributed_sample(eligible_passages, duration)
-                aligned, alignment_issues = aligner(audio, alignment_passages, settings, cache)
-                warnings.extend(alignment_issues)
-                if len(aligned) == len(alignment_passages):
-                    refined = {
-                        id(passage): cue for passage, cue in zip(alignment_passages, aligned, strict=True)
-                    }
-                    aligned = [
-                        refined.get(id(passage), cue) for passage, cue in zip(passages, baseline, strict=True)
-                    ]
+                try:
+                    aligned, alignment_issues = aligner(audio, alignment_passages, settings, cache)
+                except ImportError as error:
+                    # The CUDA image ships recognition without WhisperX, which would pull
+                    # a second CUDA torch stack for an off-by-default refinement. A build
+                    # that cannot honour the setting must fall back to Whisper's own word
+                    # timestamps and say so, not fail the job on an import.
+                    warnings.append(
+                        f"WhisperX refinement is not installed in this image ({error}); "
+                        "used Whisper word timestamps instead"
+                    )
+                    alignment_passages, aligned = [], baseline
                 else:
-                    warnings.append("Forced aligner returned incomplete output; kept Whisper timestamps")
-                    aligned = baseline
+                    warnings.extend(alignment_issues)
+                    if len(aligned) == len(alignment_passages):
+                        refined = {
+                            id(passage): cue
+                            for passage, cue in zip(alignment_passages, aligned, strict=True)
+                        }
+                        aligned = [
+                            refined.get(id(passage), cue)
+                            for passage, cue in zip(passages, baseline, strict=True)
+                        ]
+                    else:
+                        warnings.append("Forced aligner returned incomplete output; kept Whisper timestamps")
+                        aligned = baseline
             else:
                 alignment_passages = []
                 aligned = baseline

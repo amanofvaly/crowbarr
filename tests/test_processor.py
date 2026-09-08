@@ -591,3 +591,18 @@ def test_an_unreadable_subtitle_says_what_was_wrong_with_it(video, tmp_path):
         process(job, settings, db.path.parent, db, inference_stub, alignment_stub)
     assert "Invalid SRT timestamp" in str(refusal.value)
     assert "sample.en.srt" in str(refusal.value)
+
+
+def test_a_missing_alignment_package_does_not_fail_the_job(video, tmp_path):
+    """The CUDA image ships recognition without WhisperX. A setting that is on in a build
+    which cannot honour it must fall back to Whisper timestamps and say so."""
+    def absent(*args):
+        raise ImportError("No module named 'whisperx'")
+
+    settings, db, job = queued(video, tmp_path)
+    settings = settings.model_copy(update={"refine_generated": True})
+    result = process(job, settings, db.path.parent, db, inference_stub, absent)
+    assert result["state"] == "completed"
+    report = json.loads(result["report"])
+    assert any("whisperx" in w.lower() for w in report["warnings"])
+    assert video.with_suffix(".crowbarr.en.srt").exists()
