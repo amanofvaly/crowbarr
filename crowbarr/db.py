@@ -7,11 +7,16 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+class StaleJob(RuntimeError):
+    """The worker's request has been replaced since it was claimed."""
+
+
 class Database:
     """A durable single-host queue. Transactions serialize claims across threads/processes."""
 
     def __init__(self, path: Path):
-        self.path = path
+        self.path = path.resolve()
+        self.worker_job = None
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
@@ -50,6 +55,7 @@ class Database:
                     generation TEXT NOT NULL DEFAULT ''
                 );
             """)
+            db.execute("BEGIN IMMEDIATE")
             columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
             for name, definition in {
                 "origin": "TEXT NOT NULL DEFAULT 'backlog'",
@@ -60,6 +66,7 @@ class Database:
                 "progress_total": "REAL",
                 "cached": "INTEGER",
                 "started": "REAL",
+                "generation": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
@@ -81,9 +88,30 @@ class Database:
             # (file, inputs) pair. A row per revision turns a state question into an
             # ever-growing log: files get counted twice, finished verdicts are buried
             # under re-queued duplicates, and ids climb without bound.
-            db.execute(
-                "DELETE FROM jobs WHERE id NOT IN (SELECT MAX(id) FROM jobs GROUP BY media)"
-            )
+            obsolete = db.execute(
+                "SELECT * FROM jobs WHERE id NOT IN (SELECT MAX(id) FROM jobs GROUP BY media)"
+            ).fetchall()
+            for row in obsolete:
+                try:
+                    report = json.loads(row["report"] or "{}")
+                    digest = report.get("output_sha256") if isinstance(report, dict) else None
+                except (ValueError, TypeError):
+                    digest = None
+                if row["output"] and isinstance(digest, str) and digest:
+                    db.execute(
+                        "INSERT OR IGNORE INTO artifacts VALUES (?,?,?,?,?)",
+                        (row["media"], row["output"], digest, row["id"], row["updated"]),
+                    )
+                if row["state"] in {"completed", "unchanged", "review", "failed", "skipped"}:
+                    db.execute(
+                        "INSERT INTO history(job_id,media,state,error,output,finished) "
+                        "SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM history WHERE job_id=?)",
+                        (row["id"], row["media"], row["state"], row["error"], row["output"],
+                         row["updated"], row["id"]),
+                    )
+                # A removed revision cannot supply a current detail report.
+                db.execute("UPDATE history SET job_id=NULL WHERE job_id=?", (row["id"],))
+                db.execute("DELETE FROM jobs WHERE id=?", (row["id"],))
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_media ON jobs(media)")
             if "generation" not in {row[1] for row in db.execute("PRAGMA table_info(provider_sync)")}:
                 db.execute("ALTER TABLE provider_sync ADD COLUMN generation TEXT NOT NULL DEFAULT ''")
@@ -94,9 +122,18 @@ class Database:
         db.row_factory = sqlite3.Row
         try:
             with db:
+                if self.worker_job is not None:
+                    db.execute("BEGIN IMMEDIATE")
+                    if not db.execute(
+                        "SELECT 1 FROM jobs WHERE id=? AND generation=?", self.worker_job
+                    ).fetchone():
+                        raise StaleJob("Job request was replaced")
                 yield db
         finally:
             db.close()
+
+    def bind_worker(self, job: dict) -> None:
+        self.worker_job = (job["id"], job["generation"])
 
     def notice(self, name: str, message: str) -> None:
         with self.connect() as db:
@@ -184,7 +221,8 @@ class Database:
             db.execute(
                 "UPDATE jobs SET signature=?,source=?,state=?,ready=?,created=?,updated=?,origin=?,priority=?,"
                 "stage='',attempts=0,error=NULL,cancel_requested=0,directive='',"
-                "progress_current=NULL,progress_total=NULL,started=NULL WHERE id=?",
+                "progress_current=NULL,progress_total=NULL,started=NULL,cached=NULL,"
+                "generation=generation+1 WHERE id=?",
                 (signature, source, state, ready, now, now, origin, priority, row["id"]),
             )
             return row["id"]
@@ -287,7 +325,8 @@ class Database:
                 return None
             db.execute(
                 "UPDATE jobs SET state='processing',stage='Preparing audio',attempts=attempts+1,"
-                "updated=?,started=?,progress_current=NULL,progress_total=NULL,error=NULL WHERE id=?",
+                "updated=?,started=?,progress_current=NULL,progress_total=NULL,cached=NULL,"
+                "generation=generation+1,error=NULL WHERE id=?",
                 (now, now, row["id"]),
             )
             return dict(db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
@@ -310,7 +349,7 @@ class Database:
                 for row in db.execute("SELECT report FROM jobs WHERE media=? AND output=?", (media, path))
             )
 
-    def update(self, job_id: int, **values) -> None:
+    def update(self, job_id: int, *, expected_generation: int | None = None, **values) -> bool:
         allowed = {
             "state",
             "stage",
@@ -334,10 +373,13 @@ class Database:
             values.update(progress_current=None, progress_total=None)
         values["updated"] = time.time()
         with self.connect() as db:
-            db.execute(
-                "UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?",
-                (*values.values(), job_id),
+            result = db.execute(
+                "UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?"
+                + (" AND generation=?" if expected_generation is not None else ""),
+                (*values.values(), job_id, *((expected_generation,) if expected_generation is not None else ())),
             )
+            if not result.rowcount:
+                return False
             if values.get("state") in ("completed", "unchanged", "review", "failed"):
                 row = db.execute("SELECT media,state,error,output FROM jobs WHERE id=?", (job_id,)).fetchone()
                 if row:
@@ -350,18 +392,29 @@ class Database:
                         "DELETE FROM history WHERE id NOT IN "
                         "(SELECT id FROM history ORDER BY finished DESC LIMIT 5000)"
                     )
+            return True
 
-    def recover(self) -> None:
+    def recover(self, max_attempts: int = 3) -> None:
         # Called only after the service acquires the exclusive process lock.
         with self.connect() as db:
+            db.execute(
+                "INSERT INTO history(job_id,media,state,error,output,finished) "
+                "SELECT id,media,'failed','Service restarted; attempt limit reached',output,? "
+                "FROM jobs WHERE state='processing' AND attempts>=? AND cancel_requested=0",
+                (time.time(), max_attempts),
+            )
             db.execute(
                 # A graceful stop already moved its job out of 'processing' and refunded the
                 # attempt. Anything still 'processing' died with the service, so it must keep
                 # the attempt: a job that reliably kills the container has to fail out instead
                 # of restart-looping forever.
-                "UPDATE jobs SET state='retry',stage='',ready=?,updated=?,"
-                "error='Service restarted; job will resume' WHERE state='processing'",
-                (time.time(), time.time()),
+                "UPDATE jobs SET state=CASE WHEN cancel_requested=1 THEN 'cancelled' "
+                "WHEN attempts>=? THEN 'failed' ELSE 'retry' END,"
+                "stage='',ready=?,updated=?,progress_current=NULL,progress_total=NULL,started=NULL,cached=NULL,"
+                "generation=generation+1,error=CASE WHEN cancel_requested=1 THEN 'Cancelled by user' "
+                "WHEN attempts>=? THEN 'Service restarted; attempt limit reached' "
+                "ELSE 'Service restarted; job will resume' END WHERE state='processing'",
+                (max_attempts, time.time(), time.time(), max_attempts),
             )
 
     def get(self, job_id: int) -> dict | None:
@@ -410,7 +463,8 @@ class Database:
             return bool(
                 db.execute(
                     "UPDATE jobs SET directive=?,state='queued',stage='',origin='manual',priority=100,"
-                    "cancel_requested=0,ready=?,updated=?,attempts=0,error=NULL WHERE id=?",
+                    "cancel_requested=0,ready=?,updated=?,attempts=0,error=NULL,"
+                    "generation=generation+1,progress_current=NULL,progress_total=NULL,started=NULL,cached=NULL WHERE id=?",
                     (directive, time.time(), time.time(), job_id),
                 ).rowcount
             )
