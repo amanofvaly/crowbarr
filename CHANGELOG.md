@@ -84,7 +84,9 @@ re-audits anything.
 
 ### 0.3.4
 
-- No application-visible change beyond the audit policy above.
+- Dashboard is made cleaner by removing redundant edit candidates.
+- Added skip review action.
+
 
 ### 0.3.3
 
