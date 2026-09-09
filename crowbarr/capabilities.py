@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import multiprocessing
 import os
@@ -52,6 +53,60 @@ _cached: dict | None = None
 _expires = 0.0
 _variant = ""
 
+_download_lock = threading.Lock()
+_download = {"status": "idle", "reason": ""}
+
+
+def _fetch_worker(model_dir, language):
+    from whisperx.alignment import load_align_model
+
+    load_align_model(language_code=language, device="cpu", model_dir=model_dir)
+
+
+def download_state() -> dict:
+    with _download_lock:
+        return dict(_download)
+
+
+def start_alignment_download(directory, language: str = "en") -> bool:
+    """Fetch the alignment model once, in a child, so the web process stays light.
+
+    Returns False when a download is already running, so a second click is ignored
+    rather than starting a competing fetch into the same directory.
+    """
+    from pathlib import Path as _Path
+
+    with _download_lock:
+        if _download["status"] == "running":
+            return False
+        _download.update(status="running", reason="")
+
+    def run():
+        model_dir = str(_Path(directory) / "models" / "alignment")
+        context = multiprocessing.get_context("spawn")
+        process = context.Process(target=_fetch_worker, args=(model_dir, language), daemon=True)
+        status, reason = "failed", "The download did not finish. Check network access and disk space."
+        try:
+            process.start()
+            process.join(timeout=1800)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+                reason = "The download timed out after 30 minutes."
+            elif process.exitcode == 0:
+                status, reason = "ready", ""
+        except (OSError, ValueError) as error:
+            reason = f"The download could not start ({type(error).__name__})."
+        finally:
+            if process.pid is not None:
+                with contextlib.suppress(ValueError):
+                    process.close()
+            with _download_lock:
+                _download.update(status=status, reason=reason)
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
 
 def _probe_worker(connection):
     try:
@@ -85,6 +140,43 @@ def _run_probe() -> dict:
                     process.kill()
                     process.join(timeout=1)
             process.close()
+
+
+# WhisperX names the English alignment model after its torchaudio pipeline bundle.
+ALIGNMENT_MODEL = "alignment/wav2vec2_fairseq_base_ls960_asr_ls960.pth"
+
+
+def model_inventory(directory) -> dict:
+    """Report which models are already downloaded. Filesystem only, no imports."""
+    from pathlib import Path as _Path
+
+    models = _Path(directory) / "models"
+    speech = {}
+    whisper = models / "whisper"
+    if whisper.is_dir():
+        for entry in whisper.iterdir():
+            name, marker = entry.name, "faster-whisper-"
+            if entry.is_dir() and marker in name:
+                speech[name.split(marker, 1)[1]] = True
+    alignment = models / ALIGNMENT_MODEL
+    present = alignment.is_file()
+    state = download_state()
+    return {
+        "speech": sorted(speech),
+        "alignment": {
+            "present": present,
+            "bytes": alignment.stat().st_size if present else 0,
+            "status": "ready" if present else state["status"],
+            "reason": "" if present else state["reason"],
+        },
+    }
+
+
+def capabilities_for(directory) -> dict:
+    """Runtime probe plus which models are already on disk."""
+    result = runtime_capabilities()
+    result["models"] = model_inventory(directory)
+    return result
 
 
 def runtime_capabilities() -> dict:

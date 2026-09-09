@@ -55,14 +55,29 @@ SETTLED_OFFSET = ALIGNED_START_MEDIAN
 SETTLED_DRIFT = 1.5
 SETTLED_RESIDUAL_MEDIAN = 0.75
 SETTLED_OUTLIER_RATIO = 0.15
-# What a proposed repair has to demonstrate before it may replace the original.
-REGRESSION_SHARE = 0.25
-LARGE_REGRESSION_SHARE = 0.1
-NEW_TRUNCATION = 0.5
-TRUNCATION_SHARE = 0.1
-SEVERE_TRUNCATION = 1.5
-IMPROVEMENT_FACTOR = 0.8
-IMPROVEMENT_MARGIN = 0.25
+
+
+def blocking_structural_issues(issues: list[str], cue_count: int) -> list[str]:
+    """Split structural damage into what blocks publication and what is only reported.
+
+    Damage decides an outcome by share, never by a single item. One overlapping line in
+    a file of five hundred says nothing about the timing of the other four hundred and
+    ninety-nine, and no review action exists that would fix it. Two faults are exempt
+    from the share rule because they leave nothing to measure rather than leaving
+    something untidy: a cue whose timing is impossible, and an alignment that produced
+    no dialogue at all.
+
+    Both the audit and the repair path ask this question, so they ask it here. Keeping
+    one copy is the point: the rule was already correct in the audit and applied as a
+    single-item veto in the processor, which held finished repairs for one bad cue.
+    """
+    fatal, untidy = [], []
+    for issue in issues:
+        if "invalid timing" in issue or "No aligned dialogue" in issue:
+            fatal.append(issue)
+        elif "unsuitable reading duration" not in issue:
+            untidy.append(issue)
+    return fatal + (untidy if len(untidy) > max(3, cue_count * STRUCTURAL_SHARE) else [])
 
 
 def _one_way_drift(evidence: list[dict]) -> tuple[float, float]:
@@ -162,15 +177,7 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
     # by 0.4 s, are reported and no more. Two things still block, because they
     # undermine the measurement rather than the tidiness: a cue whose timing is
     # impossible, and damage spread across the whole file.
-    malformed = [issue for issue in structural if "invalid timing" in issue]
-    untidy = [
-        issue
-        for issue in structural
-        if "unsuitable reading duration" not in issue and "invalid timing" not in issue
-    ]
-    blocking_structural = malformed + (
-        untidy if len(untidy) > max(3, len(cues) * STRUCTURAL_SHARE) else []
-    )
+    blocking_structural = blocking_structural_issues(structural, len(cues))
     dialogue_cues = sum(bool(tokens(cue.text)) for cue in cues)
     required_anchors = min(30, max(3, math.ceil(dialogue_cues * 0.1)))
     dialogue_coverage = len(evidence) / max(1, dialogue_cues)
@@ -422,106 +429,3 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
         "blocking_structural_issues": blocking_structural,
         "evidence": evidence,
     }
-
-
-def improvement(before: dict, after: dict) -> dict:
-    """Judge a repair and publish the measurement behind the verdict.
-
-    A bare boolean cannot be explained. The dashboard has to say why a repair was
-    withheld, and re-deriving the policy in the browser would keep these limits in two
-    languages, so each one is measured here once and handed over for display.
-    """
-    if before["decision"] != "repair" or after["decision"] != "pass":
-        return {
-            "accepted": False,
-            "reason": f"the retimed subtitle still did not pass its own audit ({after['reason'].lower()})",
-            "checks": [],
-        }
-    # Compare the same authored cues; replacement text cannot game the score.
-    if [e["cue"] for e in before["evidence"]] != [e["cue"] for e in after["evidence"]]:
-        return {
-            "accepted": False,
-            "reason": "the repair did not leave every authored cue in place, so the two audits do not compare",
-            "checks": [],
-        }
-    # Judge the repair on the axis it can actually move. Cue durations are preserved,
-    # so reading time rides along unchanged and must not decide whether a shift worked.
-    regressions = [
-        abs(candidate["start_delta_seconds"]) - abs(original["start_delta_seconds"])
-        for original, candidate in zip(before["evidence"], after["evidence"], strict=True)
-    ]
-    count = len(regressions)
-    moved = [sum(regression > bound for regression in regressions) for bound in (0.25, 0.75)]
-    # Shifting cues earlier moves their ends earlier too, so a correct repair still eats
-    # into the trailing reading time of whichever line had the least of it to spare.
-    # Judge that in aggregate, like the regressions above: one clipped line out of forty
-    # is anchor noise, while a shift that clips many of them is genuinely cutting speech.
-    truncations = [
-        max(0.0, -candidate["end_delta_seconds"]) - max(0.0, -original["end_delta_seconds"])
-        for original, candidate in zip(before["evidence"], after["evidence"], strict=True)
-    ]
-    clipped = sum(value > NEW_TRUNCATION for value in truncations)
-    worst_clip = max(truncations)
-    # Judge the middle, not the tail. Anchors that were mismatched stay mismatched after
-    # a shift, so they dominate a p95 and make a correct repair look like no improvement.
-    was = median(abs(e["start_delta_seconds"]) for e in before["evidence"])
-    now = median(abs(e["start_delta_seconds"]) for e in after["evidence"])
-    checks = [
-        # Judge regressions in aggregate. A correct global shift still pushes the few
-        # anchors that were mismatched further out, so any single-anchor veto rejects
-        # good repairs on real media, where anchors scatter with a p95 near 1.5 s.
-        {
-            "name": "Anchors pushed over 0.25 s further from speech",
-            "measured": f"{moved[0]} of {count}",
-            "limit": f"at most {math.floor(count * REGRESSION_SHARE):d}",
-            "passed": moved[0] / count <= REGRESSION_SHARE,
-            "failure": f"it pushed {moved[0]} of {count} anchors further from the dialogue",
-        },
-        {
-            "name": "Anchors pushed over 0.75 s further from speech",
-            "measured": f"{moved[1]} of {count}",
-            "limit": f"at most {math.floor(count * LARGE_REGRESSION_SHARE):d}",
-            "passed": moved[1] / count <= LARGE_REGRESSION_SHARE,
-            "failure": f"it pushed {moved[1]} of {count} anchors far further from the dialogue",
-        },
-        {
-            "name": "Lines newly cut off before their speech ends",
-            "measured": f"{clipped} of {count}",
-            "limit": f"at most {math.floor(count * TRUNCATION_SHARE):d}",
-            "passed": clipped / count <= TRUNCATION_SHARE,
-            "failure": f"it would cut short {clipped} of {count} spoken lines",
-        },
-        {
-            # No single line may lose a meaningful part of its speech, however good the rest.
-            "name": "Worst single line cut short",
-            "measured": f"{worst_clip:.3f} s",
-            "limit": f"at most {SEVERE_TRUNCATION:.2f} s",
-            "passed": worst_clip <= SEVERE_TRUNCATION,
-            "failure": f"it would cut {worst_clip:.2f} s off the end of a spoken line",
-        },
-        {
-            "name": "Median start error",
-            "measured": f"{was:.3f} s to {now:.3f} s",
-            "limit": f"at most {was * IMPROVEMENT_FACTOR:.3f} s, improving by {IMPROVEMENT_MARGIN:.2f} s or more",
-            "passed": now <= was * IMPROVEMENT_FACTOR and was - now >= IMPROVEMENT_MARGIN,
-            "failure": (
-                f"the median start error rose from {was:.3f} s to {now:.3f} s"
-                if now > was
-                else f"the median start error only improved from {was:.3f} s to {now:.3f} s"
-            ),
-        },
-    ]
-    failed = [check for check in checks if not check["passed"]]
-    return {
-        "accepted": not failed,
-        "reason": (
-            "; ".join(check["failure"] for check in failed)
-            if failed
-            else f"the median start error improved from {was:.3f} s to {now:.3f} s"
-        ),
-        "checks": checks,
-    }
-
-
-def improved(before: dict, after: dict) -> bool:
-    return improvement(before, after)["accepted"]

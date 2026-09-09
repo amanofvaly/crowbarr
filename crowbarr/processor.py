@@ -4,10 +4,10 @@ import hashlib
 import json
 import tempfile
 import textwrap
+from bisect import bisect_left
 from pathlib import Path
-from statistics import median
 
-from .audit import audit, improvement
+from .audit import audit, blocking_structural_issues
 from .config import Settings, atomic_write
 from .db import Database
 from .library import allowed, signature, source_subtitle, subtitle_sources
@@ -22,115 +22,117 @@ from .media import (
 )
 from .subtitles import Cue, Word, match_passages, parse_srt, render_srt, validate_cues
 
+# How much of a retimed file has to come from its own matched speech. Cues with nothing
+# to match are placed between their neighbours, which is sound for a sound caption in a
+# well matched file and guesswork in a file where almost nothing matched.
+PLACED_CUE_SHARE = 0.25
+PLACED_CUE_FLOOR = 3
 
-def _fit_timing(points):
-    # Bound the robust fit's memory for feature-length movies.
-    sample = (
-        points if len(points) <= 120 else [points[round(i * (len(points) - 1) / 119)] for i in range(120)]
-    )
-    slopes = [
-        (by - ay) / (bx - ax)
-        for i, (ax, ay) in enumerate(sample)
-        for bx, by in sample[i + 1 :]
-        if bx - ax >= 30
+
+def _worth_retiming(report: dict) -> bool:
+    """Whether enough of this subtitle was found in the audio to place it from."""
+    total = report.get("source_cues") or 0
+    placed = report.get("preserved_cues") or 0
+    return bool(total) and placed >= PLACED_CUE_FLOOR and placed / total >= PLACED_CUE_SHARE
+
+
+def placement_verdict(after: dict, timing_model: dict) -> dict:
+    """Judge a retimed subtitle on what it is, not on what it replaced.
+
+    Placement reads every timestamp from the transcript, so the old timing is gone
+    rather than adjusted, and asking whether the new file improves on it compares two
+    unrelated things. Two questions remain worth asking: does the result pass its own
+    audit, and was enough of it read from speech rather than filled in between.
+    """
+    placed = timing_model.get("placed_cues", 0)
+    total = placed + timing_model.get("interpolated_cues", 0)
+    share = placed / total if total else 0.0
+    checks = [
+        {
+            # `inconclusive` is not a negative finding. A file the audit could not grade
+            # before retiming cannot be graded after it either, for the same reason, so
+            # treating that as a failure would refuse every placement made on a file
+            # whose anchors are thin -- which is the case placement exists to serve.
+            # What must not appear is a verdict that measured the result and disagreed
+            # with it, because after placement that means lines went to the wrong words.
+            "name": "The retimed subtitle does not measure as wrong",
+            "measured": after.get("decision", "unknown"),
+            "limit": "pass or inconclusive",
+            "passed": after.get("decision") in ("pass", "inconclusive"),
+            "failure": f"the retimed subtitle audits as {after.get('decision')}",
+        },
+        {
+            "name": "Lines placed from their own speech",
+            "measured": f"{placed} of {total}",
+            "limit": f"at least {PLACED_CUE_FLOOR} and {PLACED_CUE_SHARE:.0%}",
+            "passed": placed >= PLACED_CUE_FLOOR and share >= PLACED_CUE_SHARE,
+            "failure": f"only {placed} of {total} lines could be matched to the audio",
+        },
     ]
-    scale = median(slopes) if slopes else 1.0
-    intercept = median(y - scale * x for x, y in points)
-    errors = sorted(abs(y - scale * x - intercept) for x, y in points)
+    failed = [check for check in checks if not check["passed"]]
     return {
-        "scale": scale,
-        "offset_seconds": intercept,
-        "anchor_points": len(points),
-        "median_residual_seconds": median(errors),
-        "p95_residual_seconds": errors[max(0, (len(errors) * 95 + 99) // 100 - 1)],
+        "accepted": not failed,
+        "reason": (
+            "; ".join(check["failure"] for check in failed)
+            if failed
+            else f"{placed} of {total} lines were placed on their own speech"
+        ),
+        "checks": checks,
     }
 
 
-def _retime_authored(original: list[Cue], before: dict) -> tuple[list[Cue], dict]:
-    evidence = sorted(before["evidence"], key=lambda e: e["subtitle_start"])
-    points = [(e["subtitle_start"], e["audio_start"]) for e in evidence]
-    if not points:
-        return [], {"kind": "unsupported", "reason": "No anchors"}
-    model = _fit_timing(points)
-    model["kind"] = "robust_affine"
-    if not 0.95 <= model["scale"] <= 1.05:
-        return [], {**model, "reason": "Audio anchors imply an implausible timing scale"}
+def _retime_from_transcript(original: list[Cue], passages: list) -> tuple[list[Cue], dict]:
+    """Place every cue where its own words were spoken.
 
-    def _piecewise():
-        """Optional refinement. If it cannot be established, the global fit still stands."""
-        residuals = [y - model["scale"] * x for x, y in points]
-        cuts = []
-        for index in range(8, len(points) - 8):
-            left, right = residuals[index - 6 : index], residuals[index : index + 6]
-            jump = abs(median(right) - median(left))
-            spread = max(max(abs(v - median(side)) for v in side) for side in (left, right))
-            if jump >= 2.5 and spread < 1.25 and (not cuts or index - cuts[-1] >= 8):
-                cuts.append(index)
-        if not cuts or len(cuts) > 6:
-            return None
-        boundaries = []
-        for cut in cuts:
-            left, right = evidence[cut - 1], evidence[cut]
-            # Place a discontinuity only in a real subtitle gap bracketed by anchors.
-            gaps = [
-                (a.end, b.start)
-                for a, b in zip(original, original[1:], strict=False)
-                if a.end >= left["subtitle_end"] and b.start <= right["subtitle_start"] and b.start > a.end
-            ]
-            if not gaps:
-                return None
-            lo, hi = max(gaps, key=lambda pair: pair[1] - pair[0])
-            boundaries.append((lo + hi) / 2)
-        indexes = [0, *cuts, len(points)]
-        built = []
-        for index, (first, last) in enumerate(zip(indexes, indexes[1:], strict=False)):
-            fitted = _fit_timing(points[first:last])
-            if (
-                last - first < 8
-                or not 0.95 <= fitted["scale"] <= 1.05
-                or fitted["p95_residual_seconds"] > 1.5
-            ):
-                return None
-            built.append(
-                {
-                    **fitted,
-                    "start": boundaries[index - 1] if index else 0,
-                    "end": boundaries[index] if index < len(boundaries) else None,
-                }
-            )
-        return built, {"kind": "piecewise_affine", "segments": built, "boundaries": boundaries}
+    Timestamps are read from the transcript rather than corrected. A cue whose words
+    were matched takes the time of those words. A cue with nothing to match -- a sound
+    caption, on-screen text, a line the recognizer missed -- keeps its position relative
+    to the matched cues either side of it.
 
-    segments = []
-    # Correctly timed subtitles scatter around the fit with a p95 near 1.5-2 s on real
-    # media. Only residuals clearly above that noise floor suggest a real discontinuity.
-    if model["p95_residual_seconds"] > 2.5 and len(points) >= 16:
-        refined = _piecewise()
-        if refined:
-            segments, model = refined
-    if not segments:
-        # Judge the fit by its middle, not its worst points. Anchor sets are small -- at
-        # 29 anchors the 95th percentile is simply the second-worst one -- so a p95 gate
-        # lets two bad anchors veto a correction whose typical error is a tenth of a
-        # second. Give up only when the bulk of the anchors disagree with the fit.
-        if model["median_residual_seconds"] > 1.0 or model["p95_residual_seconds"] > 6.0:
-            return [], {**model, "reason": "Timing residuals do not support a global correction"}
-        segments = [{**model, "start": 0, "end": None}]
+    Nothing here models the old timing, so nothing has to recognise its shape first. A
+    constant offset, accumulating drift, a cut the recording does not share, and all
+    three at once in the same file are the same problem to this function, because none
+    of the old timestamps survive it.
+    """
+    matched = {
+        passage.source_index: passage
+        for passage in passages
+        if passage.authored and passage.source_index is not None
+    }
+    if not matched:
+        return [], {"kind": "unsupported", "reason": "No authored line could be matched to the audio"}
+    anchors = sorted(matched)
+    placed = {index: matched[index].start for index in anchors}
     result = []
-    for cue in original:
-        segment = next(
-            (segment for segment in segments if segment["end"] is None or cue.start < segment["end"]),
-            segments[-1],
-        )
-        if segment["end"] is not None and cue.end > segment["end"]:
-            return [], {**model, "reason": "A caption crosses an uncertain discontinuity"}
-        result.append(
-            Cue(
-                segment["scale"] * cue.start + segment["offset_seconds"],
-                segment["scale"] * cue.end + segment["offset_seconds"],
-                cue.text,
-            )
-        )
-    return result, model
+    for index, cue in enumerate(original):
+        if index in placed:
+            start = placed[index]
+        else:
+            position = bisect_left(anchors, index)
+            earlier = anchors[position - 1] if position else None
+            later = anchors[position] if position < len(anchors) else None
+            if earlier is not None and later is not None:
+                # Keep the gap it sat in, proportionally. Authored order is information:
+                # a caption a third of the way between two lines belongs a third of the
+                # way between where those lines turned out to be.
+                span = original[later].start - original[earlier].start
+                share = (cue.start - original[earlier].start) / span if span > 0 else 0.0
+                share = min(1.0, max(0.0, share))
+                start = placed[earlier] + share * (placed[later] - placed[earlier])
+            else:
+                # Before the first match or after the last one, there is nothing to
+                # interpolate between, so carry the nearest match's correction outward.
+                neighbour = earlier if earlier is not None else later
+                start = placed[neighbour] + (cue.start - original[neighbour].start)
+        # Cue length is an authoring decision -- reading time, not synchronisation -- so
+        # placement moves a line without reshaping it.
+        result.append(Cue(start, start + max(0.0, cue.end - cue.start), cue.text))
+    return result, {
+        "kind": "transcript_placement",
+        "anchor_points": len(matched),
+        "placed_cues": len(matched),
+        "interpolated_cues": len(original) - len(matched),
+    }
 
 
 def _distributed_sample(passages: list, duration: float, per_region: int = 30) -> list:
@@ -204,6 +206,19 @@ def _sample_windows(cues: list[Cue], duration: float) -> list[tuple[float, float
 # Verdicts that leave nothing for a repair to correct, and that the full transcript
 # already in hand can answer by writing a subtitle of its own.
 UNUSABLE = ("mismatched", "different_cut")
+
+
+def _needs_full_audio(candidates) -> bool:
+    """Whether a sampled verdict is enough to act on, or only enough to stand down.
+
+    Three two-minute windows see about a quarter of an episode. A sample that says the
+    subtitle is already correct settles the job, because the answer is to write nothing
+    and the rest of the runtime cannot make "leave it alone" harmful. Every other answer
+    ends in a file being rewritten, and the cues outside the windows were never matched
+    to any audio: the model that moves them is fitted to the sample, and the check that
+    the move worked re-measures the same sample. Nothing ever looks at the remainder.
+    """
+    return not any(candidate["audit"]["decision"] == "pass" for candidate in candidates)
 
 
 def _audit_source(cues, words, duration, windows, indices=None):
@@ -496,9 +511,9 @@ def process(
                 candidate_audit["dialogue_coverage"],
             )
 
-        if windows and all(candidate["audit"]["decision"] == "inconclusive" for candidate in candidates):
+        if windows and _needs_full_audio(candidates):
             full_audit_escalation = True
-            recognition_stage[0] = "Sample inconclusive; auditing against full dialogue"
+            recognition_stage[0] = "Sample cannot settle a change; auditing against full dialogue"
             db.update(job["id"], stage=recognition_stage[0])
             words, transcription_issues, transcript_cache_hit = _recognized_words(
                 media, audio, settings, directory, cache, transcriber
@@ -570,7 +585,13 @@ def process(
                 original, selected = [], None
                 passages, rewritten = match_passages(original, words, settings.min_match_ratio)
                 report.update(rewritten, mode="generated")
-            elif before["decision"] != "repair":
+            elif before["decision"] == "pass" or not _worth_retiming(report):
+                # A verdict decides whether the timing needs replacing, not whether it
+                # can be. `inconclusive` means the audit could not assemble enough
+                # confident, evenly spread anchors to judge the file; it says nothing
+                # about how many lines can be found in the transcript, which is a looser
+                # question and the only one placement depends on. Park a file when its
+                # lines cannot be located, not when its timing could not be graded.
                 passed = before["decision"] == "pass"
                 report.update(
                     issues=issues,
@@ -669,11 +690,10 @@ def process(
         )
         eligible_passages = [passage for passage in passages if passage.authored] if original else passages
         if original:
-            aligned, timing_model = _retime_authored(original, before)
-            alignment_passages = before["evidence"]
+            aligned, timing_model = _retime_from_transcript(original, eligible_passages)
+            alignment_passages = eligible_passages
             if not aligned:
-                # Report why the model actually declined, not a guess about the scale.
-                issues.append(timing_model.get("reason", "Audio anchors do not support a correction"))
+                issues.append(timing_model.get("reason", "No authored line could be matched to the audio"))
         else:
             timing_model = None
             baseline = _generated_baseline(passages)
@@ -720,25 +740,24 @@ def process(
                 warnings.append(f"Adjusted {adjusted_overlaps} generated cue boundaries to prevent overlap")
         if not original:
             aligned = [Cue(c.start + offset, c.end + offset, c.text) for c in aligned]
-        for validation_issue in validate_cues(aligned, duration):
-            if "unsuitable reading duration" in validation_issue:
-                warnings.append(validation_issue)
-            else:
-                issues.append(validation_issue)
+        structural = validate_cues(aligned, duration)
+        blocking = blocking_structural_issues(structural, len(aligned))
+        issues.extend(blocking)
+        warnings.extend(issue for issue in structural if issue not in blocking)
         if original:
             after = _audit_source(
                 aligned, timeline_words, duration, windows, before.get("sample_cue_indices")
             )
-            verdict = improvement(before, after)
+            verdict = placement_verdict(after, timing_model)
             if [c.text for c in aligned] != [c.text for c in original]:
                 verdict = {
                     "accepted": False,
-                    "reason": "the repair did not preserve every authored line of text",
+                    "reason": "retiming did not preserve every authored line of text",
                     "checks": verdict["checks"],
                 }
             report["audit"].update(after=after, improved=verdict["accepted"], improvement=verdict)
             if not verdict["accepted"]:
-                issues.append(f"Repair withheld because {verdict['reason']}")
+                issues.append(f"Retimed subtitle withheld because {verdict['reason']}")
         report.update(
             {
                 "mode": "authored_timing" if original else "generated",

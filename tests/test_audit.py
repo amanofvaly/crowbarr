@@ -1,6 +1,6 @@
 import pytest
 
-from crowbarr.audit import ALIGNED_START_P95, audit, improved, improvement
+from crowbarr.audit import ALIGNED_START_P95, audit
 from crowbarr.subtitles import Cue, Word
 
 TEXT = ["Please open the front door", "We should leave before sunrise", "Bring your coat and shoes"]
@@ -33,8 +33,6 @@ def test_large_offsets_need_repair(offset):
     before = audit(cues, words, 8)
     assert before["decision"] == "repair"
     assert before["signed_offset_seconds"] == pytest.approx(offset)
-    corrected, _ = fixture()
-    assert improved(before, audit(corrected, words, 8))
 
 
 def test_localized_cut_error_and_drift_are_not_hidden():
@@ -80,16 +78,6 @@ def test_partial_distributed_evidence_can_prove_a_global_offset():
     assert result["decision"] == "repair"
     assert result["coverage"] < 0.5
     assert result["distributed_across_timeline"]
-
-
-def test_repair_must_pass_and_improve():
-    cues, words = fixture(4)
-    before = audit(cues, words, 8)
-    assert not improved(before, before)
-    worse, _ = fixture(6)
-    assert not improved(before, audit(worse, words, 12))
-
-
 def test_small_constant_offset_is_not_sent_to_review_over_noisy_anchors():
     """A tight subtitle with a few wild anchors is correct, whichever path accepts it.
 
@@ -148,51 +136,6 @@ def _late_subtitle(clipped_indices):
         shifted.append(Cue(start, end, " ".join(phrase)))
         clock += 8.0
     return audit(cues, words, clock), audit(shifted, words, clock)
-
-
-def test_one_clipped_line_does_not_discard_a_correct_repair():
-    """Measured on the real library: a 1.19 s lag fixed to 0.15 s was thrown away
-    because a single line of 43 lost 0.554 s of trailing reading time."""
-    verdict = improvement(*_late_subtitle({17}))
-    assert verdict["accepted"], verdict["reason"]
-
-
-def test_a_shift_that_clips_many_lines_is_still_refused():
-    verdict = improvement(*_late_subtitle(set(range(12))))
-    assert not verdict["accepted"]
-    assert "cut short" in verdict["reason"]
-
-
-def test_a_refused_repair_always_says_why():
-    """A verdict nobody can inspect is a label. Every refusal carries a stated reason."""
-    cues, words = fixture(4)
-    before = audit(cues, words, 8)
-    worse, _ = fixture(6)
-    verdict = improvement(before, audit(worse, words, 12))
-    assert not verdict["accepted"]
-    assert verdict["reason"], "a refusal without a reason cannot be shown to anyone"
-
-
-def test_an_accepted_repair_publishes_the_checks_it_cleared():
-    words, cues, clock, shifted = [], [], 0.0, []
-    for index in range(40):
-        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
-        start = clock
-        for token in phrase:
-            words.append(Word(clock, clock + 0.4, token, 0.95))
-            clock += 0.5
-        bad = 5.0 if index in (7, 19, 31) else 0.0
-        cues.append(Cue(start + 1.4 + bad, clock - 0.1 + 1.4 + bad, " ".join(phrase)))
-        shifted.append(Cue(start + bad, clock - 0.1 + bad, " ".join(phrase)))
-        clock += 8.0
-    verdict = improvement(audit(cues, words, clock), audit(shifted, words, clock))
-    assert verdict["accepted"]
-    assert len(verdict["checks"]) == 5
-    for check in verdict["checks"]:
-        assert {"name", "measured", "limit", "passed", "failure"} <= set(check)
-        assert check["passed"]
-
-
 def test_audit_publishes_every_threshold_it_judged():
     cues, words = fixture()
     result = audit(cues, words, 8)
@@ -238,26 +181,6 @@ def test_backend_numpy_scalars_produce_serializable_evidence():
         word.probability = np.float32(word.probability)
     result = json.loads(json.dumps(audit(cues, words, 8), allow_nan=False))
     assert result["decision"] == "pass"
-
-
-def test_a_correct_shift_is_accepted_despite_a_few_mismatched_anchors():
-    """Real anchors scatter; a handful always regress when a true offset is removed."""
-    cues, words = fixture(4)
-    before = audit(cues, words, 8)
-    assert before["decision"] == "repair"
-    corrected, _ = fixture()
-    after = audit(corrected, words, 8)
-    assert improved(before, after)
-
-
-def test_a_shift_that_broadly_worsens_timing_is_still_rejected():
-    cues, words = fixture(4)
-    before = audit(cues, words, 8)
-    # "Repairing" by shifting the wrong way must not be accepted.
-    worse, _ = fixture(8)
-    assert not improved(before, audit(worse, words, 8))
-
-
 def test_a_feature_length_subtitle_is_not_rejected_for_being_long():
     """A percentage floor must not demand more evidence just because a film has more cues.
 
@@ -303,29 +226,6 @@ def test_scattered_bad_anchors_do_not_turn_a_correct_subtitle_into_a_repair():
     assert result["start_fit"]["residual_median_seconds"] < 0.5
     assert result["start_fit"]["residual_p95_seconds"] > 2.5
     assert result["decision"] == "pass"
-
-
-def test_a_correct_shift_counts_as_improvement_despite_unmovable_outliers():
-    """Mismatched anchors stay wrong after a shift; they must not mask a real repair."""
-    words, cues, clock, shifted = [], [], 0.0, []
-    for index in range(40):
-        phrase = [f"alpha{index}", f"beta{index}", f"gamma{index}"]
-        start = clock
-        for token in phrase:
-            words.append(Word(clock, clock + 0.4, token, 0.95))
-            clock += 0.5
-        # The whole subtitle is 1.4 s late; three cues are simply mismatched.
-        bad = 5.0 if index in (7, 19, 31) else 0.0
-        cues.append(Cue(start + 1.4 + bad, clock - 0.1 + 1.4 + bad, " ".join(phrase)))
-        shifted.append(Cue(start + bad, clock - 0.1 + bad, " ".join(phrase)))
-        clock += 8.0
-    before = audit(cues, words, clock)
-    after = audit(shifted, words, clock)
-    assert before["decision"] == "repair"
-    assert after["decision"] == "pass"
-    assert improved(before, after), "removing a real 1.4 s lag is an improvement"
-
-
 def unrelated(word_count=400, probability=0.95, duration=600.0, cue_count=60):
     """Recognized dialogue and an authored subtitle that share no vocabulary.
 

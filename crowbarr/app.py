@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from . import __version__
-from .capabilities import runtime_capabilities
+from .capabilities import capabilities_for, start_alignment_download
 from .config import ConfigStore, Settings
 from .db import Database
 from .integrations import check_connection
@@ -322,11 +322,21 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     @app.get("/api/settings", dependencies=[Depends(authenticate)])
     def settings():
         # Shown so it can be copied into Sonarr/Radarr/Bazarr; it is no longer the login.
-        return {**store.public(), "api_key": store.token, "capabilities": runtime_capabilities()}
+        return {**store.public(), "api_key": store.token, "capabilities": capabilities_for(store.directory)}
 
     @app.get("/api/capabilities", dependencies=[Depends(authenticate)])
     def capabilities():
-        return runtime_capabilities()
+        return capabilities_for(store.directory)
+
+    @app.post("/api/capabilities/alignment", dependencies=[Depends(authenticate)], status_code=202)
+    def fetch_alignment_model():
+        runtime = capabilities_for(store.directory)
+        if not runtime["refinement"]["available"]:
+            raise HTTPException(409, runtime["refinement"]["reason"])
+        if runtime["models"]["alignment"]["present"]:
+            return runtime
+        start_alignment_download(store.directory)
+        return capabilities_for(store.directory)
 
     @app.put("/api/settings", dependencies=[Depends(authenticate)])
     def save_settings(payload: dict):
@@ -343,7 +353,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             raise HTTPException(422, "; ".join(details)) from None
         if settings.device == "cpu" and settings.compute_type in {"float16", "int8_float16"}:
             raise HTTPException(422, "CPU processing requires int8 or float32 compute")
-        runtime = runtime_capabilities()
+        runtime = capabilities_for(store.directory)
         if settings.device == "cuda" and previous.device != "cuda" and not runtime["cuda"]["available"]:
             raise HTTPException(422, runtime["cuda"]["reason"])
         if settings.discovery_fingerprint() != previous.discovery_fingerprint():

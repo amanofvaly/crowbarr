@@ -1,7 +1,9 @@
+import json
 import shutil
 import subprocess
 import sys
 import types
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -126,15 +128,21 @@ def test_web_process_does_not_import_torch():
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr("crowbarr.app.runtime_capabilities", lambda: report())
+    monkeypatch.setattr("crowbarr.capabilities.runtime_capabilities", lambda: report())
     with TestClient(create_app(tmp_path, background=False)) as client:
         client.headers["X-Api-Key"] = client.app.state.store.token
         yield client
 
 
 def test_capabilities_are_authenticated_and_in_settings(client):
-    assert client.get("/api/capabilities").json() == report()
-    assert client.get("/api/settings").json()["capabilities"] == report()
+    served = client.get("/api/capabilities").json()
+    # The probe result is served verbatim, with on-disk model state alongside it.
+    assert {key: served[key] for key in report()} == report()
+    assert served["models"] == {
+        "speech": [],
+        "alignment": {"present": False, "bytes": 0, "status": "idle", "reason": ""},
+    }
+    assert client.get("/api/settings").json()["capabilities"]["models"] == served["models"]
     client.headers.clear()
     assert client.get("/api/capabilities").status_code == 401
 
@@ -162,10 +170,59 @@ def test_saved_unavailable_cuda_survives_unrelated_saves(client, full_payload):
 
 
 def test_available_cuda_can_be_selected_and_cpu_precision_is_validated(client, monkeypatch):
-    monkeypatch.setattr("crowbarr.app.runtime_capabilities", lambda: report(cuda=True, refinement=True))
+    monkeypatch.setattr("crowbarr.capabilities.runtime_capabilities", lambda: report(cuda=True, refinement=True))
     assert client.put("/api/settings", json={"device": "cuda", "compute_type": "float16"}).status_code == 200
     assert client.put("/api/settings", json={"device": "cpu"}).status_code == 422
     assert client.put("/api/settings", json={"device": "cpu", "compute_type": "int8"}).status_code == 200
+
+
+def test_every_numeric_default_is_valid_for_its_own_input(tmp_path):
+    """A default the browser rejects blocks saving the whole panel, not just that field."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is needed to render the settings form")
+    from crowbarr.config import Settings
+
+    defaults = Settings().model_dump()
+    script = r"""
+const fs = require("node:fs"), vm = require("node:vm");
+const source = fs.readFileSync("crowbarr/static/app.js", "utf8");
+const settings = JSON.parse(process.argv[1]);
+settings.capabilities = {cpu: {available: true}, cuda: {available: true},
+  refinement: {available: true, reason: "ok"},
+  models: {speech: [], alignment: {present: true, bytes: 1, status: "ready", reason: ""}}};
+const fields = [];
+for (const section of ["library", "processing", "resources", "quality"]) {
+  const context = vm.createContext({
+    settings, section, groups: [], heading: () => "", esc: v => String(v ?? ""),
+    $: () => ({}), status: {media_count: 1}, fmt: v => String(v),
+    button: (l, a) => `<button data-action="${a}">${l}</button>`,
+    document: {addEventListener: () => {}, documentElement: {dataset: {}}},
+  });
+  vm.runInContext(source.slice(source.indexOf("const field ="), source.indexOf("function apiPage()")), context);
+  const html = vm.runInContext("settingsPage()", context);
+  for (const tag of html.match(/<input[^>]*type="number"[^>]*>/g) || []) {
+    const get = key => (tag.match(new RegExp(key + '="([^"]*)"')) || [])[1];
+    fields.push({name: get("name"), value: get("value"), min: get("min"), step: get("step")});
+  }
+}
+console.log(JSON.stringify(fields));
+"""
+    result = subprocess.run(
+        [node, "-e", script, json.dumps(defaults)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = json.loads(result.stdout)
+    assert fields, "no numeric inputs were rendered"
+    for field in fields:
+        if field["step"] == "any":
+            continue
+        offset = Decimal(field["value"]) - Decimal(field["min"])
+        assert offset % Decimal(field["step"]) == 0, (
+            f'{field["name"]} default {field["value"]} is not reachable from '
+            f'min {field["min"]} in steps of {field["step"]}'
+        )
 
 
 def test_settings_ui_retains_unavailable_choices_and_changes_cpu_precision():
@@ -186,9 +243,11 @@ let change;
 const context = vm.createContext({
   settings: {device: "cuda", compute_type: "float16", cpu_fallback: true, refine_generated: true,
     capabilities: {cpu: {available: true}, cuda: {available: false, reason: "Use the CUDA image."},
-      refinement: {available: false, reason: "Whisper word timestamps will be used instead."}}},
+      refinement: {available: false, reason: "Whisper word timestamps will be used instead."},
+      models: {speech: ["small"], alignment: {present: true, bytes: 377487360, status: "ready", reason: ""}}}},
   section: "processing", groups: [], heading: () => "", esc: value => String(value ?? ""),
   status: {media_count: 2218}, fmt: value => String(value),
+  button: (label, action, style, attrs) => `<button data-action="${action}" ${attrs || ""}>${label}</button>`,
   $: id => nodes[id], dirty: false, draftDirty: false,
   captureSettings: () => {context.settings.device = elements.device.value;},
   document: {addEventListener: (name, fn) => {change = fn;}},
@@ -212,6 +271,15 @@ context.settings.capabilities.refinement.available = true;
 html = vm.runInContext("settingsPage()", context);
 assert.doesNotMatch(html, /value="cuda" selected disabled/);
 assert.doesNotMatch(html, /name="refine_generated"[^>]*disabled/);
+assert.match(html, /alignment model is downloaded \(360 MB\)/);
+// Without the model, refinement cannot be turned on and the download is offered instead.
+context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "idle", reason: ""};
+const missing = vm.runInContext("settingsPage()", context);
+assert.match(missing, /name="refine_generated"[^>]*disabled/);
+assert.match(missing, /data-action="fetch-alignment"/);
+assert.match(missing, /Download alignment model/);
+context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "running", reason: ""};
+assert.match(vm.runInContext("settingsPage()", context), /Downloading…/);
 vm.runInContext(source.slice(source.indexOf('document.addEventListener("change"'),
   source.indexOf('document.addEventListener("submit"')), context);
 elements.device.value = "cpu";

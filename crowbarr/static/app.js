@@ -189,6 +189,7 @@ function empty(heading, description, action = "", symbol = "queue") {
   return `<div class="empty">${icon(symbol)}<h3>${heading}</h3><p>${description}</p>${action}</div>`;
 }
 function heading(name, description, actions = "") {
+  paint("page-actions", actions);
   return `<div class="page-heading"><div><h1>${name}</h1><p>${description}</p></div><div class="actions">${actions}</div></div>`;
 }
 function panel(name, body, extra = "", style = "") {
@@ -279,7 +280,7 @@ function dashboardJobList(items, finished = false) {
     )
     .join("")}</div>`;
 }
-function readinessPanel() {
+function systemStrip() {
   const r = status?.resources || {};
   const resources = [
     ["GPU", r.gpu || "Not detected"],
@@ -295,12 +296,12 @@ function readinessPanel() {
     ],
     ["Speech model", savedSettings?.model || "Unavailable"],
   ];
-  return `<div class="readiness-grid">${resources
+  return `<div class="system-strip" aria-label="System status">${resources
     .map(
       ([label, value]) =>
-        `<div class="readiness-item"><span>${label}</span><strong>${esc(value)}</strong></div>`,
+        `<span class="system-value"><span>${label}:</span> ${esc(value)}</span>`,
     )
-    .join("")}</div>${status?.wait_reason ? `<div class="resource-wait">${icon("clock")}<div><strong>Worker is waiting</strong><span>${esc(status.wait_reason)}</span></div></div>` : ""}<div class="service-summary">${[
+    .join("")}${[
     "sonarr",
     "radarr",
     "bazarr",
@@ -316,9 +317,9 @@ function readinessPanel() {
           : sync
             ? "Sync unavailable"
             : "Configured";
-      return `<div class="service-summary-item"><span class="status-dot ${!connected ? "neutral" : !sync?.healthy ? "warning" : ""}"></span><strong>${name[0].toUpperCase() + name.slice(1)}</strong><span>${esc(state)}</span></div>`;
+      return `<a class="system-service" href="#settings/connections" title="${esc(state)}"><span class="status-dot ${!connected ? "neutral" : !sync?.healthy ? "warning" : ""}" aria-hidden="true"></span>${name[0].toUpperCase() + name.slice(1)}<span class="sr-only">: ${esc(state)}</span></a>`;
     })
-    .join("")}</div>`;
+    .join("")}<a href="#settings/resources">Resources</a></div>${status?.wait_reason ? `<p class="system-wait">${esc(status.wait_reason)}</p>` : ""}`;
 }
 function dashboard() {
   const counts = status?.counts || {};
@@ -343,20 +344,14 @@ function dashboard() {
           (status?.paused ? "Resume queue" : "Pause queue"),
         "pause",
       ) +
-        button(icon("refresh") + "Sync libraries", "scan") +
-        link(icon("search") + "Search library", "library"),
+        button(icon("refresh") + "Sync libraries", "scan"),
     ) +
     (!status?.configured
       ? `<div class="callout"><div><strong>No libraries configured</strong><p>Connect a media manager or add your media folders to begin.</p></div>${link("Configure libraries", "settings/connections", "primary")}</div>`
       : "") +
-    `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><span><strong>${fmt(counts.unchanged)}</strong> checked, already correct</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
+    `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><span><strong>${fmt(counts.unchanged)}</strong> subtitles unchanged</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
     activeJob() +
-    panel(
-      "System readiness",
-      readinessPanel(),
-      '<a href="#settings/resources">Resource settings</a>',
-      "readiness-panel",
-    ) +
+    systemStrip() +
     `<div class="dashboard-split">${panel(
       "Recent outcomes",
       recent.length
@@ -558,6 +553,27 @@ function settingsPage() {
   const cpuAvailable = capabilities?.cpu?.available === true;
   const cudaAvailable = capabilities?.cuda?.available === true;
   const refinementAvailable = capabilities?.refinement?.available === true;
+  const downloaded = new Set(capabilities?.models?.speech || []);
+  const alignment = capabilities?.models?.alignment;
+  const downloading = alignment?.status === "running";
+  const alignmentNote = !refinementAvailable
+    ? ""
+    : alignment?.present
+      ? ` The alignment model is downloaded (${Math.round((alignment.bytes || 0) / 1048576)} MB).`
+      : downloading
+        ? " Downloading the alignment model. This page updates when it finishes."
+        : alignment?.status === "failed"
+          ? ` ${alignment.reason || "The download did not finish."} Refinement stays off until the model is downloaded.`
+          : " Refinement needs an alignment model of about 360 MB. Download it before turning this on.";
+  const alignmentAction =
+    !refinementAvailable || alignment?.present
+      ? ""
+      : `<div class="wide actions">${button(
+          downloading ? "Downloading…" : alignment?.status === "failed" ? "Try the download again" : "Download alignment model (about 360 MB)",
+          "fetch-alignment",
+          "",
+          downloading ? "disabled" : "",
+        )}</div>`;
   const deviceHelp = [
     !cpuAvailable ? capabilities?.cpu?.reason || "CPU runtime availability could not be determined." : "",
     cudaAvailable
@@ -591,8 +607,8 @@ function settingsPage() {
           ["medium", "Medium (about 1.5 GB)"],
           ["large-v3", "Large v3 (about 3 GB, most accurate, slowest)"],
           ["large-v3-turbo", "Large v3 Turbo (about 1.6 GB, close to Large v3 and much faster)"],
-        ],
-        "Bigger models are more accurate and need more memory. The model downloads the first time it is used and is kept with Crowbarr's data.",
+        ].map(([id, label]) => [id, downloaded.has(id) ? `${label} · downloaded` : label]),
+        "Bigger models are more accurate and need more memory. A model that is not yet downloaded is fetched the first time it is used, which makes that job slower.",
       ) +
         select("device", "Processing device", [
           ["cpu", cpuAvailable ? "CPU" : "CPU (unavailable)", !cpuAvailable],
@@ -633,9 +649,10 @@ function settingsPage() {
         check(
           "refine_generated",
           refinementAvailable ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
-          esc(capabilities?.refinement?.reason || "WhisperX availability could not be determined. Whisper word timestamps are used if refinement cannot run."),
-          !refinementAvailable,
+          esc((capabilities?.refinement?.reason || "WhisperX availability could not be determined. Whisper word timestamps are used if refinement cannot run.") + alignmentNote),
+          !refinementAvailable || !alignment?.present,
         ) +
+        alignmentAction +
         check(
           "allow_untagged_subtitles",
           "Also check subtitles with no language label",
@@ -667,7 +684,8 @@ function settingsPage() {
             0.1,
             4,
             "Hold background jobs when the machine is busier than this. 1 means every CPU core already has work.",
-            0.1,
+            // A step of 0.1 rejects the shipped 0.75 default and blocks the whole panel.
+            "any",
           ),
       ) +
       settingPanel(
@@ -687,14 +705,18 @@ function settingsPage() {
             60,
             "Minutes in each hour that background jobs may run.",
           ) +
-          numeric(
+          select(
             "quiet_hour_start",
-            "Quiet hours start (server hour)",
-            0,
-            23,
-            "Use equal start and end hours to disable quiet hours.",
+            "Quiet hours start",
+            Array.from({ length: 24 }, (_, hour) => [hour, `${String(hour).padStart(2, "0")}:00`]),
+            "24-hour time in the server’s timezone. Background work pauses during quiet hours.",
           ) +
-          numeric("quiet_hour_end", "Quiet hours end (server hour)", 0, 23) +
+          select(
+            "quiet_hour_end",
+            "Quiet hours end",
+            Array.from({ length: 24 }, (_, hour) => [hour, `${String(hour).padStart(2, "0")}:00`]),
+            "May end the following day (e.g. 22:00–07:00). Set both times equal to disable quiet hours.",
+          ) +
           check(
             "defer_during_plex",
             "Defer background processing during Plex playback",
@@ -882,7 +904,7 @@ function captureSettings() {
     const value =
       el.type === "checkbox"
         ? el.checked
-        : el.type === "number"
+        : el.type === "number" || ["quiet_hour_start", "quiet_hour_end"].includes(el.name)
           ? Number(el.value)
           : el.value;
     if (key === "mappings") {
@@ -1241,6 +1263,21 @@ async function copy(value) {
   if (!ok)
     throw new Error("Copy unavailable. Reveal the key and copy it manually.");
 }
+let alignmentPoll = null;
+async function pollAlignment() {
+  clearInterval(alignmentPoll);
+  alignmentPoll = setInterval(async () => {
+    const state = await api("/capabilities");
+    settings.capabilities = state;
+    const model = state.models?.alignment;
+    if (model?.status !== "running") {
+      clearInterval(alignmentPoll);
+      alignmentPoll = null;
+      toast(model?.present ? "Alignment model is ready." : model?.reason || "The download did not finish.");
+      await navigate();
+    }
+  }, 5000);
+}
 async function perform(target) {
   const action = target.dataset.action,
     id = Number(target.dataset.id);
@@ -1274,6 +1311,16 @@ async function perform(target) {
         "Fresh generation queued",
       );
       $("detail-dialog").close();
+    } else if (action === "fetch-alignment") {
+      const response = await api("/capabilities/alignment", "POST");
+      settings.capabilities = response;
+      toast(
+        response.models?.alignment?.present
+          ? "Alignment model is ready."
+          : "Downloading the alignment model. This can take a few minutes.",
+      );
+      await navigate();
+      if (!response.models?.alignment?.present) pollAlignment();
     } else if (action === "details") await detail(id);
     else if (action === "audit" || action === "generate") {
       const item = media[Number(target.dataset.index)];

@@ -288,7 +288,10 @@ def test_inconclusive_audit_skips_alignment(video, tmp_path):
     assert json.loads(result["report"])["audit"]["before"]["decision"] == "inconclusive"
 
 
-def test_repair_that_does_not_improve_is_withheld(video, tmp_path):
+def test_a_single_displaced_line_is_put_back(video, tmp_path):
+    """One line four seconds out of place is not a shape a shift and a stretch can
+    remove, and it used to be parked for that reason. Every timestamp now comes from the
+    line's own words, so a fault affecting one cue is corrected like any other."""
     from test_audit import fixture
 
     cues, words = fixture()
@@ -297,9 +300,10 @@ def test_repair_that_does_not_improve_is_withheld(video, tmp_path):
     video.with_suffix(".en.srt").write_text(render_srt(cues))
     settings, db, job = queued(video, tmp_path)
     result = process(job, settings, db.path.parent, db, lambda *args: (words, []), alignment_stub)
-    assert result["state"] == "review"
-    assert not json.loads(result["report"])["audit"]["improved"]
-    assert not video.with_suffix(".crowbarr.en.srt").exists()
+    assert result["state"] == "completed"
+    assert json.loads(result["report"])["audit"]["improved"]
+    output = parse_srt(video.with_suffix(".crowbarr.en.srt").read_text())
+    assert output[-1].start == pytest.approx(words[10].start, abs=0.05)
 
 
 def test_passing_original_retires_only_owned_previous_output(video, tmp_path):
@@ -431,53 +435,6 @@ def test_a_provider_download_that_bazarr_discards_retries_instead_of_parking(vid
     result = processor.process(db.claim(), settings, tmp_path, db)
     assert result["state"] == "retry"
     assert "next candidate" in result["error"]
-
-
-def test_a_few_bad_anchors_do_not_veto_an_otherwise_excellent_fit():
-    """At small anchor counts the 95th percentile is just the second-worst point."""
-    from crowbarr.processor import _retime_authored
-    from crowbarr.subtitles import Cue
-
-    # 29 anchors: 27 sitting almost exactly on a 0.64 s offset, 2 badly mismatched.
-    evidence = []
-    for index in range(27):
-        start = 10 + index * 40
-        evidence.append({"cue": index + 1, "subtitle_start": start, "subtitle_end": start + 2,
-                         "audio_start": start - 0.64, "audio_end": start + 1.36,
-                         "start_delta_seconds": 0.64, "end_delta_seconds": 0.64,
-                         "error_seconds": 0.64, "within_tolerance": False})
-    for index, start in enumerate((450, 890)):
-        evidence.append({"cue": 100 + index, "subtitle_start": start, "subtitle_end": start + 2,
-                         "audio_start": start - 4.2, "audio_end": start - 2.2,
-                         "start_delta_seconds": 4.2, "end_delta_seconds": 4.2,
-                         "error_seconds": 4.2, "within_tolerance": False})
-    original = [Cue(item["subtitle_start"], item["subtitle_end"], f"line {n}")
-                for n, item in enumerate(evidence)]
-    aligned, model = _retime_authored(original, {"evidence": evidence})
-    assert model["median_residual_seconds"] < 0.5
-    assert model["p95_residual_seconds"] > 3.0
-    assert aligned, "two outliers must not discard a fit the other 27 anchors agree on"
-
-
-def test_a_fit_the_anchors_broadly_disagree_with_is_still_refused():
-    from crowbarr.processor import _retime_authored
-    from crowbarr.subtitles import Cue
-
-    evidence = []
-    for index in range(20):
-        start = 10 + index * 40
-        drift = 3.0 if index % 2 else -3.0   # no consistent offset exists
-        evidence.append({"cue": index + 1, "subtitle_start": start, "subtitle_end": start + 2,
-                         "audio_start": start + drift, "audio_end": start + drift + 2,
-                         "start_delta_seconds": -drift, "end_delta_seconds": -drift,
-                         "error_seconds": abs(drift), "within_tolerance": False})
-    original = [Cue(item["subtitle_start"], item["subtitle_end"], f"line {n}")
-                for n, item in enumerate(evidence)]
-    aligned, model = _retime_authored(original, {"evidence": evidence})
-    assert not aligned
-    assert "do not support" in model["reason"]
-
-
 def test_an_english_image_subtitle_is_reported_rather_than_ignored():
     """A remux can carry a good English subtitle as bitmaps; the job must say so."""
     from crowbarr.media import unreadable_subtitles
@@ -606,3 +563,143 @@ def test_a_missing_alignment_package_does_not_fail_the_job(video, tmp_path):
     report = json.loads(result["report"])
     assert any("whisperx" in w.lower() for w in report["warnings"])
     assert video.with_suffix(".crowbarr.en.srt").exists()
+def test_a_single_overlapping_cue_does_not_veto_a_whole_repair(video, tmp_path):
+    """Structural damage is judged by share in the audit and must be judged the same way
+    here. One overlapping line cannot overturn a repair the anchors agree on."""
+    from test_audit import fixture
+
+    cues, words = fixture(3)
+    cues.insert(1, Cue(cues[0].end - 0.5, cues[0].end - 0.1, "overlaps the line before it"))
+    video.with_suffix(".en.srt").write_text(render_srt(cues))
+    settings, db, job = queued(video, tmp_path)
+    result = process(job, settings, db.path.parent, db, lambda *args: (words, []), alignment_stub)
+    report = json.loads(result["report"])
+    assert any("overlapping" in w for w in report["warnings"]), "the overlap must still be reported"
+    assert result["state"] == "completed", f"held by: {report['issues']}"
+def test_a_sample_may_settle_that_a_file_is_fine_but_not_a_change_to_one():
+    """Three two-minute windows see about a quarter of an episode. That is enough to
+    leave a file alone, and not enough to rewrite every cue in it and then check the
+    rewrite against the same quarter."""
+    from crowbarr.processor import _needs_full_audio
+
+    def sources(*decisions):
+        return [{"audit": {"decision": decision}} for decision in decisions]
+
+    assert not _needs_full_audio(sources("pass"))
+    assert not _needs_full_audio(sources("repair", "pass"))
+    assert _needs_full_audio(sources("repair")), "a repair rewrites the whole file"
+    assert _needs_full_audio(sources("inconclusive"))
+    assert _needs_full_audio(sources("repair", "inconclusive"))
+
+
+def _transcript_fixture(count=30, wrong=lambda t: 0.0):
+    """Words at known times, and authored cues whose timestamps are wrong by `wrong`."""
+    from crowbarr.subtitles import Cue, Word
+
+    words, cues, clock = [], [], 10.0
+    for index in range(count):
+        vocabulary = [f"word{index}{letter}" for letter in "abcdef"]
+        spoken_start = clock
+        for term in vocabulary:
+            words.append(Word(clock, clock + 0.3, term, 0.95))
+            clock += 0.4
+        cues.append(
+            Cue(spoken_start + wrong(spoken_start), clock - 0.1 + wrong(spoken_start), " ".join(vocabulary))
+        )
+        clock += 2.0
+    return cues, words
+
+
+def _placed(cues, words):
+    from crowbarr.processor import _retime_from_transcript
+    from crowbarr.subtitles import match_passages
+
+    passages, _ = match_passages(cues, words)
+    return _retime_from_transcript(cues, passages)
+
+
+def test_every_cue_is_placed_where_its_own_words_were_spoken():
+    """No model of the old timing is fitted, so its shape does not have to be recognised."""
+    import random
+    from statistics import median
+
+    shapes = {
+        "constant offset": lambda t: 3.0,
+        "drift": lambda t: t * 0.02,
+        "one step": lambda t: 0.0 if t < 100 else 4.0,
+        "three steps": lambda t: (0.0 if t < 80 else 2.5 if t < 160 else -1.5 if t < 240 else 6.0),
+        "no pattern at all": lambda t: random.Random(int(t)).uniform(-8, 8),
+    }
+    for name, wrong in shapes.items():
+        cues, words = _transcript_fixture(wrong=wrong)
+        truth = {index: word.start for index, word in enumerate(words[::6])}
+        aligned, model = _placed(cues, words)
+        assert aligned, name
+        error = median(abs(cue.start - truth[index]) for index, cue in enumerate(aligned))
+        assert error < 0.05, f"{name}: cues landed {error:.3f} s from their speech"
+        assert model["kind"] == "transcript_placement", name
+
+
+def test_a_cue_with_nothing_to_match_keeps_its_place_between_its_neighbours():
+    """A sound caption has no speech of its own, so its neighbours decide where it goes."""
+    from crowbarr.subtitles import Cue
+
+    cues, words = _transcript_fixture(wrong=lambda t: 5.0)
+    caption = Cue(cues[3].end + 0.4, cues[3].end + 1.0, "[a door closes]")
+    cues.insert(4, caption)
+    aligned, model = _placed(cues, words)
+    assert model["interpolated_cues"] == 1
+    assert aligned[3].end <= aligned[4].start <= aligned[5].start
+    assert aligned[4].text == "[a door closes]"
+
+
+def test_authored_reading_time_survives_being_retimed():
+    """Cue length is an authoring decision. Placement moves a line; it does not reshape it."""
+    cues, words = _transcript_fixture(wrong=lambda t: -2.0)
+    aligned, _ = _placed(cues, words)
+    for before, after in zip(cues, aligned, strict=True):
+        assert after.end - after.start == pytest.approx(before.end - before.start)
+
+
+def test_a_retimed_subtitle_is_judged_on_its_own_result_not_on_the_old_timing():
+    """Placement does not correct the old timestamps, so "did it improve on them" is not
+    a question about the new file. What matters is whether the new file is right, and
+    whether enough of it was placed rather than interpolated."""
+    from crowbarr.processor import placement_verdict
+
+    good = {"decision": "pass"}
+    assert placement_verdict(good, {"placed_cues": 90, "interpolated_cues": 10})["accepted"]
+    assert placement_verdict({"decision": "inconclusive"}, {"placed_cues": 90, "interpolated_cues": 10})[
+        "accepted"
+    ], "a file the audit cannot grade is not a file that was placed wrongly"
+    assert not placement_verdict({"decision": "repair"}, {"placed_cues": 90, "interpolated_cues": 10})[
+        "accepted"
+    ], "a result that fails its own audit is not published"
+    thin = placement_verdict(good, {"placed_cues": 5, "interpolated_cues": 95})
+    assert not thin["accepted"], "a file that is mostly guesswork is not published"
+    assert "5" in thin["reason"]
+
+
+def test_an_unjudgeable_subtitle_is_still_retimed_when_its_lines_match(video, tmp_path):
+    """`inconclusive` says the audit could not assemble enough confident, spread-out
+    anchors to judge the timing. It does not say the lines cannot be found in the audio.
+    A file with the whole transcript in hand and most of its cues matched used to be
+    parked on that distinction."""
+    from test_audit import fixture
+
+    cues, words = fixture()
+    # One weak word at the end of the last cue: enough to drop that anchor from the
+    # audit's evidence and leave the runtime unevenly covered, not enough to stop the
+    # line being found in the transcript.
+    words[-1].probability = 0.3
+    for cue in cues:
+        cue.start += 2.5
+        cue.end += 2.5
+    video.with_suffix(".en.srt").write_text(render_srt(cues))
+    settings, db, job = queued(video, tmp_path)
+    result = process(job, settings, db.path.parent, db, lambda *args: (words, []), alignment_stub)
+    report = json.loads(result["report"])
+    assert report["audit"]["before"]["decision"] == "inconclusive"
+    assert result["state"] == "completed", f"held by: {report['issues']}"
+    output = parse_srt(video.with_suffix(".crowbarr.en.srt").read_text())
+    assert output[0].start == pytest.approx(words[0].start, abs=0.05)
