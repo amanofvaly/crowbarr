@@ -231,6 +231,12 @@ def test_custom_settings_survive_updater_and_timer_opt_out(native):
     assert (previous / "crowbarr").is_file()
     assert (data / "crowbarr.db").read_text() == "persistent data"
     assert "User=media\nGroup=video" in (native.unit / "crowbarr.service").read_text()
+    unit = (native.unit / "crowbarr.service").read_text()
+    # WhisperX downloads its tokenizer on first refinement, so the caches must land in
+    # the data directory the service account owns, not in an unwritable home.
+    for name in ("HF_HOME", "TORCH_HOME", "NLTK_DATA"):
+        assert f"Environment={name}={data}/models/" in unit, unit
+    assert (data / "models").is_dir()
     assert "crowbarr-update.timer" in native.state["enabled"]
     succeeded(native.run(updater=True, CROWBARR_AUTO_UPDATE="false"))
     assert "crowbarr-update.timer" not in native.state["active"]
