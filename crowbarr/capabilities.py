@@ -19,8 +19,8 @@ try:
     import faster_whisper
     cpu = sorted(ctranslate2.get_supported_compute_types("cpu"))
     result["cpu"] = {"available": True, "reason": "", "compute_types": cpu}
-except Exception:
-    result["cpu"] = {"available": False, "reason": "The CTranslate2 speech runtime is missing or cannot load. Install Crowbarr's inference dependencies.", "compute_types": []}
+except Exception as error:
+    result["cpu"] = {"available": False, "reason": f"The CTranslate2 speech runtime is missing or cannot load ({type(error).__name__}). Install Crowbarr's inference dependencies.", "compute_types": []}
 try:
     if os.environ.get("CROWBARR_IMAGE_VARIANT") == "cpu":
         raise RuntimeError("CPU image")
@@ -34,6 +34,7 @@ try:
         raise RuntimeError("No CUDA compute types")
     result["cuda"] = {"available": True, "reason": "", "compute_types": types}
 except Exception:
+    # No GPU is an ordinary state, not a fault, so this reason names no exception.
     reason = "CUDA is unavailable. Use the CUDA image or a CUDA-enabled native installation, with a compatible NVIDIA driver and GPU access."
     if os.environ.get("CROWBARR_IMAGE_VARIANT") == "cpu":
         reason = "This is the CPU image. Install the CUDA image and expose a compatible NVIDIA GPU to enable CUDA."
@@ -42,8 +43,8 @@ try:
     import whisperx
     from whisperx.alignment import align, load_align_model
     result["refinement"] = {"available": True, "reason": "WhisperX is installed. Alignment models are loaded when needed; initialization can still fail."}
-except Exception:
-    result["refinement"] = {"available": False, "reason": "WhisperX or its dependencies are missing or cannot load. Whisper word timestamps will be used instead."}
+except Exception as error:
+    result["refinement"] = {"available": False, "reason": f"WhisperX or its dependencies are missing or cannot load ({type(error).__name__}). Whisper word timestamps will be used instead."}
 '''
 
 _lock = threading.Lock()
@@ -97,8 +98,11 @@ def runtime_capabilities() -> dict:
             result = _run_probe()
             if not all(isinstance(result[key]["available"], bool) for key in ("cpu", "cuda", "refinement")):
                 raise ValueError("Invalid runtime probe")
-        except (OSError, EOFError, RuntimeError, ValueError, KeyError, IndexError, TypeError):
-            reason = "Runtime detection failed or timed out. Check the inference installation and try again in five minutes."
+        except (OSError, EOFError, RuntimeError, ValueError, KeyError, IndexError, TypeError) as error:
+            reason = (
+                f"Runtime detection failed or timed out ({type(error).__name__}). "
+                "Check the inference installation and try again in five minutes."
+            )
             result = {
                 name: {"available": False, "reason": reason, "compute_types": []}
                 for name in ("cpu", "cuda", "refinement")
