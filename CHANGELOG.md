@@ -96,6 +96,10 @@ re-audits anything.
 - Selecting an older native binary retains the current updater instead of installing
   an older script that can forget the service account and data directory on its next
   run. Existing data and the audit policy are unchanged.
+- Native installations store the speech, alignment and tokenizer caches under
+  `models` in the data directory, matching the published images. WhisperX downloads
+  its sentence tokenizer the first time refinement runs, which previously had no
+  writable location on a native install.
 
 ### 0.3.6
 
