@@ -188,6 +188,7 @@ const context = vm.createContext({
     capabilities: {cpu: {available: true}, cuda: {available: false, reason: "Use the CUDA image."},
       refinement: {available: false, reason: "Whisper word timestamps will be used instead."}}},
   section: "processing", groups: [], heading: () => "", esc: value => String(value ?? ""),
+  status: {media_count: 2218}, fmt: value => String(value),
   $: id => nodes[id], dirty: false, draftDirty: false,
   captureSettings: () => {context.settings.device = elements.device.value;},
   document: {addEventListener: (name, fn) => {change = fn;}},
@@ -195,8 +196,9 @@ const context = vm.createContext({
 vm.runInContext(source.slice(source.indexOf("const field ="), source.indexOf("function apiPage()")), context);
 let html = vm.runInContext("settingsPage()", context);
 assert.match(html, /value="cuda" selected disabled/);
-assert.match(html, /saved CUDA choice is retained/);
-assert.match(html, /attempt CPU fallback/);
+assert.match(html, /set to use a graphics card, but none is available/);
+assert.match(html, /Processing runs on the CPU instead/);
+assert.match(html, /re-checks all 2218 media files/);
 assert.match(html, /name="refine_generated"[^>]*checked[^>]*disabled/);
 assert.match(html, /Whisper word timestamps/);
 assert.doesNotMatch(html, /value="cpu"[^>]*disabled/);
@@ -204,7 +206,7 @@ context.settings.capabilities.cpu.available = false;
 assert.match(vm.runInContext("settingsPage()", context), /value="cpu"[^>]*disabled/);
 context.settings.capabilities.cpu.available = true;
 context.settings.cpu_fallback = false;
-assert.match(vm.runInContext("settingsPage()", context), /enable CPU fallback or choose CPU/);
+assert.match(vm.runInContext("settingsPage()", context), /Turn on CPU fallback or choose CPU/);
 context.settings.capabilities.cuda.available = true;
 context.settings.capabilities.refinement.available = true;
 html = vm.runInContext("settingsPage()", context);
