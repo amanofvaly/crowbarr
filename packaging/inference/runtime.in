@@ -1,0 +1,13 @@
+# Alignment wheel is built from the checksum-pinned source by build_alignment.py.
+whisperx==3.8.6+crowbarr.1
+faster-whisper==1.2.1
+# Retain the validated model/runtime APIs rather than upgrading during size work.
+transformers==4.57.6
+ctranslate2==4.8.2
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+httpx>=0.28,<1
+pydantic>=2.10,<3
+# Needed to install the application wheel offline without build isolation.
+setuptools==80.9.0
+wheel==0.45.1

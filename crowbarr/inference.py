@@ -113,8 +113,10 @@ def align(
     import whisperx
 
     torch.set_num_threads(settings.cpu_threads)
-    backends = [settings.device]
-    if settings.device == "cuda" and settings.cpu_fallback:
+    # Recognition uses the GPU through CTranslate2. Alignment runs on Torch, which is
+    # the CPU build in every image, so asking for CUDA here only fails and retries.
+    backends = ["cpu"] if not torch.cuda.is_available() else [settings.device]
+    if backends[0] == "cuda" and settings.cpu_fallback:
         backends.append("cpu")
     for backend in backends:
         try:

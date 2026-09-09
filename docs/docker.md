@@ -6,7 +6,10 @@ Linux x86_64 (`linux/amd64`) only. No ARM64 images, no Windows or macOS packages
 
 - `ghcr.io/amanofvaly/crowbarr:latest` for CPU.
 - `ghcr.io/amanofvaly/crowbarr:latest-cuda` for an NVIDIA card the container can
-  reach. It carries the NVIDIA runtime and is roughly twice the size.
+  reach. It adds cuBLAS, about 600 MB more.
+
+The GPU is used for speech recognition, which is the slow part. Subtitle timing
+refinement runs on the CPU in both images.
 
 Speech models are not in either image. They download on first use into `/config`.
 

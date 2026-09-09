@@ -1,0 +1,7 @@
+# CTranslate2 runs recognition on the GPU with cuBLAS and the host driver. It needs
+# no cuDNN and links the CUDA runtime statically. Alignment runs on the CPU, so the
+# CPU build of Torch is used here too and the rest of the CUDA stack never installs.
+-r runtime.in
+torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.8.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=cb9a8ba8137ab24e36bf1742cb79a1294bd374db570f09fc15a5e1318160db4e
+torchaudio @ https://download-r2.pytorch.org/whl/cpu/torchaudio-2.8.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=9377faee65a290578280ac7f4884c3586253dac2ca28c60f458ff6efe86a6b05
+nvidia-cublas-cu12==12.6.4.1

@@ -27,9 +27,10 @@ try:
         raise RuntimeError("CPU image")
     if not result["cpu"]["available"]:
         raise RuntimeError("Speech runtime unavailable")
+    # CTranslate2 needs cuBLAS and the host driver. It links the CUDA runtime
+    # statically and uses no cuDNN, so requiring more would report a false negative.
     if sys.platform.startswith("linux"):
         ctypes.CDLL("libcublas.so.12")
-        ctypes.CDLL("libcudnn.so.9")
     types = sorted(ctranslate2.get_supported_compute_types("cuda"))
     if not types:
         raise RuntimeError("No CUDA compute types")

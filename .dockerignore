@@ -5,3 +5,8 @@
 !crowbarr/
 !crowbarr/**
 crowbarr/**/__pycache__
+!packaging/
+!packaging/inference/
+!packaging/inference/build_alignment.py
+!packaging/inference/cpu.lock
+!packaging/inference/cuda.lock

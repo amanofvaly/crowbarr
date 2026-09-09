@@ -559,7 +559,7 @@ function settingsPage() {
   const alignmentNote = !refinementAvailable
     ? ""
     : alignment?.present
-      ? ` The alignment model is downloaded (${Math.round((alignment.bytes || 0) / 1048576)} MB).`
+      ? ` The alignment model is downloaded (${Math.round((alignment.bytes || 0) / 1048576)} MB). Refinement runs on the CPU even when recognition uses the GPU.`
       : downloading
         ? " Downloading the alignment model. This page updates when it finishes."
         : alignment?.status === "failed"

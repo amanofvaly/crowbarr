@@ -37,7 +37,8 @@ def backend(monkeypatch):
         def __len__(self):
             return len(self.data) // 2
 
-    state = SimpleNamespace(loads=[], calls=[], failures=set(), cleanup_fails=False, weak=False)
+    state = SimpleNamespace(loads=[], calls=[], failures=set(), cleanup_fails=False, weak=False,
+                            cuda_torch=True)
 
     def load_align_model(*, language_code, device, model_dir):
         state.loads.append(device)
@@ -73,7 +74,10 @@ def backend(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "torch",
-        SimpleNamespace(set_num_threads=lambda count: None, cuda=SimpleNamespace(empty_cache=empty_cache)),
+        SimpleNamespace(
+            set_num_threads=lambda count: None,
+            cuda=SimpleNamespace(empty_cache=empty_cache, is_available=lambda: state.cuda_torch),
+        ),
     )
     monkeypatch.setitem(
         sys.modules, "whisperx", SimpleNamespace(load_align_model=load_align_model, align=align)
@@ -131,6 +135,18 @@ def test_alignment_failure_cause_reaches_the_log(backend, alignment_input, tmp_p
     assert SECRET not in json.dumps([issues, inference.align.runtime])
     logged = [record for record in caplog.records if "alignment model loading failed" in record.message]
     assert logged and all(record.exc_info for record in logged)
+
+
+def test_cpu_torch_aligns_on_cpu_without_attempting_cuda(backend, alignment_input, tmp_path):
+    """Torch is the CPU build in every image, so asking it for CUDA only fails twice."""
+    backend.cuda_torch = False
+    backend.failures.add(("cuda", "load"))
+    cues, issues = inference.align(*alignment_input, Settings(device="cuda"), tmp_path)
+    assert backend.loads == ["cpu"]
+    assert len(cues) == 2
+    assert inference.align.runtime["backend"] == "cpu"
+    assert inference.align.runtime["fallback_reason"] is None
+    assert not any("failed" in issue for issue in issues)
 
 
 @pytest.mark.parametrize("failure", ["load", 1, 2])

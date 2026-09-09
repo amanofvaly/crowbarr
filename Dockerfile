@@ -1,17 +1,34 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim-bookworm AS dependencies
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY packaging/inference/build_alignment.py /build_alignment.py
+RUN python /build_alignment.py --output /wheels
+COPY packaging/inference/cpu.lock /runtime.lock
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --no-compile --require-hashes \
+       --only-binary=:all: --find-links=/wheels -r /runtime.lock \
+    && /opt/venv/bin/pip check
+
+FROM dependencies AS application
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY crowbarr ./crowbarr
+# Application-only edits invalidate this small wheel, not the inference runtime.
+RUN /opt/venv/bin/pip wheel --no-deps --no-build-isolation --wheel-dir /app-wheel .
+
 FROM python:3.12-slim-bookworm AS cpu
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 CROWBARR_IMAGE_VARIANT=cpu \
     CROWBARR_DATA=/config HF_HOME=/config/models/huggingface \
-    TORCH_HOME=/config/models/torch NLTK_DATA=/config/models/nltk HOME=/config
+    TORCH_HOME=/config/models/torch NLTK_DATA=/config/models/nltk HOME=/config \
+    PATH=/opt/venv/bin:$PATH
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-COPY pyproject.toml README.md LICENSE ./
-COPY crowbarr ./crowbarr
-RUN pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 \
-    --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir '.[inference]' torchcodec==0.7.0 \
-    && pip check
-RUN mkdir -p /config && chown 1000:1000 /config
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /config && chown 1000:1000 /config
+COPY --from=dependencies /opt/venv /opt/venv
+# Bind the wheel from the builder so neither sources nor wheel archives ship.
+RUN --mount=type=bind,from=application,source=/app-wheel,target=/app-wheel \
+    pip install --no-cache-dir --no-compile --no-deps /app-wheel/*.whl && pip check
 USER 1000:1000
 EXPOSE 8449
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8449/health', timeout=3)"
