@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import sys
 import wave
@@ -119,6 +120,17 @@ def test_cuda_failure_retries_all_passages_on_cpu(backend, alignment_input, tmp_
     assert inference.align.runtime["backend"] == "cpu"
     assert inference.align.runtime["status"] == "completed"
     assert SECRET not in json.dumps([issues, inference.align.runtime])
+
+
+def test_alignment_failure_cause_reaches_the_log(backend, alignment_input, tmp_path, caplog):
+    backend.failures.add(("cuda", "load"))
+    with caplog.at_level(logging.WARNING, logger="crowbarr.inference"):
+        cues, issues = inference.align(*alignment_input, Settings(device="cuda"), tmp_path)
+    assert cues, "the CPU retry still has to produce cues"
+    # The operator needs the cause somewhere. The report and the dashboard are not it.
+    assert SECRET not in json.dumps([issues, inference.align.runtime])
+    logged = [record for record in caplog.records if "alignment model loading failed" in record.message]
+    assert logged and all(record.exc_info for record in logged)
 
 
 @pytest.mark.parametrize("failure", ["load", 1, 2])

@@ -82,6 +82,13 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.3.8
+
+- WhisperX alignment failures record their cause in the service log. On an NVIDIA
+  install where CUDA alignment fails and refinement retries on the CPU, the report
+  said only that loading failed, which left no way to find out why. Reports and the
+  dashboard still carry no exception detail.
+
 ### 0.3.7
 
 - Settings identifies unavailable CUDA and WhisperX runtimes before new selections
