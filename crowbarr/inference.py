@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import math
 import textwrap
 import wave
@@ -11,6 +12,8 @@ from pathlib import Path
 from .config import Settings
 from .media import ReviewRequired
 from .subtitles import Cue, Passage, Word, alignment_text
+
+log = logging.getLogger(__name__)
 
 _resident = None
 _resident_key = None
@@ -149,6 +152,9 @@ def _align_attempt(audio, passages, settings, cache, backend, np, whisperx):
             language_code=settings.language, device=backend, model_dir=str(cache / "alignment")
         )
     except Exception:
+        # The reported reason stays free of exception payloads. The cause still has to
+        # reach the log, or a backend that never works cannot be diagnosed.
+        log.warning("WhisperX %s alignment model loading failed", backend, exc_info=True)
         raise _AlignmentFailure(f"WhisperX {backend.upper()} alignment model loading failed") from None
     cues, issues = [], []
     with wave.open(str(audio), "rb") as stream:
@@ -171,6 +177,7 @@ def _align_attempt(audio, passages, settings, cache, backend, np, whisperx):
                     interpolate_method="ignore",
                 )
             except Exception:
+                log.warning("WhisperX %s alignment execution failed", backend, exc_info=True)
                 raise _AlignmentFailure(f"WhisperX {backend.upper()} alignment execution failed") from None
             words = result.get("word_segments", [])
             scored = [w for w in words if all(k in w for k in ("start", "end", "score"))]
