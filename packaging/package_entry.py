@@ -1,4 +1,4 @@
-"""Frozen entry point, including a model-free release validation command."""
+"""Frozen entry point, including packaged inference validation."""
 
 import multiprocessing
 import sys

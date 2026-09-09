@@ -82,6 +82,25 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.3.7
+
+- Settings identifies unavailable CUDA and WhisperX runtimes before new selections
+  are saved. Existing device preferences survive an upgrade or a temporary GPU
+  outage; switching to CPU selects a supported precision.
+- WhisperX refinement retries on CPU after CUDA model loading or alignment fails
+  when CPU fallback is enabled. Reports identify the backend used and the fallback;
+  failed retries do not publish subtitles.
+- Native packages include SciPy's dynamically imported compatibility modules, which
+  are required by the alignment runtime. Clean-runtime verification caught the
+  missing module before 0.3.6 could publish; that version was not released.
+- Selecting an older native binary retains the current updater instead of installing
+  an older script that can forget the service account and data directory on its next
+  run. Existing data and the audit policy are unchanged.
+- Native installations store the speech, alignment and tokenizer caches under
+  `models` in the data directory, matching the published images. WhisperX downloads
+  its sentence tokenizer the first time refinement runs, which previously had no
+  writable location on a native install.
+
 ### 0.3.6
 
 - Published containers include the optional WhisperX refinement dependencies on CPU

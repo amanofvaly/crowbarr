@@ -186,7 +186,8 @@ fi
 curl -fL --retry 3 "$RELEASE_URL/crowbarr-linux-x86_64.tar.gz" -o "$TEMP_DIR/package.tar.gz"
 (cd "$TEMP_DIR"; printf '%s  package.tar.gz\n' "$checksum" | sha256sum -c -)
 # Fetch before downtime; this also supports curl | sudo bash installation.
-curl -fL --retry 3 "$RELEASE_URL/install-crowbarr.sh" -o "$TEMP_DIR/updater"
+# A binary rollback must not restore an old updater that forgets persisted settings.
+curl -fL --retry 3 "$LATEST_URL/install-crowbarr.sh" -o "$TEMP_DIR/updater"
 bash -n "$TEMP_DIR/updater"
 install -d -m 0755 "$VERSIONS_DIR"
 secure_path "$TARGET_VERSION"
@@ -203,6 +204,9 @@ fi
 [[ -x "$TARGET_VERSION/crowbarr/crowbarr" ]] || fail "Installed release has no executable."
 install -d -m 0755 "$CONFIG_DIR" "$(dirname "$UPDATER")"
 if [[ ! -d "$DATA_DIR" ]]; then install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIR"; fi
+# WhisperX downloads its sentence tokenizer on first refinement, so the model cache
+# parent must exist and belong to the service account. The images use the same layout.
+if [[ ! -d "$DATA_DIR/models" ]]; then install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DATA_DIR/models"; fi
 
 if [[ -L "$INSTALL_DIR" ]]; then
   OLD_VERSION=$(readlink -f "$INSTALL_DIR")
@@ -231,6 +235,9 @@ User=$SERVICE_USER
 Group=$SERVICE_GROUP
 Environment=CROWBARR_DATA=$DATA_DIR
 Environment=HOME=$DATA_DIR
+Environment=HF_HOME=$DATA_DIR/models/huggingface
+Environment=TORCH_HOME=$DATA_DIR/models/torch
+Environment=NLTK_DATA=$DATA_DIR/models/nltk
 ExecStart=$INSTALL_DIR/crowbarr --host 0.0.0.0 --port 8449
 Restart=on-failure
 RestartSec=5

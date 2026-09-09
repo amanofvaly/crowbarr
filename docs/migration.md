@@ -26,6 +26,10 @@ take a snapshot of the dataset containing the data after stopping the service.
 A snapshot on the same device does not protect against device failure; maintain a
 recoverable backup too.
 
+If the data shares a dataset with unrelated files, use a directory backup or restore
+only Crowbarr's directory from a snapshot. Do not roll back the entire shared dataset
+to recover one application.
+
 For a regular Linux directory, an example is:
 
 ```sh

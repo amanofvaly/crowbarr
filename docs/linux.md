@@ -49,6 +49,8 @@ existing account/group using `CROWBARR_USER` and `CROWBARR_GROUP`. Other support
 options are `CROWBARR_DATA_DIR`, `CROWBARR_INSTALL_DIR`, and `CROWBARR_VERSION`.
 Run these through `sudo env NAME=value ...` so sudo passes them to the installer.
 These options are not required for a normal install.
+Selecting an older binary retains the current updater, so later updates continue
+to use the saved service account and data paths.
 
 ## Status and recovery
 

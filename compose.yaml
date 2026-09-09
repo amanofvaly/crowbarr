@@ -1,3 +1,6 @@
+# Managed Git/Portainer installation: enter the CROWBARR_* values in stack fields.
+# For a standalone Compose file without variables, use docs/docker.md.
+# CLI users of this file can copy .env.example to .env and set their host paths.
 services:
   crowbarr:
     image: ghcr.io/amanofvaly/crowbarr:${CROWBARR_IMAGE_TAG:-latest}

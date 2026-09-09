@@ -521,15 +521,15 @@ const numeric = (name, label, min, max, help = "", step = 1) =>
     "number",
     `min="${min}" max="${max}" step="${step}" required`,
   );
-const check = (name, label, help = "") =>
-  `<label class="check-field wide"><input name="${name}" type="checkbox" ${settings[name] ? "checked" : ""}><span>${label}<small>${help}</small></span></label>`;
+const check = (name, label, help = "", disabled = false) =>
+  `<label class="check-field wide"><input name="${name}" type="checkbox" ${settings[name] ? "checked" : ""} ${disabled ? "disabled" : ""}><span>${label}<small>${help}</small></span></label>`;
 const select = (name, label, options, help = "") =>
-  `<label>${label}<select name="${name}">${options
+  `<label>${label}<select name="${name}" aria-describedby="${name}-hint">${options
     .map((value) => {
-      const [id, text] = Array.isArray(value) ? value : [value, value];
-      return `<option value="${id}" ${settings[name] === id ? "selected" : ""}>${text}</option>`;
+      const [id, text, disabled] = Array.isArray(value) ? value : [value, value];
+      return `<option value="${esc(id)}" ${settings[name] === id ? "selected" : ""} ${disabled ? "disabled" : ""}>${esc(text)}</option>`;
     })
-    .join("")}</select><small>${help}</small></label>`;
+    .join("")}</select><small id="${name}-hint">${help}</small></label>`;
 function settingPanel(name, description, fields) {
   return `<section class="panel"><div class="panel-header"><div><h2>${name}</h2><p>${description}</p></div></div><div class="field-grid">${fields}</div></section>`;
 }
@@ -551,39 +551,79 @@ function connectionSettings() {
     .join("");
 }
 function settingsPage() {
+  const capabilities = settings.capabilities;
+  const recheckCount = status?.media_count
+    ? `all ${fmt(status.media_count)} media files`
+    : "every media file";
+  const cpuAvailable = capabilities?.cpu?.available === true;
+  const cudaAvailable = capabilities?.cuda?.available === true;
+  const refinementAvailable = capabilities?.refinement?.available === true;
+  const deviceHelp = [
+    !cpuAvailable ? capabilities?.cpu?.reason || "CPU runtime availability could not be determined." : "",
+    cudaAvailable
+      ? "An NVIDIA graphics card was found. Loading the model can still fail if its memory runs short."
+      : capabilities?.cuda?.reason || "CUDA availability could not be determined.",
+    settings.device === "cuda" && !cudaAvailable
+      ? settings.cpu_fallback
+        ? "Crowbarr is set to use a graphics card, but none is available. Processing runs on the CPU instead."
+        : "Crowbarr is set to use a graphics card, but none is available. Turn on CPU fallback or choose CPU, or jobs will not run."
+      : "",
+  ].filter(Boolean).join(" ");
   let content = "";
   if (section === "connections") content = connectionSettings();
   if (section === "library")
     content = settingPanel(
       "Media & discovery",
-      "Define readable media folders and how often the library is reconciled.",
-      `<label class="wide">Media folders<textarea name="roots" rows="4" placeholder="/media/tv&#10;/media/movies">${esc(settings.roots.join("\n"))}</textarea><small>One absolute path per line. Crowbarr needs permission to write subtitles beside videos. Mapped media-manager roots are also authorized.</small></label>${numeric("scan_seconds", "Sync interval (seconds)", 10, 86400)}${numeric("settle_seconds", "File settling time (seconds)", 0, 86400, "Wait for files to stop changing before processing.")}${numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "After this window, check embedded subtitles, then generate.")}`,
+      "Set the folders Crowbarr may read and how often it looks for new files.",
+      `<label class="wide">Media folders<textarea name="roots" rows="4" placeholder="/media/tv&#10;/media/movies">${esc(settings.roots.join("\n"))}</textarea><small>One absolute path per line. Crowbarr needs permission to write subtitles next to the videos. Folders mapped from Sonarr or Radarr are allowed too.</small></label>${numeric("scan_seconds", "Sync interval (seconds)", 10, 86400, "How often Crowbarr looks for new or changed media files.")}${numeric("settle_seconds", "File settling time (seconds)", 0, 86400, "Wait for files to stop changing before processing.")}${numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "How long to wait for Bazarr to supply a subtitle. After that, Crowbarr checks subtitles inside the video file, then writes its own.")}`,
     );
   if (section === "processing")
     content = settingPanel(
       "Speech processing",
-      "English dialogue and same-language subtitles are supported.",
+      `Whisper listens to the audio and writes down what it hears. English dialogue and same-language subtitles are supported. Changing the model, device or precision re-checks ${recheckCount}.`,
       select(
         "model",
         "Whisper model",
-        ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"],
-        "Larger models need more memory.",
+        [
+          ["tiny", "Tiny (about 75 MB, fastest, least accurate)"],
+          ["base", "Base (about 145 MB)"],
+          ["small", "Small (about 500 MB, default)"],
+          ["medium", "Medium (about 1.5 GB)"],
+          ["large-v3", "Large v3 (about 3 GB, most accurate, slowest)"],
+          ["large-v3-turbo", "Large v3 Turbo (about 1.6 GB, close to Large v3 and much faster)"],
+        ],
+        "Bigger models are more accurate and need more memory. The model downloads the first time it is used and is kept with Crowbarr's data.",
       ) +
         select("device", "Processing device", [
-          ["cpu", "CPU"],
-          ["cuda", "NVIDIA GPU · CUDA"],
-        ]) +
+          ["cpu", cpuAvailable ? "CPU" : "CPU (unavailable)", !cpuAvailable],
+          ["cuda", cudaAvailable ? "NVIDIA GPU · CUDA" : "NVIDIA GPU · CUDA (unavailable)", !cudaAvailable],
+        ], `<span id="device-help" aria-live="polite">${esc(deviceHelp)}</span>`) +
         select(
           "compute_type",
           "Compute precision",
-          ["int8", "float32", "int8_float16", "float16"],
-          "CPU supports INT8 and FP32.",
+          ["int8", "float32", "int8_float16", "float16"].map((type) => [
+            type,
+            {
+              int8: "INT8 (default, lowest memory)",
+              float32: "FP32 (full precision, most memory)",
+              int8_float16: "INT8 and FP16 (graphics card only)",
+              float16: "FP16 (graphics card only)",
+            }[type],
+            settings.device === "cpu" && type.includes("float16"),
+          ]),
+          '<span id="precision-help" aria-live="polite">Lower precision uses less memory and runs faster, with a small loss of accuracy. The CPU supports INT8 and FP32 only.</span>',
         ) +
-        numeric("cpu_threads", "CPU threads", 1, 64) +
+        numeric(
+          "cpu_threads",
+          "CPU threads",
+          1,
+          64,
+          "How many CPU cores processing may use. Setting this above the number of cores in the machine makes jobs slower.",
+        ) +
         check(
           "cpu_fallback",
           "Fall back to CPU",
-          "Use CPU when CUDA initialization fails.",
+          "Process on the CPU when the graphics card cannot be used. Jobs may take longer.",
         ) +
         check(
           "generate_over_mismatch",
@@ -592,49 +632,60 @@ function settingsPage() {
         ) +
         check(
           "refine_generated",
-          "Refine generated timings with WhisperX",
-          "Not included in the CUDA image, which would need a second GPU torch stack for it. Where it is unavailable Crowbarr uses Whisper word timestamps instead.",
+          refinementAvailable ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
+          esc(capabilities?.refinement?.reason || "WhisperX availability could not be determined. Whisper word timestamps are used if refinement cannot run."),
+          !refinementAvailable,
         ) +
         check(
           "allow_untagged_subtitles",
-          "Treat untagged SRT files as English",
+          "Also check subtitles with no language label",
+          "Crowbarr checks English subtitles. Files named Episode.srt, and tracks inside the video with no language tag, are skipped unless you turn this on. A subtitle that turns out to be another language will be checked against English audio and reported as not matching.",
         ),
     );
   if (section === "resources")
     content =
       settingPanel(
         "Resource limits",
-        "A single worker processes inference jobs. Memory limits apply to every job.",
-        numeric("min_free_ram_mb", "Minimum RAM headroom (MB)", 128, 262144) +
+        "Crowbarr processes one job at a time. These limits decide when a job may start.",
+        numeric(
+          "min_free_ram_mb",
+          "Minimum RAM headroom (MB)",
+          128,
+          262144,
+          "Hold a job when the machine has less free memory than this.",
+        ) +
           numeric(
             "min_free_vram_mb",
             "Minimum free GPU memory (MB)",
             128,
             262144,
+            "Hold a job when the graphics card has less free memory than this. Ignored when processing on the CPU.",
           ) +
           numeric(
             "max_cpu_load",
             "Maximum background CPU load per core",
             0.1,
             4,
-            "Normalized load average; 1 means one runnable task per core.",
+            "Hold background jobs when the machine is busier than this. 1 means every CPU core already has work.",
             0.1,
           ),
       ) +
       settingPanel(
         "Background schedule",
-        "Manual and import jobs bypass cooldown, quiet hours, and hourly budget.",
+        "These limits apply to background work only. Jobs you start yourself, and jobs from a new import, ignore them.",
         numeric(
           "backlog_cooldown_seconds",
           "Cooldown between jobs (seconds)",
           0,
           86400,
+          "Wait this long after a background job before starting the next one.",
         ) +
           numeric(
             "background_budget_minutes",
             "Processing budget per hour (minutes)",
             1,
             60,
+            "Minutes in each hour that background jobs may run.",
           ) +
           numeric(
             "quiet_hour_start",
@@ -652,42 +703,60 @@ function settingsPage() {
   if (section === "quality")
     content = settingPanel(
       "Audit & recovery",
-      "Control quality thresholds and recovery for uncertain or failed work.",
+      `An authored subtitle is one written by a person, as opposed to one Crowbarr writes from the audio. These settings decide how closely an authored subtitle must match what is spoken. Changing the three match settings re-checks ${recheckCount}.`,
       check(
         "sampled_audit",
-        "Sample dialogue across the runtime",
-        "Escalate inconclusive samples to full dialogue recognition.",
+        "Check short samples first",
+        "Listen to samples spread through the file, and recognize the whole file only when the samples are unclear. Applies to media longer than ten minutes.",
       ) +
         check(
           "bazarr_download_alternatives",
           "Download alternatives from Bazarr",
-          "Allow alternative authored candidates during processing.",
+          "Ask Bazarr for other subtitle files when the current one does not match the audio.",
         ) +
-        numeric("max_provider_attempts", "Maximum provider attempts", 1, 10) +
-        numeric("max_attempts", "Maximum job attempts", 1, 10) +
-        numeric("job_timeout_minutes", "Job timeout (minutes)", 1, 1440) +
+        numeric(
+          "max_provider_attempts",
+          "Subtitles to try per file",
+          1,
+          10,
+          "How many subtitles Crowbarr downloads from Bazarr for one file before giving up.",
+        ) +
+        numeric(
+          "max_attempts",
+          "Maximum job attempts",
+          1,
+          10,
+          "How many times a job is retried before it is marked failed.",
+        ) +
+        numeric(
+          "job_timeout_minutes",
+          "Job timeout (minutes)",
+          1,
+          1440,
+          "Stop a job that has been running longer than this.",
+        ) +
         numeric(
           "min_match_ratio",
-          "Minimum authored match ratio",
+          "Minimum subtitle match",
           0.5,
           1,
-          "Fraction of authored cues required to match.",
+          "How much of an authored subtitle's text must match the audio. Below this, Crowbarr treats the subtitle as belonging to other content.",
           0.01,
         ) +
         numeric(
           "min_alignment_score",
-          "Minimum alignment score",
+          "Minimum timing confidence",
           0,
           1,
-          "Lower confidence is sent for review.",
+          "How sure the word timing must be. Below this, Crowbarr keeps Whisper's own timings instead.",
           0.01,
         ) +
         numeric(
           "max_generated_ratio",
-          "Maximum generated word ratio",
+          "Maximum unmatched dialogue",
           0,
           1,
-          "Fraction of recognized words outside authored cues.",
+          "How much spoken dialogue may fall outside an authored subtitle's lines before Crowbarr warns that some timings were estimated.",
           0.01,
         ),
     );
@@ -1335,6 +1404,26 @@ document.addEventListener("input", (event) => {
   }
 });
 document.addEventListener("change", (event) => {
+  if (event.target.closest("#settings-form") && ["device", "cpu_fallback"].includes(event.target.name)) {
+    const form = $("settings-form");
+    const precision = form.elements.compute_type;
+    const cpu = form.elements.device.value === "cpu";
+    for (const option of precision.options)
+      option.disabled = cpu && option.value.includes("float16");
+    if (cpu && precision.value.includes("float16")) {
+      precision.value = "int8";
+      $("precision-help").textContent = "Precision changed to INT8 because the CPU cannot use FP16. Save changes to apply.";
+    }
+    captureSettings();
+    const help = settings.device === "cuda" && !settings.capabilities?.cuda?.available
+      ? settings.cpu_fallback
+        ? "Crowbarr is set to use a graphics card, but none is available. Processing runs on the CPU instead."
+        : "Crowbarr is set to use a graphics card, but none is available. Turn on CPU fallback or choose CPU, or jobs will not run."
+      : "The CPU works on any machine. CUDA needs an NVIDIA graphics card that Crowbarr can reach.";
+    $("device-help").textContent = help;
+    dirty = draftDirty = true;
+    $("save-state").textContent = "Unsaved changes";
+  }
   if (event.target.id === "library-provider") {
     libraryProvider = event.target.value;
     pageOffset = 0;

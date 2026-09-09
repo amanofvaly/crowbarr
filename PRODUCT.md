@@ -15,6 +15,6 @@ CPU or NVIDIA inference, and a single worker. It must not promise perfect timing
 Other languages and translated subtitles require separately evaluated matching strategies.
 
 UI direction: a completely new frontend, ready for people to use, fitting alongside
-Sonarr, Radarr, and Bazarr. Use the supplied crowbar.svg as logo, icon, and color
+Sonarr, Radarr, and Bazarr. Use the supplied icon.svg as logo, icon, and color
 reference. Provide full-screen navigation, real activity queues and measured animated
 progress, library search, dedicated settings, and an API interface for external apps.

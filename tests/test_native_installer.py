@@ -231,6 +231,12 @@ def test_custom_settings_survive_updater_and_timer_opt_out(native):
     assert (previous / "crowbarr").is_file()
     assert (data / "crowbarr.db").read_text() == "persistent data"
     assert "User=media\nGroup=video" in (native.unit / "crowbarr.service").read_text()
+    unit = (native.unit / "crowbarr.service").read_text()
+    # WhisperX downloads its tokenizer on first refinement, so the caches must land in
+    # the data directory the service account owns, not in an unwritable home.
+    for name in ("HF_HOME", "TORCH_HOME", "NLTK_DATA"):
+        assert f"Environment={name}={data}/models/" in unit, unit
+    assert (data / "models").is_dir()
     assert "crowbarr-update.timer" in native.state["enabled"]
     succeeded(native.run(updater=True, CROWBARR_AUTO_UPDATE="false"))
     assert "crowbarr-update.timer" not in native.state["active"]
@@ -266,6 +272,16 @@ def test_download_failure_does_not_stop_old_service(native, settings):
     assert result.returncode != 0
     assert native.install.resolve() == previous
     assert ["systemctl", "stop", "crowbarr.service"] not in native.commands[before:]
+
+
+def test_selecting_older_binary_keeps_current_updater(native):
+    succeeded(native.run(CROWBARR_VERSION="0.3.5"))
+    urls = [arg for command in native.commands if command[0] == "curl"
+            for arg in command if arg.startswith("https://")]
+    assert any("/download/v0.3.5/" in url and url.endswith(".tar.gz") for url in urls)
+    assert next(url for url in urls if url.endswith("install-crowbarr.sh")).endswith(
+        "/releases/latest/download/install-crowbarr.sh"
+    )
 
 
 def test_legacy_unit_migration(native):

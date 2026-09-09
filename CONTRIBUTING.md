@@ -23,6 +23,11 @@ the matching `v` tag, builds the container images and native Linux package, veri
 the package, and publishes the GitHub Release. Do not create or move release tags by
 hand.
 
+Before publishing packaging changes, run the Release workflow on the work branch
+with `verify_only` enabled. It runs the same package checks without creating release
+tags, publishing a release, or advancing deployment channels. Missing native dynamic
+imports must be fixed in the package; a passing web health check is insufficient.
+
 Write the entry for the person upgrading, not for the person who wrote the patch. Say
 what verdict or behaviour changed and what it now does to their files; a summary of the
 commit is not an entry. Keep the two sections separate — they cost an installation
