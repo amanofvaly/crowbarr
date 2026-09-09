@@ -521,15 +521,15 @@ const numeric = (name, label, min, max, help = "", step = 1) =>
     "number",
     `min="${min}" max="${max}" step="${step}" required`,
   );
-const check = (name, label, help = "") =>
-  `<label class="check-field wide"><input name="${name}" type="checkbox" ${settings[name] ? "checked" : ""}><span>${label}<small>${help}</small></span></label>`;
+const check = (name, label, help = "", disabled = false) =>
+  `<label class="check-field wide"><input name="${name}" type="checkbox" ${settings[name] ? "checked" : ""} ${disabled ? "disabled" : ""}><span>${label}<small>${help}</small></span></label>`;
 const select = (name, label, options, help = "") =>
-  `<label>${label}<select name="${name}">${options
+  `<label>${label}<select name="${name}" aria-describedby="${name}-hint">${options
     .map((value) => {
-      const [id, text] = Array.isArray(value) ? value : [value, value];
-      return `<option value="${id}" ${settings[name] === id ? "selected" : ""}>${text}</option>`;
+      const [id, text, disabled] = Array.isArray(value) ? value : [value, value];
+      return `<option value="${esc(id)}" ${settings[name] === id ? "selected" : ""} ${disabled ? "disabled" : ""}>${esc(text)}</option>`;
     })
-    .join("")}</select><small>${help}</small></label>`;
+    .join("")}</select><small id="${name}-hint">${help}</small></label>`;
 function settingPanel(name, description, fields) {
   return `<section class="panel"><div class="panel-header"><div><h2>${name}</h2><p>${description}</p></div></div><div class="field-grid">${fields}</div></section>`;
 }
@@ -551,6 +551,21 @@ function connectionSettings() {
     .join("");
 }
 function settingsPage() {
+  const capabilities = settings.capabilities;
+  const cpuAvailable = capabilities?.cpu?.available === true;
+  const cudaAvailable = capabilities?.cuda?.available === true;
+  const refinementAvailable = capabilities?.refinement?.available === true;
+  const deviceHelp = [
+    !cpuAvailable ? capabilities?.cpu?.reason || "CPU runtime availability could not be determined." : "",
+    cudaAvailable
+      ? "CUDA runtime detected. Model initialization can still fail."
+      : capabilities?.cuda?.reason || "CUDA availability could not be determined.",
+    settings.device === "cuda" && !cudaAvailable
+      ? settings.cpu_fallback
+        ? "Your saved CUDA choice is retained. Processing will attempt CPU fallback."
+        : "Your saved CUDA choice is retained. Processing cannot use CUDA while it is unavailable; enable CPU fallback or choose CPU."
+      : "",
+  ].filter(Boolean).join(" ");
   let content = "";
   if (section === "connections") content = connectionSettings();
   if (section === "library")
@@ -570,14 +585,16 @@ function settingsPage() {
         "Larger models need more memory.",
       ) +
         select("device", "Processing device", [
-          ["cpu", "CPU"],
-          ["cuda", "NVIDIA GPU · CUDA"],
-        ]) +
+          ["cpu", cpuAvailable ? "CPU" : "CPU (unavailable)", !cpuAvailable],
+          ["cuda", cudaAvailable ? "NVIDIA GPU · CUDA" : "NVIDIA GPU · CUDA (unavailable)", !cudaAvailable],
+        ], `<span id="device-help" aria-live="polite">${esc(deviceHelp)}</span>`) +
         select(
           "compute_type",
           "Compute precision",
-          ["int8", "float32", "int8_float16", "float16"],
-          "CPU supports INT8 and FP32.",
+          ["int8", "float32", "int8_float16", "float16"].map((type) => [
+            type, type, settings.device === "cpu" && type.includes("float16"),
+          ]),
+          '<span id="precision-help" aria-live="polite">CPU supports INT8 and FP32.</span>',
         ) +
         numeric("cpu_threads", "CPU threads", 1, 64) +
         check(
@@ -592,8 +609,9 @@ function settingsPage() {
         ) +
         check(
           "refine_generated",
-          "Refine generated timings with WhisperX",
-          "Not included in the CUDA image, which would need a second GPU torch stack for it. Where it is unavailable Crowbarr uses Whisper word timestamps instead.",
+          refinementAvailable ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
+          esc(capabilities?.refinement?.reason || "WhisperX availability could not be determined. Whisper word timestamps are used if refinement cannot run."),
+          !refinementAvailable,
         ) +
         check(
           "allow_untagged_subtitles",
@@ -1335,6 +1353,26 @@ document.addEventListener("input", (event) => {
   }
 });
 document.addEventListener("change", (event) => {
+  if (event.target.closest("#settings-form") && ["device", "cpu_fallback"].includes(event.target.name)) {
+    const form = $("settings-form");
+    const precision = form.elements.compute_type;
+    const cpu = form.elements.device.value === "cpu";
+    for (const option of precision.options)
+      option.disabled = cpu && option.value.includes("float16");
+    if (cpu && precision.value.includes("float16")) {
+      precision.value = "int8";
+      $("precision-help").textContent = "Precision changed to INT8 because CPU does not support FP16. Save changes to apply.";
+    }
+    captureSettings();
+    const help = settings.device === "cuda" && !settings.capabilities?.cuda?.available
+      ? settings.cpu_fallback
+        ? "Your saved CUDA choice is retained. Processing will attempt CPU fallback."
+        : "CUDA is unavailable and CPU fallback is disabled. Enable fallback or choose CPU."
+      : "CPU supports INT8 and FP32. CUDA requires a compatible NVIDIA GPU and runtime.";
+    $("device-help").textContent = help;
+    dirty = draftDirty = true;
+    $("save-state").textContent = "Unsaved changes";
+  }
   if (event.target.id === "library-provider") {
     libraryProvider = event.target.value;
     pageOffset = 0;
