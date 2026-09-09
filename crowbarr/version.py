@@ -9,5 +9,5 @@ What each value means for an installation is recorded in ``CHANGELOG.md``, not h
 Changing either without an entry there fails ``tests/test_release.py``.
 """
 
-APPLICATION_VERSION = "0.3.7"
+APPLICATION_VERSION = "0.3.8"
 AUDIT_POLICY_VERSION = "0.3.4"
