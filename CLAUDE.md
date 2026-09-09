@@ -20,7 +20,7 @@ git config core.hooksPath .githooks
 
 ## Writing
 
-Applies to code comments, commit messages, documentation, and replies in the terminal.
+Applies to code comments, commit messages, page labels, text strings on webpages, documentation, and replies in the terminal.
 
 "Write conventionally" is not a sufficient instruction and has already failed once in this
 repo. Use the list.
