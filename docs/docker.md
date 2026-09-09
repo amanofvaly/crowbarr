@@ -1,8 +1,19 @@
 # Install Crowbarr with Docker
 
-Published images currently support Linux x86_64 (`linux/amd64`). ARM64 images are
-not yet published. Use Docker Engine with its Compose plugin or a Docker-based NAS
-app manager. Native Windows/macOS packages are not provided.
+Linux x86_64 (`linux/amd64`) only. No ARM64 images, no Windows or macOS packages.
+
+## Choose an image
+
+- `ghcr.io/amanofvaly/crowbarr:latest` for CPU.
+- `ghcr.io/amanofvaly/crowbarr:latest-cuda` for an NVIDIA card the container can
+  reach. It carries the NVIDIA runtime and is roughly twice the size.
+
+Speech models are not in either image. They download on first use into `/config`.
+
+With the CUDA image, install the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html),
+add the device reservation shown below, and select CUDA in Settings after the first
+start. Crowbarr does not switch to the GPU on its own.
 
 ## Docker Compose
 
@@ -42,19 +53,16 @@ Create the configuration directory first. For UID/GID 1000:
 sudo install -d -m 0700 -o 1000 -g 1000 /srv/crowbarr/config
 ```
 
-Use the paths and IDs chosen above. On a NAS, create app storage and grant access
-through the dataset permissions screen. Do not recursively change media ownership
-or grant access to everyone. Missing directories are rejected instead of silently
-creating empty, root-owned storage.
+On a NAS, create the storage and set access through the dataset permissions screen.
+Do not change media ownership recursively or grant access to everyone.
 
-For managed installs and unattended updates, see [TrueNAS and Portainer](nas.md).
-Before replacing an existing installation, read [Migration and backup](migration.md).
+See [TrueNAS and Portainer](nas.md) for managed installs. Replacing an existing
+install? Read [Migration and backup](migration.md) first.
 
 ## NVIDIA
 
-For an NVIDIA GPU, install the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html),
-use `ghcr.io/amanofvaly/crowbarr:latest-cuda`, and add the device reservation:
+Change the image to `ghcr.io/amanofvaly/crowbarr:latest-cuda` and add the device
+reservation to the same service:
 
 ```yaml
     deploy:
@@ -66,15 +74,15 @@ use `ghcr.io/amanofvaly/crowbarr:latest-cuda`, and add the device reservation:
               capabilities: [gpu]
 ```
 
-Open `http://localhost:8449` after the container starts.
-Use the server's IP address when opening it from another computer. Create your
-dashboard account and configure Sonarr/Radarr in Settings. Map their media paths
-to paths visible inside Crowbarr, such as `/media`. Service URLs must be reachable
-from the container: `localhost` refers to Crowbarr itself.
+Set the processing device to CUDA in Settings. Until you do, it runs on the CPU.
+On TrueNAS, use its own GPU support instead of installing drivers on the host.
 
-Select CUDA in Settings when using the NVIDIA image. The image does not override
-your saved processing settings. On TrueNAS, configure its GPU support rather than
-installing driver packages on the host.
+## First run
+
+Open `http://localhost:8449`, or the server's IP from another machine. Create your
+account, then add Sonarr and Radarr in Settings. Their URLs must be reachable from
+inside the container, so `localhost` will not work. Map their media paths to the
+container paths.
 
 ## Docker Run
 
@@ -91,14 +99,12 @@ docker run -d \
   ghcr.io/amanofvaly/crowbarr:latest
 ```
 
-Crowbarr writes subtitles beside the video files. Run the container with the uid and
-gid that own those files. Keep `/config` persistent because it contains the database,
-settings, login credentials, API key, reports, downloaded models, and cached
-transcripts. Published subtitles remain alongside the media.
+Run the container as the uid and gid that own your video files, since subtitles are
+written beside them. Keep `/config` persistent: it holds the database, settings,
+credentials, API key, reports, models and cached transcripts.
 
-Allow roughly 115 MB of free disk space per hour of audio during extraction.
-Model and transcript caches require additional space. The first inference downloads
-models and requires outbound network access.
+Allow about 115 MB free per hour of audio during extraction, plus space for models
+and transcripts. The first job downloads a model and needs outbound network access.
 
 ## Update
 
@@ -107,26 +113,21 @@ docker compose pull
 docker compose up -d
 ```
 
-These commands update manually. `latest` and `restart: unless-stopped` do not schedule
-updates. For unattended release updates, use [Portainer GitOps](nas.md#portainer).
+Nothing updates on its own. `latest` and `restart: unless-stopped` do not schedule
+anything. For unattended updates, use [Portainer GitOps](nas.md#portainer).
 
-An administrative interruption returns the job to the queue. Valid recognition
-checkpoints can resume; the current unfinished chunk may repeat. Other queued and
-completed work remains in `/config`. An application version change alone does not
-re-audit settled jobs.
+A running job returns to the queue and resumes from its last checkpoint. Queued and
+finished work is unaffected. A new version alone does not re-audit settled jobs.
 
-Read [rollback requirements](migration.md#rollback) before selecting an older image.
-Changing the image does not reverse database migrations, audit-policy adoption, or
-subtitle publications.
+Read [rollback requirements](migration.md#rollback) before pinning an older image.
+Going back does not undo database migrations or published subtitles.
 
 ## Repository Compose file
 
-The repository's `compose.yaml` is the managed Git/Portainer variant. Its host paths
-come from stack fields and are intentionally required. Crowbarr cannot infer your
-library or existing data location safely. The standalone example above needs no
-environment file. CLI users who prefer the repository variant can copy `.env.example`
-to `.env`, set the host paths, and use the optional CUDA/second-library files.
-Keep `CROWBARR_IMAGE_TAG` commented out to follow the release branch's version.
+The `compose.yaml` in the repository is for Portainer, which supplies host paths
+through stack fields. It will not start without them. Use the standalone example
+above instead, or copy `.env.example` to `.env` and set the paths there. Leave
+`CROWBARR_IMAGE_TAG` commented out to follow the release branch.
 
 ## Troubleshooting
 
@@ -137,13 +138,11 @@ docker compose exec crowbarr id
 docker compose exec crowbarr sh -c 'test -w /config && echo "Config is writable"'
 ```
 
-Test your media mount in the same way, replacing `/config` with its container path.
-For permission failures, check UID/GID, parent directory traversal and NAS ACLs.
-Crowbarr does not change host ownership automatically. Verify a real job: HTTP health
-alone does not prove that downloads, GPU inference, or subtitle publication work.
+Test the media mount the same way. For permission failures check the UID/GID,
+directory traversal, and NAS ACLs. Run a real job to confirm it works; a healthy
+endpoint does not prove downloads, GPU inference or publishing do.
 
-If a migrated installation asks you to create an account, stop and check the host
-directory mounted at `/config`. Do not delete or reset the existing data.
+If a migrated install asks you to create an account, stop and check what is mounted
+at `/config`. Do not reset the data.
 
-Keep the dashboard on your trusted network or use authenticated TLS access through
-a reverse proxy. Remove keys, cookies and private media names from shared logs.
+Keep the dashboard on a trusted network, or behind a reverse proxy with TLS.

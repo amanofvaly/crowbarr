@@ -7,26 +7,86 @@ required. Use the same public release on every server.
 
 ## TrueNAS Apps
 
-TrueNAS SCALE 24.10 and newer use Docker-based Apps. Use **Apps > Discover Apps >
-Custom App** to install `ghcr.io/amanofvaly/crowbarr:latest` (or `latest-cuda` for
-NVIDIA). Set container port 8449, the app UID/GID, a persistent host directory mounted
-at `/config`, and your library mounted at `/media`. Grant that user write access to
-the app dataset and media. Keep configuration storage private.
+TrueNAS SCALE 24.10 and newer run apps on Docker. Use **Apps > Discover Apps >
+Custom App > Install via YAML** and paste the following, changing the image, the
+host paths and the port to suit your system.
 
-Alternatively, use **Install via YAML** with the [Docker Compose example](docker.md).
-Crowbarr appears in the TrueNAS Apps list. A TrueNAS Custom App is its standard way
-to install an app outside the catalog; it does not require a customized application.
-Do not run the native Linux installer or install driver packages on the NAS host.
-See [TrueNAS custom app instructions](https://apps.truenas.com/managing-apps/installing-custom-apps/).
+```yaml
+services:
+  crowbarr:
+    image: ghcr.io/amanofvaly/crowbarr:latest-cuda
+    restart: unless-stopped
+    init: true
+    user: "568:568"
+    ports:
+      - "8449:8449"
+    volumes:
+      - type: bind
+        source: /mnt/pool/apps/crowbarr/config
+        target: /config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/pool/media/TV-Shows
+        target: /tv
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/pool/media/Movies
+        target: /movies
+        bind:
+          create_host_path: false
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
 
-TrueNAS offers image update checks, but notification is different from automatic
-installation. For unattended Git-based release updates, use Portainer below.
+`568:568` is the `apps` account TrueNAS runs containers as. Use it unless you have
+deliberately chosen another, and give that account write access to the datasets
+through the dataset permissions screen. Crowbarr writes subtitles next to your
+videos, so read-only media will not work.
+
+Create the config dataset before installing. `create_host_path: false` makes a
+missing path fail the install rather than silently create empty, root-owned storage.
+
+Mount each library separately and name the container paths to match what Sonarr and
+Radarr report, commonly `/tv` and `/movies`. Matching them means no path mappings to
+configure later. Add or remove volume entries for as many libraries as you have.
+
+Use `latest` instead of `latest-cuda` and delete the whole `deploy:` block if you
+have no NVIDIA card. See [Choose an image](docker.md#choose-an-image) for the
+difference. With the CUDA image, enable GPU support for the app in TrueNAS and
+select CUDA in Crowbarr's Settings after the first start.
+
+Crowbarr then appears in the TrueNAS Apps list like any other app. Do not run the
+native Linux installer or install driver packages on the NAS host. See
+[TrueNAS custom app instructions](https://apps.truenas.com/managing-apps/installing-custom-apps/).
+
+### Updating a TrueNAS app
+
+TrueNAS offers **Update** when the image behind your tag changes in the registry. It
+can take up to a day to notice. Restarting the Apps service checks immediately.
+
+Updating replaces the image only. Your YAML, storage, port and settings are untouched.
+
+Keep a moving tag. Pin a version instead of `latest` and no update is ever reported.
+
+For updates that install themselves with nobody clicking, use Portainer below.
 
 ## Portainer
 
 Use a Docker Standalone environment. Portainer itself can be a TrueNAS App.
-Crowbarr will appear as a Portainer stack, not as a separate TrueNAS-managed App.
-Use one manager for Crowbarr's lifecycle.
+Crowbarr then appears as a Portainer stack, not in the TrueNAS Apps list. Manage it
+from one place or the other, not both.
 
 1. Open **Stacks > Add stack**, name it `crowbarr`, and select **Git repository**.
 2. Enter `https://github.com/amanofvaly/crowbarr`, reference `refs/heads/release`,
@@ -42,30 +102,24 @@ Use one manager for Crowbarr's lifecycle.
 6. Deploy. Check container health, open `http://SERVER-IP:8449`, and configure
    services in the dashboard. Select CUDA in Settings if using the NVIDIA image.
 
-For two separate libraries, add `compose.extra-media.yaml` and enter
-`CROWBARR_EXTRA_MEDIA_DIR`. The default container mounts are `/media` and
-`/media-extra`. During migration, preserve existing paths with `CROWBARR_MEDIA_MOUNT`
-and `CROWBARR_EXTRA_MEDIA_MOUNT`, for example `/tv` and `/movies`. Read
-[Migration and backup](migration.md) first.
+For a second library, add `compose.extra-media.yaml` and set
+`CROWBARR_EXTRA_MEDIA_DIR`. Container mounts default to `/media` and `/media-extra`.
+Set `CROWBARR_MEDIA_MOUNT` and `CROWBARR_EXTRA_MEDIA_MOUNT` to keep existing paths
+such as `/tv` and `/movies`.
 
-App data lives outside Portainer's Git checkout. Do not use relative-path volumes
-for persistent configuration. If your Portainer edition does not expose GitOps
-polling, use manual pull/redeploy or an edition with that feature. Creating a stack
-from Git does not by itself enable polling. See
+Point config storage at a path outside Portainer's Git checkout, never a relative
+one. Adding a stack from Git does not enable polling on its own. See the
 [Portainer GitOps documentation](https://docs.portainer.io/user/docker/stacks/add#gitops-updates).
 
 ## What triggers an update?
 
-An ordinary push does not publish a release. Changing `APPLICATION_VERSION` on
-`main` starts the release pipeline. After tests and packaged-build checks succeed,
-the pipeline publishes versioned artifacts and advances the `release` branch to
-the new pinned image version. Failed releases must not advance that branch.
+Only a version change publishes a release. Pushing code to `main` does not. When
+`APPLICATION_VERSION` changes, the pipeline runs the tests and the packaged build
+checks, and advances the `release` branch only if they all pass.
 
-Portainer sees the branch change at its next polling interval and replaces Crowbarr
-using the same storage mounts. Source commits on `main` do not trigger this stack.
-An audit-policy-only change does not publish a new application version.
+Portainer picks up that branch change at its next poll and redeploys with the same
+storage. To pause updates, turn off GitOps polling. To stay on one version, set
+`CROWBARR_IMAGE_TAG` to its number, without `v` or `-cuda`, and remove it to follow
+releases again.
 
-To pause updates, disable GitOps polling. To pin one version, set
-`CROWBARR_IMAGE_TAG` to its number without `v` or `-cuda`; remove the variable to
-follow releases again. Read release notes and maintain recoverable backups.
-Automatic replacement is not automatic database rollback.
+Keep backups. An automatic redeploy is not an automatic way back.

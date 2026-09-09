@@ -2,48 +2,55 @@
 
 **Audio-grounded subtitle synchronization and transcription for the `*arr` ecosystem.**
 
-Crowbarr connects to your Sonarr and Radarr libraries to keep subtitles in sync with dialogue. Rather than immediately generating new transcripts or blindly shifting files, Crowbarr uses an **audit-first** approach: it gives Bazarr time to find human-authored subtitles, checks their timing against the actual audio track using Whisper, and only adjusts timing when genuine drift or sync errors are detected. If no authored subtitle is found, it transcribes the dialogue from scratch.
+Crowbarr watches your Sonarr and Radarr libraries and keeps subtitles in sync with the
+dialogue. It waits for Bazarr to find a human-written subtitle, checks that subtitle's
+timing against the audio with Whisper, and corrects it only when the audio says it is
+wrong. When no subtitle turns up, it transcribes one.
 
-All processed subtitles are published alongside your media as separate `.crowbarr.en.srt` sidecar files—your original media and provider subtitles are never overwritten or modified.
+Results are written as `<filename>.crowbarr.en.srt` next to the video. Your media and
+your existing subtitles are never modified.
 
-> **Visual Guide**: Check out [workflow.html](workflow.html) for an end-to-end walkthrough of the entire pipeline, file changes, and triggers.
->
-> **Updating**: See [Updating](#updating). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+[workflow.html](workflow.html) walks through the pipeline end to end. Release notes are
+in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
 ## Features
 
-- **Non-destructive**: Never touches your original media or downloaded subtitles. Outputs clean `<filename>.crowbarr.en.srt` sidecars.
-- **Audit-first synchronization**: Analyzes existing subtitles against audio. Subtitles that are already in sync are left alone.
-- **Accurate speech alignment**: Uses `faster-whisper` for speech recognition and `WhisperX` forced alignment to lock cue timings to spoken dialogue.
-- **Automatic transcription**: Generates full, properly-timed subtitle tracks when no authored subtitles exist.
-- **Deep `*arr` integration**: Automatically tracks library updates from Sonarr and Radarr via API polling or instant webhooks.
-- **Bazarr coordination**: Configurable grace period gives Bazarr time to fetch subtitles before transcription kicks in. A lightweight Bazarr notification script enables immediate processing on download.
-- **Web dashboard**: Full-screen subtitle workspace with live queues, measured recognition progress, searchable libraries, review workflows, settings, and an external API.
-- **On-demand actions**: Search any movie or episode to manually run an audit or force a fresh audio transcription.
-- **Plex notifications**: Can automatically notify Plex to refresh metadata after publishing a subtitle.
-- **Hardware acceleration**: Runs efficiently on CPU by default, with native NVIDIA GPU (CUDA) support for fast processing.
+- Audits existing subtitles against the audio and leaves correct ones alone
+- Corrects drift and sync errors instead of replacing the subtitle
+- Transcribes from audio when no subtitle is available
+- Sonarr and Radarr integration by API polling or webhook
+- Configurable grace period for Bazarr, with a notification script for instant handling
+- Web dashboard with queues, progress, library search, review and settings
+- On-demand audit or fresh transcription for any movie or episode
+- Plex refresh after publishing
+- CPU by default, NVIDIA CUDA supported
 
 ---
 
 ## Installation
 
-Linux x86_64 with systemd:
+Two images are published per release for `linux/amd64`:
+
+- `ghcr.io/amanofvaly/crowbarr:latest` for CPU
+- `ghcr.io/amanofvaly/crowbarr:latest-cuda` for NVIDIA
+
+Pick your platform:
+
+- [Docker and Docker Compose](docs/docker.md)
+- [TrueNAS and Portainer](docs/nas.md)
+- [Native Linux, no Docker](docs/linux.md)
+
+Replacing an existing install? Read [Migration and backup](docs/migration.md) first.
+
+Without Docker, on Linux x86_64 with systemd:
 
 ```sh
 curl -fsSL https://github.com/amanofvaly/crowbarr/releases/latest/download/install-crowbarr.sh | sudo bash
 ```
 
-Open `http://localhost:8449`. The installer adds Crowbarr as a system service and keeps
-its database, settings, models, and cached transcripts in `/var/lib/crowbarr`.
-
-For Docker and NVIDIA installations, see [Install Crowbarr with Docker](docs/docker.md).
-For native permissions, scheduled updates and service recovery, see
-[Native Linux installation](docs/linux.md).
-For NAS app managers and unattended release updates, see
-[TrueNAS and Portainer](docs/nas.md). Existing users should read
-[Migration and backup](docs/migration.md) before changing installations.
+Open `http://YOUR-IP-ADDRESS:8449`. Data lives in `/var/lib/crowbarr`.
 
 ### First run
 
@@ -113,30 +120,6 @@ Under **Settings → Media servers**, provide your Plex server URL and authentic
 
 ---
 
-## Web Dashboard & Manual Controls
-
-The web UI provides real-time visibility into the queue and library:
-
-- **Queue Management**: Pause processing, reorder jobs, cancel pending items, or retry failed ones.
-- **Audit Reports**: Click any completed job to see cue coverage, measured timing offset, and before/after boundary errors.
-- **Search & Manual Actions**: Use the search bar above the queue to find any movie or episode in your library:
-  - **Audit**: Immediately checks the existing subtitle against audio and realigns it if it is out of sync.
-  - **Generate Fresh**: Ignores existing subtitles and transcribes the dialogue from scratch. Ideal if an existing subtitle is corrupt, mismatched, or poor quality.
-
-### Subtitle workspace
-
-The frontend has dedicated Dashboard, Activity, Library, Review, History, Settings,
-and API & webhooks screens. Dark and light themes are available in Appearance and
-saved per browser. `/` opens library search; navigation routes can be bookmarked.
-Activity and Library page through the complete queue and catalog, with server-side
-search. Review provides audit evidence, private candidate downloads, and explicit
-publication after checking a candidate against the video.
-
-Recognition progress measures processed audio seconds against the recognition
-workload (the entire runtime or the combined sampled windows). It is a **stage
-percentage**, not an estimated total-job percentage. Preparation, alignment, and
-publication show the current operation. Unknown resource telemetry is shown as
-unavailable. Queue pause prevents new claims; it does not interrupt an active job.
 
 ### External API
 
@@ -180,14 +163,14 @@ Audit timing against audio       Transcribe audio with Whisper
  └─► Out of sync ────► Re-time ───┴──► Publish .crowbarr.en.srt
 ```
 
-1. **Discovery**: Crowbarr monitors your Sonarr and Radarr catalogs for new downloads, upgrades, and renames.
-2. **Grace Period**: When a new video arrives without subtitles, Crowbarr waits (default: up to 30 minutes) for Bazarr to fetch human-authored subtitles. If Bazarr downloads a subtitle, processing begins immediately.
-3. **Dialogue Audit**: For existing subtitles, Crowbarr extracts audio windows and compares subtitle cue start times with recognized speech.
-4. **Correction or Transcription**:
-   - If the existing subtitle is well-timed, Crowbarr takes no action.
-   - If timing drift or offset is detected, Crowbarr realigns the cues to speech while preserving all original text and authoring.
-   - If no usable subtitle exists, Crowbarr transcribes the dialogue to create a new track.
-5. **Publication**: The verified subtitle is written as `<name>.crowbarr.en.srt`, and Crowbarr can trigger a Plex library scan to pick it up.
+1. Crowbarr watches Sonarr and Radarr for new, upgraded and renamed files.
+2. A new video without a subtitle waits up to 30 minutes for Bazarr. A Bazarr
+   webhook skips the wait.
+3. Crowbarr extracts audio and compares the subtitle's cue times against recognised
+   speech.
+4. A well-timed subtitle is left alone. A drifting one is re-timed, keeping the
+   original text. If there is no usable subtitle, Crowbarr transcribes one.
+5. The result is written as `<name>.crowbarr.en.srt`, and Plex can be told to rescan.
 
 For a detailed walkthrough of the entire pipeline, see [workflow.html](workflow.html).
 
