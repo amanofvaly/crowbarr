@@ -4,7 +4,7 @@ A new Operate frontend for the self-hosted arr ecosystem. The prior Bootstrap da
 has been replaced with a full-width application shell and seven routes: Dashboard,
 Activity, Library, Review, History, Settings, and API & webhooks.
 
-The user supplied crowbar.svg is the authoritative logo and favicon. Its forest green
+The user supplied icon.svg is the authoritative logo and favicon. Its forest green
 (#00520b), jade (#268353), and olive (#adb34d) are accents, not a surface tint.
 The user rejected a generic card dashboard. The reference is their actual Radarr UI:
 neutral light workspace, charcoal navigation, compact toolbar, flat sections,
