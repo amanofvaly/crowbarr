@@ -13,6 +13,55 @@ results a person deliberately set aside.
 Read this section before upgrading: a bump means recognition work, and it can publish
 subtitles that the previous policy declined to.
 
+### 0.3.5
+
+- **Timing is now rebuilt from the transcript instead of corrected.** Crowbarr used to
+  measure how far an authored subtitle had drifted, fit a shift and a stretch to that
+  measurement, and move every cue by the result. That only works when the whole file is
+  wrong in one describable way. A subtitle that is right for ten minutes and two seconds
+  late afterwards, or wrong by a different amount in each act, has no single shift that
+  fixes it, so the repair was withheld and the file was parked for review.
+
+  Recognition already produces a timestamp for every word spoken in the file. Each cue's
+  own words are now located in that transcript, and the cue is placed where they were
+  said. Nothing measures the old timing, because none of it survives. A constant offset,
+  accumulating drift, a missing scene, and a file wrong in a different way every minute
+  are the same job now, and none of them has to be recognised as a shape first.
+  - Cues with nothing to match -- a sound caption, on-screen text, a line the recognizer
+    missed -- keep their position relative to the matched cues either side of them.
+  - Cue length is left alone. How long a line stays on screen is reading time, an
+    authoring decision, not synchronisation.
+  - A file is retimed when at least 3 of its cues, and a quarter of them, were matched
+    to their own speech. Below that there is too little to place from and it is parked.
+- **`inconclusive` no longer parks a file that can be retimed.** That verdict means the
+  audit could not gather enough confident, evenly spread anchors to grade the timing. It
+  says nothing about how many lines can be found in the transcript, which is a looser
+  question and the only one placement depends on. Of 24 such files in one library, 20
+  had a quarter or more of their cues matched to their own speech and were parked
+  anyway; one had three quarters. Whether a file is retimed is now decided by how much
+  of it was found in the audio, not by which verdict the audit reached.
+- **A subtitle is no longer rewritten from a sample of the audio.** On files over ten
+  minutes Crowbarr recognises three two-minute windows rather than the whole runtime,
+  about a quarter of an episode. A sample that found the timing already correct still
+  ends the job, because the answer there is to write nothing. A sample that found it
+  wrong used to go straight to rewriting every cue, including those outside the windows
+  that were never matched to any audio, and then check the result against the same
+  windows it was fitted to. Any verdict other than `pass` now recognises the full audio
+  before the file is touched. Where roughly four files in five pass, this recognises the
+  whole of the remaining fifth; the transcript is cached per file, so it is paid once.
+  - Files already rewritten from a sample are worth re-checking. In one library, 11 of
+    120 settled jobs, and 67 of the 102 authored repairs sitting in review.
+- **One overlapping line no longer holds back a finished subtitle.** The audit judges
+  structural damage by share; the publication path treated any single item as blocking,
+  so a result every anchor agreed with was parked over one overlapping cue in a file of
+  five hundred. Both now apply the same rule: damage blocks when it is spread across
+  more than 5% of the file, and a cue whose timing is impossible still blocks on its
+  own. Anything below that share is reported alongside the published result.
+- Withheld results are no longer judged against the subtitle they replace. That
+  comparison assumed the old timestamps were being adjusted. A retimed subtitle is now
+  judged on whether it measures as wrong and on how much of it was placed from speech
+  rather than filled in between.
+
 ### 0.3.4
 
 - **A subtitle is no longer discarded over one bad line.** Two parser refusals rejected
@@ -81,6 +130,29 @@ release with split versioning requeues nothing.
 
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
+
+### 0.3.9
+
+- Dashboard system information is now a compact, wrapping strip with GPU, memory,
+  speech model, service status and settings links. Removed the large System readiness
+  section and unnecessary dashboard borders while keeping the existing arr-style UI.
+- Page actions use the desktop header alongside library search; on mobile they stay
+  beside the page title. Removed the duplicate dashboard search action and the box
+  around the sidebar theme toggle.
+- Text selection has stronger contrast in both themes, and keyboard focus is clearer
+  on the dark header and sidebar. Fixed the Activity page's Sync libraries button
+  losing its green background in light mode.
+- Dashboard outcome counters now say “subtitles written” and “subtitles unchanged”
+  instead of implying that only unchanged subtitles were checked.
+- Quiet hours use whole-hour, 24-hour time dropdowns with guidance on the server's
+  timezone, overnight ranges and disabling the schedule. The mobile Save bar no longer
+  covers settings fields. Fixed CPU-load validation rejecting the default `0.75` and
+  preventing Resource settings from saving.
+- Speech processing marks cached speech models as downloaded and explains the first-use
+  download delay. WhisperX refinement shows alignment-model download status and size,
+  provides download and retry actions, and keeps its toggle disabled until the model
+  is present. Downloads started from the page are checked for completion and reported
+  in the UI.
 
 ### 0.3.8
 

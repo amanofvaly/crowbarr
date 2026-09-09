@@ -3,7 +3,7 @@
 # CLI users of this file can copy .env.example to .env and set their host paths.
 services:
   crowbarr:
-    image: ghcr.io/amanofvaly/crowbarr:${CROWBARR_IMAGE_TAG:-0.3.8}
+    image: ghcr.io/amanofvaly/crowbarr:${CROWBARR_IMAGE_TAG:-0.3.9}
     restart: unless-stopped
     init: true
     # The user and group that own your media files.
