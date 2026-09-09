@@ -182,6 +182,27 @@ def _stabilize_generated(cues: list[Cue], baseline: list[Cue]) -> tuple[list[Cue
     return result, adjusted
 
 
+def _stabilize_authored(cues: list[Cue], minimum: float = 0.04) -> tuple[list[Cue], int]:
+    """Separate repaired cues that landed on top of each other.
+
+    Retiming moves every cue onto recognised speech, which can push neighbours into
+    each other even when the authored file had no overlap. Only the shared boundary
+    moves: returning a cue to its unrepaired position would undo the repair.
+    """
+    result = [Cue(cue.start, cue.end, cue.text) for cue in cues]
+    adjusted = 0
+    for left, right in zip(result, result[1:], strict=False):
+        if right.start >= left.end or right.end - left.start <= 2 * minimum:
+            continue
+        boundary = min(
+            max((right.start + left.end) / 2, left.start + minimum),
+            right.end - minimum,
+        )
+        left.end, right.start = boundary, boundary
+        adjusted += 1
+    return result, adjusted
+
+
 def _sample_windows(cues: list[Cue], duration: float) -> list[tuple[float, float]]:
     from .subtitles import tokens
 
@@ -694,6 +715,12 @@ def process(
             alignment_passages = eligible_passages
             if not aligned:
                 issues.append(timing_model.get("reason", "No authored line could be matched to the audio"))
+            else:
+                aligned, adjusted_overlaps = _stabilize_authored(aligned)
+                if adjusted_overlaps:
+                    warnings.append(
+                        f"Adjusted {adjusted_overlaps} repaired cue boundaries to prevent overlap"
+                    )
         else:
             timing_model = None
             baseline = _generated_baseline(passages)

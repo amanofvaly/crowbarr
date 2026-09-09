@@ -17,6 +17,34 @@ def fixture(offset=0):
     return cues, words
 
 
+def test_structural_damage_is_not_reported_as_uncertain_timing():
+    """Inconclusive means Crowbarr could not tell. A file whose cues sit exactly on the
+    dialogue is not a case of not being able to tell, so the reason must not lead with
+    timing when the fault is structural."""
+    lines = [f"line number {n} of the spoken dialogue here" for n in range(40)]
+    per = len(lines[0].split())
+    words = [
+        Word(0.5 + i * 0.3, 0.75 + i * 0.3, text)
+        for i, text in enumerate(" ".join(lines).split())
+    ]
+    cues = [
+        Cue(words[i * per].start, words[i * per + per - 1].end, text)
+        for i, text in enumerate(lines)
+    ]
+    clean = audit(cues, words, cues[-1].end + 5)
+    assert clean["decision"] == "pass", clean["reason"]
+
+    # Every start stays exactly on the audio. Half the cues simply run past the next
+    # one's start, which is the shape a repair produces when it packs cues together.
+    damaged = list(cues)
+    for index in range(0, len(cues) - 1, 2):
+        damaged[index] = Cue(cues[index].start, cues[index + 1].start + 0.5, cues[index].text)
+    report = audit(damaged, words, cues[-1].end + 5)
+    assert report["blocking_structural_issues"], "the overlaps must block publication"
+    assert "overlap" in report["reason"], report["reason"]
+    assert "borderline" not in report["reason"], report["reason"]
+
+
 def test_correct_timing_and_normal_display_padding_pass():
     cues, words = fixture()
     for cue in cues:

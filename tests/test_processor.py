@@ -565,7 +565,8 @@ def test_a_missing_alignment_package_does_not_fail_the_job(video, tmp_path):
     assert video.with_suffix(".crowbarr.en.srt").exists()
 def test_a_single_overlapping_cue_does_not_veto_a_whole_repair(video, tmp_path):
     """Structural damage is judged by share in the audit and must be judged the same way
-    here. One overlapping line cannot overturn a repair the anchors agree on."""
+    here. One overlapping line cannot overturn a repair the anchors agree on, and the
+    published file must not carry the overlap either."""
     from test_audit import fixture
 
     cues, words = fixture(3)
@@ -574,7 +575,8 @@ def test_a_single_overlapping_cue_does_not_veto_a_whole_repair(video, tmp_path):
     settings, db, job = queued(video, tmp_path)
     result = process(job, settings, db.path.parent, db, lambda *args: (words, []), alignment_stub)
     report = json.loads(result["report"])
-    assert any("overlapping" in w for w in report["warnings"]), "the overlap must still be reported"
+    assert any("prevent overlap" in w for w in report["warnings"]), "the repair must be reported"
+    assert not any("overlapping" in issue for issue in report["issues"]), report["issues"]
     assert result["state"] == "completed", f"held by: {report['issues']}"
 def test_a_sample_may_settle_that_a_file_is_fine_but_not_a_change_to_one():
     """Three two-minute windows see about a quarter of an episode. That is enough to
@@ -651,6 +653,33 @@ def test_a_cue_with_nothing_to_match_keeps_its_place_between_its_neighbours():
     assert model["interpolated_cues"] == 1
     assert aligned[3].end <= aligned[4].start <= aligned[5].start
     assert aligned[4].text == "[a door closes]"
+
+
+def test_repair_does_not_publish_overlaps_it_created_itself():
+    """A clean authored file must not come back overlapping. Retiming moves every cue
+    onto speech, which can push neighbours together even when the source had none."""
+    from crowbarr.processor import _stabilize_authored
+    from crowbarr.subtitles import validate_cues
+
+    repaired = [Cue(1.0, 3.0, "one"), Cue(2.5, 4.0, "two"), Cue(5.0, 6.0, "three")]
+    assert [issue for issue in validate_cues(repaired, 10.0) if "overlapping" in issue]
+
+    settled, adjusted = _stabilize_authored(repaired)
+    assert adjusted == 1
+    assert not [issue for issue in validate_cues(settled, 10.0) if "overlapping" in issue]
+    assert [cue.text for cue in settled] == ["one", "two", "three"]
+    # The repair stands: neither cue is returned to where the authored file had it.
+    assert settled[0].start == 1.0 and settled[1].end == 4.0
+
+
+def test_cues_with_no_room_between_them_are_left_alone():
+    """Splitting a boundary that does not exist would emit an invalid duration."""
+    from crowbarr.processor import _stabilize_authored
+    from crowbarr.subtitles import validate_cues
+
+    settled, adjusted = _stabilize_authored([Cue(1.0, 2.0, "x"), Cue(1.0, 1.05, "y")])
+    assert adjusted == 0
+    assert not [issue for issue in validate_cues(settled, 10.0) if "invalid" in issue]
 
 
 def test_authored_reading_time_survives_being_retimed():

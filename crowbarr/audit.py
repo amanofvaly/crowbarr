@@ -395,10 +395,18 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
             )
         elif start_p95 > 2.0 or start_outlier_ratio >= 0.2 or abs(start_median) > 0.5:
             decision, reason = "repair", "Cue starts are offset from the recognized dialogue"
+        elif blocking_structural and (aligned or settled):
+            # Timing this good is not uncertainty. Saying "borderline" here sent a file
+            # whose cues sat exactly on the dialogue to review for a structural fault.
+            decision, reason = (
+                "inconclusive",
+                f"Cue timing matches the recognized dialogue, but {len(blocking_structural)} of "
+                f"{len(cues)} cues overlap each other or run too long to read",
+            )
         else:
             decision, reason = (
                 "inconclusive",
-                "Timing differences are borderline or subtitle structure needs review",
+                "Timing differences are borderline",
             )
     return {
         "version": AUDIT_VERSION,
