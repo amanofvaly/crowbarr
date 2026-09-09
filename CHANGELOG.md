@@ -13,6 +13,18 @@ results a person deliberately set aside.
 Read this section before upgrading: a bump means recognition work, and it can publish
 subtitles that the previous policy declined to.
 
+### 0.3.6
+
+- Repairing a subtitle no longer leaves cues overlapping each other. Retiming moves
+  every cue onto recognised speech, which could push neighbours together even when the
+  authored file had none, and the result was then held for review. Boundaries are now
+  separated and the report says how many were adjusted.
+- Jobs held in review for overlapping dialogue are re-opened and most should publish.
+  Fast-dialogue material was affected worst, since its cues sit closest together.
+- A file whose cues sit exactly on the dialogue is no longer described as having
+  borderline timing when the fault is structural. The reason now says how many cues
+  overlap or run too long, out of how many.
+
 ### 0.3.5
 
 - **Timing is now rebuilt from the transcript instead of corrected.** Crowbarr used to
@@ -130,6 +142,12 @@ release with split versioning requeues nothing.
 
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
+
+### 0.4.1
+
+- Audit policy 0.3.6. Repairs no longer publish overlapping cues they created, and a
+  file whose timing matches the audio is no longer reported as borderline when the
+  fault is structural. Review and failed jobs are re-audited on the first startup.
 
 ### 0.4.0
 
