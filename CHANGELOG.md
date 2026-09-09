@@ -131,6 +131,15 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.0
+
+- The NVIDIA image is 2.45 GB, down from 6.98 GB. Recognition still runs on the GPU.
+  TrueNAS kills an app update after twenty minutes, which the old image could not
+  beat, so updates failed with "Timed out waiting for response".
+- Refinement runs on the CPU in both images, and no longer tries CUDA first.
+- Runtime detection no longer requires cuDNN, which reported CUDA as unavailable on
+  systems where it worked.
+
 ### 0.3.9
 
 - Dashboard system information is now a compact, wrapping strip with GPU, memory,
