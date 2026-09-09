@@ -681,15 +681,23 @@ def process(
                 alignment_passages = _distributed_sample(eligible_passages, duration)
                 try:
                     aligned, alignment_issues = aligner(audio, alignment_passages, settings, cache)
-                except ImportError as error:
+                except ImportError:
                     # Minimal source installs can omit optional refinement dependencies.
                     # Keep usable Whisper timings and report the missing capability.
                     warnings.append(
-                        f"WhisperX refinement is not installed in this image ({error}); "
+                        "WhisperX refinement is not installed in this image; "
                         "used Whisper word timestamps instead"
                     )
+                    report["alignment_runtime"] = {
+                        "requested_backend": settings.device,
+                        "backend": None,
+                        "status": "unavailable",
+                    }
                     alignment_passages, aligned = [], baseline
                 else:
+                    report["alignment_runtime"] = dict(
+                        getattr(aligner, "runtime", {"backend": "custom", "status": "completed"})
+                    )
                     warnings.extend(alignment_issues)
                     if len(aligned) == len(alignment_passages):
                         refined = {

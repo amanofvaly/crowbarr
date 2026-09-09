@@ -1,5 +1,5 @@
 FROM python:3.12-slim-bookworm AS cpu
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 CROWBARR_IMAGE_VARIANT=cpu \
     CROWBARR_DATA=/config HF_HOME=/config/models/huggingface \
     TORCH_HOME=/config/models/torch NLTK_DATA=/config/models/nltk HOME=/config
 WORKDIR /app

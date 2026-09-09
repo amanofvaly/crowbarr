@@ -99,14 +99,57 @@ def align(
     global _resident, _resident_key
     _resident, _resident_key = None, None
     gc.collect()
+    align.runtime = {
+        "requested_backend": settings.device,
+        "backend": None,
+        "fallback_reason": None,
+        "status": "pending",
+    }
     import numpy as np
     import torch
     import whisperx
 
     torch.set_num_threads(settings.cpu_threads)
-    model, metadata = whisperx.load_align_model(
-        language_code=settings.language, device=settings.device, model_dir=str(cache / "alignment")
-    )
+    backends = [settings.device]
+    if settings.device == "cuda" and settings.cpu_fallback:
+        backends.append("cpu")
+    for backend in backends:
+        try:
+            cues, issues = _align_attempt(audio, passages, settings, cache, backend, np, whisperx)
+        except _AlignmentFailure as error:
+            align.runtime["status"] = "failed"
+            if backend != "cuda" or not settings.cpu_fallback:
+                raise
+            align.runtime["fallback_reason"] = str(error)
+        else:
+            align.runtime.update(backend=backend, status="completed")
+            if align.runtime["fallback_reason"]:
+                issues.insert(
+                    0,
+                    f"{align.runtime['fallback_reason']}; retried WhisperX refinement on CPU successfully",
+                )
+            return cues, issues
+        finally:
+            gc.collect()
+            if backend == "cuda":
+                # A broken CUDA runtime must not prevent the CPU retry or mask its result.
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
+
+class _AlignmentFailure(RuntimeError):
+    """Backend failure with a fixed message safe for job reports."""
+
+
+def _align_attempt(audio, passages, settings, cache, backend, np, whisperx):
+    try:
+        model, metadata = whisperx.load_align_model(
+            language_code=settings.language, device=backend, model_dir=str(cache / "alignment")
+        )
+    except Exception:
+        raise _AlignmentFailure(f"WhisperX {backend.upper()} alignment model loading failed") from None
     cues, issues = [], []
     with wave.open(str(audio), "rb") as stream:
         rate = stream.getframerate()
@@ -118,14 +161,17 @@ def align(
                 np.float32
             )
             samples /= 32768.0
-            result = whisperx.align(
-                [{"start": 0.0, "end": len(samples) / rate, "text": alignment_text(passage.text)}],
-                model,
-                metadata,
-                samples,
-                settings.device,
-                interpolate_method="ignore",
-            )
+            try:
+                result = whisperx.align(
+                    [{"start": 0.0, "end": len(samples) / rate, "text": alignment_text(passage.text)}],
+                    model,
+                    metadata,
+                    samples,
+                    backend,
+                    interpolate_method="ignore",
+                )
+            except Exception:
+                raise _AlignmentFailure(f"WhisperX {backend.upper()} alignment execution failed") from None
             words = result.get("word_segments", [])
             scored = [w for w in words if all(k in w for k in ("start", "end", "score"))]
             # Missing timings or scores are not silently interpolated into a passing result.
@@ -151,10 +197,6 @@ def align(
                 passage.display if passage.authored else "\n".join(textwrap.wrap(passage.display, width=42))
             )
             cues.append(Cue(cue_start, cue_end, display))
-    del model
-    gc.collect()
-    if settings.device == "cuda":
-        torch.cuda.empty_cache()
     return cues, issues
 
 

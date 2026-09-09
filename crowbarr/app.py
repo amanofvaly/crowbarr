@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from . import __version__
+from .capabilities import runtime_capabilities
 from .config import ConfigStore, Settings
 from .db import Database
 from .integrations import check_connection
@@ -321,7 +322,11 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     @app.get("/api/settings", dependencies=[Depends(authenticate)])
     def settings():
         # Shown so it can be copied into Sonarr/Radarr/Bazarr; it is no longer the login.
-        return {**store.public(), "api_key": store.token}
+        return {**store.public(), "api_key": store.token, "capabilities": runtime_capabilities()}
+
+    @app.get("/api/capabilities", dependencies=[Depends(authenticate)])
+    def capabilities():
+        return runtime_capabilities()
 
     @app.put("/api/settings", dependencies=[Depends(authenticate)])
     def save_settings(payload: dict):
@@ -332,17 +337,20 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                 if not value.get("api_key") and value.get("url"):
                     value["api_key"] = getattr(previous, name).api_key
         try:
-            settings = Settings.model_validate(payload)
+            settings = Settings.model_validate({**previous.model_dump(), **payload})
         except ValidationError as error:
             details = [f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors()]
             raise HTTPException(422, "; ".join(details)) from None
         if settings.device == "cpu" and settings.compute_type in {"float16", "int8_float16"}:
             raise HTTPException(422, "CPU processing requires int8 or float32 compute")
+        runtime = runtime_capabilities()
+        if settings.device == "cuda" and previous.device != "cuda" and not runtime["cuda"]["available"]:
+            raise HTTPException(422, runtime["cuda"]["reason"])
         if settings.discovery_fingerprint() != previous.discovery_fingerprint():
             db.invalidate_sync()
         store.save(settings)
         service.scan_event.set()
-        return {**store.public(), "api_key": store.token}
+        return {**store.public(), "api_key": store.token, "capabilities": runtime}
 
     @app.post("/api/scan", dependencies=[Depends(authenticate)], status_code=202)
     def trigger_scan():
