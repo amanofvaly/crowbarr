@@ -169,9 +169,13 @@ jobs:
           python -m pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install pyinstaller==6.16.0 '.[inference]' torchcodec==0.7.0
           python -m pip check
+          # Transformers reads torchcodec's version from its distribution metadata, which
+          # PyInstaller does not bundle alongside a module unless asked.
           pyinstaller --clean --noconfirm --onedir --name crowbarr --paths packaging \
             --collect-all crowbarr --collect-all faster_whisper --collect-all ctranslate2 \
             --collect-all whisperx --collect-all transformers --collect-all scipy --collect-all sklearn \
+            --copy-metadata torchcodec \
+            --recursive-copy-metadata transformers --recursive-copy-metadata whisperx \
             --hidden-import uvicorn.logging --hidden-import uvicorn.loops.auto \
             --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto \
             --hidden-import uvicorn.lifespan.on packaging/package_entry.py
