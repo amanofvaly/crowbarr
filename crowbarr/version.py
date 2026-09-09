@@ -6,7 +6,10 @@ in ``crowbarr.db`` and re-opens its unresolved work when it changes, so a releas
 cannot change a decision must leave it alone.
 
 What each value means for an installation is recorded in ``CHANGELOG.md``, not here.
-Changing either without an entry there fails ``tests/test_release.py``.
+Changing either without an entry there fails ``tests/test_release.py``. Every audit policy increase
+must be accompanied by an application release. But every application release does not
+require an audit policy increase.
+
 """
 
 APPLICATION_VERSION = "0.4.1"
