@@ -67,6 +67,12 @@ def process_fixture(directory, check_inference=True):
 
 
 def smoke(check_inference=True):
+    if check_inference:
+        from crowbarr.capabilities import runtime_capabilities
+
+        runtime = runtime_capabilities()
+        assert runtime["cpu"]["available"], runtime["cpu"]["reason"]
+        assert runtime["refinement"]["available"], runtime["refinement"]["reason"]
     with tempfile.TemporaryDirectory(prefix="crowbarr-package-") as directory:
         child = multiprocessing.get_context("spawn").Process(
             target=process_fixture, args=(directory, check_inference)
