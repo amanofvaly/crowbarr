@@ -119,6 +119,15 @@ Read [rollback requirements](migration.md#rollback) before selecting an older im
 Changing the image does not reverse database migrations, audit-policy adoption, or
 subtitle publications.
 
+## Repository Compose file
+
+The repository's `compose.yaml` is the managed Git/Portainer variant. Its host paths
+come from stack fields and are intentionally required. Crowbarr cannot infer your
+library or existing data location safely. The standalone example above needs no
+environment file. CLI users who prefer the repository variant can copy `.env.example`
+to `.env`, set the host paths, and use the optional CUDA/second-library files.
+Keep `CROWBARR_IMAGE_TAG` commented out to follow the release branch's version.
+
 ## Troubleshooting
 
 ```sh
