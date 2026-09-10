@@ -954,8 +954,19 @@ label small {
   gap: 4px;
 }
 .asset-table table {
-  width: 100%;
+  width: auto;
+  min-width: 340px;
   border-collapse: collapse;
+}
+.asset-table td:first-child {
+  padding-right: 24px;
+}
+.asset-table .button.muted {
+  opacity: 0.6;
+}
+.asset-table .button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 .asset-table caption {
   caption-side: top;
@@ -981,9 +992,6 @@ label small {
   width: 15px;
   accent-color: var(--green);
   vertical-align: middle;
-}
-.asset-table td:nth-child(2) {
-  width: 100%;
 }
 .asset-table .asset-size,
 .asset-table .asset-state {

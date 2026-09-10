@@ -553,28 +553,6 @@ const SPEECH_MODELS = [
   ["large-v3-turbo", "Large v3 Turbo", "1.6 GB"],
   ["large-v3", "Large v3", "3 GB"],
 ];
-// Every downloadable asset is listed the same way: what it is, how big, and whether
-// it is on disk. State is never described in prose beside an unrelated control.
-function assetState(ready, entry, action) {
-  if (ready) return `<span class="state-ready">Ready</span>`;
-  if (entry?.status === "running") return `<span class="state-busy">Downloading</span>`;
-  if (entry?.status === "failed")
-    return `<span class="state-failed">${esc(entry.reason || "Download failed")}</span>`;
-  return action;
-}
-function assetTable(caption, rows, note) {
-  const body = rows
-    .map(
-      ([control, label, size, state]) =>
-        `<tr><td class="asset-pick">${control}</td><td>${esc(label)}</td><td class="asset-size">${esc(
-          size,
-        )}</td><td class="asset-state">${state}</td></tr>`,
-    )
-    .join("");
-  return `<div class="wide asset-table"><table><caption>${esc(caption)}</caption><tbody>${body}</tbody></table>${
-    note ? `<small>${esc(note)}</small>` : ""
-  }</div>`;
-}
 // Multilingual builds stay valid so existing settings keep working, but they are not
 // offered: Crowbarr is English only, and the .en build of a size is better at it.
 const LEGACY_MODELS = {
@@ -587,37 +565,6 @@ function megabytes(size) {
   const [value, unit] = size.split(" ");
   return unit === "GB" ? Number(value) * 1024 : Number(value);
 }
-function modelChooser(chosen, downloaded, fetching) {
-  // A model is selectable only once it is on disk, so no job ever waits on a download.
-  const listed = SPEECH_MODELS.some(([id]) => id === chosen)
-    ? SPEECH_MODELS
-    : [...SPEECH_MODELS, [chosen, ...(LEGACY_MODELS[chosen] || [chosen, ""])]];
-  // On a GPU, a model whose weights exceed the card cannot load at all. The download
-  // size understates memory use, so only a model larger than the whole card is refused.
-  const vram = settings.device === "cuda" ? status?.resources?.vram_total_mb : 0;
-  const rows = listed.map(([id, label, size]) => {
-    const ready = downloaded.has(id);
-    const toobig = Boolean(vram) && size && megabytes(size) > vram;
-    const control = `<input type="radio" name="model" value="${esc(id)}" ${
-      chosen === id ? "checked" : ""
-    } ${ready && !toobig ? "" : "disabled"} aria-label="${esc(label)}">`;
-    const action = button("Download", "fetch-model", "", `data-model="${esc(id)}"`);
-    const state = toobig
-      ? `<span class="state-failed">Larger than the ${Math.round(vram / 1024)} GB GPU</span>`
-      : assetState(ready, fetching[id], action);
-    return [control, label, size, state];
-  });
-  return assetTable("Speech model", rows, "Larger is more accurate and slower.");
-}
-function alignmentAsset(alignment, available) {
-  if (!available) return "";
-  const ready = alignment?.present === true;
-  const size = ready ? `${Math.round((alignment.bytes || 0) / 1048576)} MB` : "360 MB";
-  const action = button("Download", "fetch-alignment", "", alignment?.status === "running" ? "disabled" : "");
-  return assetTable("Refinement model", [
-    ["", "WhisperX alignment", size, assetState(ready, alignment, action)],
-  ]);
-}
 // The server owns the list of settings a verdict depends on. Changing one re-checks
 // the library, which is a decision worth offering rather than performing silently.
 function recheckFields() {
@@ -627,12 +574,55 @@ function saveActions() {
   const changed = recheckFields().some(
     (key) => savedSettings && settings[key] !== savedSettings[key],
   );
-  if (!changed)
-    return `<button class="button primary" type="submit">Save changes</button>`;
+  if (!changed) return `<button class="button primary" type="submit">Save changes</button>`;
   return (
     `<button class="button primary" type="submit">Save and re-check library</button>` +
     `<button class="button" type="submit" data-keep="true">Save, keep existing results</button>`
   );
+}
+// One control per row, whose label is the state: Download, Select, Active. A model is
+// selectable only once it is on disk, so no job ever waits on a download.
+function assetTable(caption, rows, note) {
+  const body = rows
+    .map(
+      ([label, size, action]) =>
+        `<tr><td>${esc(label)}</td><td class="asset-size">${esc(size)}</td>` +
+        `<td class="asset-state">${action}</td></tr>`,
+    )
+    .join("");
+  return `<div class="wide asset-table"><table><caption>${esc(caption)}</caption><tbody>${body}</tbody></table>${
+    note ? `<small>${esc(note)}</small>` : ""
+  }</div>`;
+}
+function modelChooser(chosen, downloaded, fetching) {
+  const listed = SPEECH_MODELS.some(([id]) => id === chosen)
+    ? SPEECH_MODELS
+    : [...SPEECH_MODELS, [chosen, ...(LEGACY_MODELS[chosen] || [chosen, ""])]];
+  const vram = settings.device === "cuda" ? status?.resources?.vram_total_mb : 0;
+  const rows = listed.map(([id, label, size]) => {
+    const attrs = `data-model="${esc(id)}"`;
+    if (Boolean(vram) && size && megabytes(size) > vram)
+      return [label, size, button(`Needs ${Math.ceil(megabytes(size) / 1024)} GB`, "", "muted", "disabled")];
+    if (id === chosen) return [label, size, button("Active", "", "primary", "disabled")];
+    if (downloaded.has(id)) return [label, size, button("Select", "choose-model", "", attrs)];
+    if (fetching[id]?.status === "running")
+      return [label, size, button("Downloading", "", "muted", "disabled")];
+    if (fetching[id]?.status === "failed")
+      return [label, size, button("Retry", "fetch-model", "danger", attrs)];
+    return [label, size, button("Download", "fetch-model", "", attrs)];
+  });
+  return assetTable("Speech model", rows, "Larger is more accurate and slower.");
+}
+function alignmentAsset(alignment, available) {
+  if (!available) return "";
+  const ready = alignment?.present === true;
+  const size = ready ? `${Math.round((alignment.bytes || 0) / 1048576)} MB` : "360 MB";
+  const action = ready
+    ? button("Ready", "", "primary", "disabled")
+    : alignment?.status === "running"
+      ? button("Downloading", "", "muted", "disabled")
+      : button(alignment?.status === "failed" ? "Retry" : "Download", "fetch-alignment", "");
+  return assetTable("Refinement model", [["WhisperX alignment", size, action]]);
 }
 function refreshSaveActions() {
   const bar = document.querySelector(".save-bar");
@@ -975,6 +965,9 @@ function captureSettings() {
   if (!form) return;
   for (const el of form.elements) {
     if (!el.name) continue;
+    // Every radio in a group carries a name and a value, so reading the unchecked ones
+    // would overwrite the chosen value with whichever appears last in the form.
+    if (el.type === "radio" && !el.checked) continue;
     const [name, key] = el.name.split(".");
     const value =
       el.type === "checkbox"
@@ -1436,6 +1429,12 @@ async function perform(target) {
       box.dispatchEvent(new Event("input", { bubbles: true }));
       target.textContent = `Added ${target.dataset.path}`;
       target.disabled = true;
+    } else if (action === "choose-model") {
+      // No radio exists now, so the choice lives in settings until it is saved.
+      settings.model = target.dataset.model;
+      dirty = draftDirty = true;
+      await navigate();
+      $("save-state").textContent = "Unsaved changes";
     } else if (action === "fetch-model") {
       const name = target.dataset.model;
       settings.capabilities = await api(`/capabilities/model/${encodeURIComponent(name)}`, "POST");

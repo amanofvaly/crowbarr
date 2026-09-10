@@ -229,6 +229,35 @@ console.log(JSON.stringify(fields));
         )
 
 
+def test_choosing_a_model_reads_the_checked_radio_not_the_last_one():
+    """Every radio in a group has a name and a value. Reading the unchecked ones made a
+    saved choice revert to whichever model happened to be rendered last."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is needed to execute captureSettings")
+    script = r"""
+const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
+const source = fs.readFileSync("crowbarr/static/app.js", "utf8");
+const elements = [
+  {name: "model", type: "radio", value: "small.en", checked: true},
+  {name: "model", type: "radio", value: "medium", checked: false},
+];
+const context = vm.createContext({
+  settings: {model: "medium"}, savedSettings: null,
+  $: () => ({elements}), document: {addEventListener: () => {}, querySelector: () => null},
+});
+const start = source.indexOf("function captureSettings");
+vm.runInContext(source.slice(start, source.indexOf("\nfunction ", start + 40)), context);
+vm.runInContext("captureSettings()", context);
+assert.equal(context.settings.model, "small.en");
+"""
+    result = subprocess.run(
+        [node, "-e", script], cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_a_model_larger_than_the_card_cannot_be_selected():
     """A 3 GB model will not load on a 2 GB card, so offering it only wastes a download
     and a job. Sizes below the card's total are left alone rather than guessed at."""
@@ -256,11 +285,11 @@ function render(device) {
   return vm.runInContext("settingsPage()", context);
 }
 const gpu = render("cuda");
-assert.match(gpu, /Larger than the 2 GB GPU/);
-assert.match(gpu, /value="large-v3"[^>]*disabled/);
-assert.doesNotMatch(gpu, /value="small.en"[^>]*disabled/);
-// The same 3 GB model is fine on the CPU, where the card's size is irrelevant.
-assert.doesNotMatch(render("cpu"), /Larger than the/);
+assert.match(gpu, /Needs 3 GB/);
+assert.doesNotMatch(gpu, /data-model="large-v3"/);
+// The same 3 GB model is offered on the CPU, where the card's size is irrelevant.
+assert.match(render("cpu"), /data-model="large-v3"/);
+assert.doesNotMatch(render("cpu"), /Needs 3 GB/);
 """
     result = subprocess.run(
         [node, "-e", script], cwd=Path(__file__).resolve().parents[1],
@@ -317,14 +346,14 @@ assert.doesNotMatch(html, /value="cuda" selected disabled/);
 assert.doesNotMatch(html, /name="refine_generated"[^>]*disabled/);
 // Downloadable assets all report the same way: name, size, state.
 assert.match(html, /WhisperX alignment<\/td><td class="asset-size">360 MB<\/td>/);
-assert.match(html, /state-ready">Ready</);
+assert.match(html, />Ready</);
 // Without the model, refinement cannot be turned on and the download is offered instead.
 context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "idle", reason: ""};
 const missing = vm.runInContext("settingsPage()", context);
 assert.match(missing, /name="refine_generated"[^>]*disabled/);
 assert.match(missing, /data-action="fetch-alignment"/);
 context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "running", reason: ""};
-assert.match(vm.runInContext("settingsPage()", context), /state-busy">Downloading</);
+assert.match(vm.runInContext("settingsPage()", context), />Downloading</);
 vm.runInContext(source.slice(source.indexOf('document.addEventListener("change"'),
   source.indexOf('document.addEventListener("submit"')), context);
 elements.device.value = "cpu";
