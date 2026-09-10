@@ -212,6 +212,17 @@ def test_invisible_import_is_reported_not_queued(catalog_library):
     assert not db.snapshot()["jobs"]
 
 
+def test_symlinked_arr_media_is_ignored_without_a_provider_error(catalog_library, tmp_path):
+    video, settings, db, factory = catalog_library
+    linked = video.parent / "linked.mkv"
+    linked.symlink_to(video)
+    factory.files = [ManagedFile("radarr", 11, 1, str(linked), "/movies/linked.mkv", "Movie")]
+
+    assert scan_arr(settings, db, factory) == 0
+    assert not db.snapshot()["jobs"]
+    assert not [notice for notice in db.snapshot()["notices"] if notice["message"]]
+
+
 def test_old_sync_cannot_authorize_jobs_after_settings_change(catalog_library):
     video, settings, db, factory = catalog_library
     old_settings = settings.model_copy(deep=True)

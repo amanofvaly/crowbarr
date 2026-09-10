@@ -259,6 +259,8 @@ function jobButtons(job) {
 }
 function activeJob() {
   const job = status?.jobs.find((j) => j.state === "processing");
+  if (!job && status?.scan_in_progress)
+    return `<div class="worker-band idle">${icon("refresh")}<div class="idle-body"><strong>Syncing libraries</strong><span>Crowbarr is checking which files need work. Queue totals can change until this finishes.</span></div></div>`;
   if (!job)
     return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Worker idle"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${cooldownMarkup()}</div></div>`;
   return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library sweep")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
@@ -575,9 +577,10 @@ function saveActions() {
     (key) => savedSettings && settings[key] !== savedSettings[key],
   );
   if (!changed) return `<button class="button primary" type="submit">Save changes</button>`;
+  const files = status?.media_count ? ` ${fmt(status.media_count)} files` : " the library";
   return (
-    `<button class="button primary" type="submit">Save and re-check library</button>` +
-    `<button class="button" type="submit" data-keep="true">Save, keep existing results</button>`
+    `<button class="button primary" type="submit">Save and re-check${files}</button>` +
+    `<button class="button" type="submit" data-keep="true">Use for new work; keep finished results</button>`
   );
 }
 // One control per row, whose label is the state: Download, Select, Active. A model is
@@ -1632,7 +1635,11 @@ document.addEventListener("submit", async (event) => {
     settings = await api("/settings", "PUT", body);
     savedSettings = structuredClone(settings);
     dirty = draftDirty = false;
-    toast("Settings saved. Library reconciliation requested.");
+    toast(
+      submit.dataset.keep === "true"
+        ? "Settings saved. Finished results will be kept; pending and changed files use the new settings."
+        : "Settings saved. Crowbarr will re-check the library with the new settings.",
+    );
     await navigate();
   } catch (error) {
     toast(error.message, true);

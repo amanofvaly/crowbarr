@@ -813,7 +813,7 @@ def process(
         report_path = directory / "reports" / f"{job['id']}.json"
         atomic_write(report_path, json.dumps(report, indent=2))
         if issues:
-            candidate = directory / "candidates" / f"{job['id']}.srt"
+            candidate = new_review_candidate_path(directory, job)
             if aligned:
                 atomic_write(candidate, rendered)
                 report["candidate"] = str(candidate)
@@ -870,6 +870,29 @@ def _describe_audio_choice(tracks: list[dict], chosen: dict) -> dict:
         ],
         "note": note,
     }
+
+
+def new_review_candidate_path(directory: Path, job: dict) -> Path:
+    """Return the write path for this exact input signature."""
+    signature = str(job.get("signature", ""))
+    if len(signature) != 64 or any(character not in "0123456789abcdef" for character in signature):
+        raise ValueError("Job has an invalid input signature")
+    return directory / "candidates" / f"{job['id']}-{signature}.srt"
+
+
+def review_candidate_path(directory: Path, job: dict) -> Path:
+    """Find the saved candidate for reading, including the pre-0.4.4 name."""
+    exact = new_review_candidate_path(directory, job)
+    # Candidates created before 0.4.4 used only the job id. Keep the current review
+    # usable after upgrade, while every newly written candidate gets an exact name.
+    legacy = directory / "candidates" / f"{job['id']}.srt"
+    try:
+        report_candidate = Path(json.loads(job.get("report") or "{}").get("candidate", ""))
+    except (TypeError, ValueError):
+        report_candidate = Path()
+    if not exact.exists() and report_candidate == legacy:
+        return legacy
+    return exact
 
 
 def publish_candidate(job, settings, directory, db, rendered, report):

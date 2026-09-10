@@ -143,6 +143,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                 "audit_policy_version": AUDIT_POLICY_VERSION,
                 "paused": store.get().paused,
                 "last_scan": service.last_scan,
+                "scan_in_progress": service.scan_in_progress,
                 "media_count": data.pop("media_total", service.scan_count),
                 "configured": bool(store.get().media_roots()),
                 "discovery_mode": "arr" if store.get().providers() else "folders",
@@ -375,8 +376,11 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             db.invalidate_sync()
         # Changing the model re-checks the whole library. Carrying the old fingerprint
         # lets the next scan keep settled verdicts instead of re-running every file.
-        if carry_forward and settings.fingerprint() != previous.fingerprint():
-            (store.directory / "carry-forward").write_text(previous.fingerprint())
+        if settings.fingerprint() != previous.fingerprint():
+            if carry_forward:
+                db.request_carry_forward(previous.fingerprint(), settings.fingerprint())
+            else:
+                db.cancel_carry_forward()
         store.save(settings)
         service.scan_event.set()
         return {**store.public(), "api_key": store.token, "capabilities": runtime}
@@ -530,12 +534,17 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         import json
 
         from .media import probe
-        from .processor import publish_candidate
+        from .processor import publish_candidate, review_candidate_path
         from .subtitles import parse_srt, validate_cues
 
         job = db.get(job_id)
-        path = store.directory / "candidates" / f"{job_id}.srt"
-        if not job or job["state"] != "review" or not path.is_file() or path.is_symlink():
+        if not job or job["state"] != "review":
+            raise HTTPException(409, "Only a saved review candidate can be approved")
+        try:
+            path = review_candidate_path(store.directory, job)
+        except ValueError:
+            raise HTTPException(409, "Only a saved review candidate can be approved") from None
+        if not path.is_file() or path.is_symlink():
             raise HTTPException(409, "Only a saved review candidate can be approved")
         rendered = path.read_text()
         report = json.loads(job["report"] or "{}")
@@ -562,9 +571,16 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
 
     @app.get("/api/jobs/{job_id}/candidate", dependencies=[Depends(authenticate)])
     def candidate(job_id: int):
+        from .processor import review_candidate_path
+
         job = db.get(job_id)
-        path = store.directory / "candidates" / f"{job_id}.srt"
-        if not job or not path.is_file() or path.is_symlink():
+        if not job:
+            raise HTTPException(404, "No private candidate is available")
+        try:
+            path = review_candidate_path(store.directory, job)
+        except ValueError:
+            raise HTTPException(404, "No private candidate is available") from None
+        if not path.is_file() or path.is_symlink():
             raise HTTPException(404, "No private candidate is available")
         return FileResponse(path, media_type="application/x-subrip", filename=f"crowbarr-{job_id}.srt")
 

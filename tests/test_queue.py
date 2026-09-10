@@ -332,3 +332,326 @@ def test_keeping_results_across_a_model_change_does_not_requeue(tmp_path):
     kept = db.get(job["id"])
     assert kept["state"] == "unchanged", "the verdict was carried forward"
     assert kept["signature"] == signature(media, None, later)
+
+
+def test_switching_back_to_an_exact_previous_signature_restores_all_results_together(tmp_path):
+    from crowbarr.config import Settings
+    from crowbarr.library import prepare_and_restore, queue_media
+
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    first = Settings(
+        roots=[str(tmp_path)], model="small.en", settle_seconds=0, subtitle_wait_minutes=0
+    )
+    second = first.model_copy(update={"model": "medium.en"})
+    media = []
+    jobs = {}
+    for name in ("one.mkv", "two.mkv"):
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        media.append(path)
+        queue_media(path, first, db, 0)
+        with db.connect() as connection:
+            jobs[path] = connection.execute(
+                "SELECT id FROM jobs WHERE media=?", (str(path),)
+            ).fetchone()[0]
+        db.update(jobs[path], state="unchanged", stage="Audit passed")
+
+    for path in media:
+        queue_media(path, second, db, 1)
+        assert db.get(jobs[path])["state"] == "queued"
+
+    assert len(prepare_and_restore(media, first, db, 2)[2]) == 2
+    assert {db.get(jobs[path])["state"] for path in media} == {"unchanged"}
+    assert {db.get(jobs[path])["cached"] for path in media} == {None}
+
+
+def test_carry_forward_belongs_to_the_target_scan_and_survives_older_scan_completion(tmp_path):
+    db = Database(tmp_path / "queue.db")
+    db.request_carry_forward("small", "medium")
+    assert db.carried_fingerprint("small") == ("", "")
+    assert not db.finish_carry_forward("")
+    source, token = db.carried_fingerprint("medium")
+    assert source == "small"
+    assert db.finish_carry_forward(token)
+    assert db.carried_fingerprint("medium") == ("", "")
+
+
+def test_rapid_kept_changes_retain_the_original_result_fingerprint(tmp_path):
+    db = Database(tmp_path / "queue.db")
+    db.request_carry_forward("small", "medium")
+    db.request_carry_forward("medium", "large")
+    source, _ = db.carried_fingerprint("large")
+    assert source == "small"
+
+
+def test_failed_scan_does_not_discard_a_pending_keep_results_request(tmp_path):
+    from crowbarr.config import Settings
+    from crowbarr.library import scan
+
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    settings = Settings(roots=[str(tmp_path / "missing")])
+    db.request_carry_forward("old", settings.fingerprint())
+
+    assert scan(settings, db) == 0
+    source, _ = db.carried_fingerprint(settings.fingerprint())
+    assert source == "old"
+
+
+def test_successful_scan_consumes_only_its_keep_results_request(tmp_path):
+    from crowbarr.config import Settings
+    from crowbarr.library import queue_media, scan
+
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
+    before = Settings(roots=[str(tmp_path)], model="small.en", settle_seconds=0, subtitle_wait_minutes=0)
+    after = before.model_copy(update={"model": "medium.en"})
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    queue_media(media, before, db, 0)
+    with db.connect() as connection:
+        job = connection.execute("SELECT id FROM jobs WHERE media=?", (str(media),)).fetchone()[0]
+    db.update(job, state="unchanged")
+    db.request_carry_forward(before.fingerprint(), after.fingerprint())
+
+    assert scan(after, db) == 1
+    assert db.get(job)["state"] == "unchanged"
+    assert db.carried_fingerprint(after.fingerprint()) == ("", "")
+
+
+def test_exact_result_restore_does_not_replace_an_explicit_manual_run(tmp_path):
+    from crowbarr.config import Settings
+    from crowbarr.library import prepare_and_restore, queue_media
+
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
+    settings = Settings(roots=[str(tmp_path)], settle_seconds=0, subtitle_wait_minutes=0)
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    queue_media(media, settings, db, 0)
+    with db.connect() as connection:
+        job = connection.execute("SELECT id FROM jobs WHERE media=?", (str(media),)).fetchone()[0]
+    db.update(job, state="unchanged")
+    assert db.direct(job, "")
+
+    assert len(prepare_and_restore([media], settings, db, 1)[2]) == 0
+    assert db.get(job)["state"] == "queued"
+    assert db.get(job)["origin"] == "manual"
+
+
+def test_published_result_is_reused_only_while_its_output_still_matches(tmp_path):
+    import hashlib
+    import json
+
+    from crowbarr.config import Settings
+    from crowbarr.library import prepare_and_restore, queue_media
+
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"video")
+    output = tmp_path / "movie.crowbarr.en.srt"
+    output.write_bytes(b"original subtitle")
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    small = Settings(
+        roots=[str(tmp_path)], model="small.en", settle_seconds=0, subtitle_wait_minutes=0
+    )
+    medium = small.model_copy(update={"model": "medium.en"})
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    queue_media(media, small, db, 0)
+    with db.connect() as connection:
+        job = connection.execute("SELECT id FROM jobs WHERE media=?", (str(media),)).fetchone()[0]
+    db.update(job, state="completed", output=str(output), report=json.dumps({"output_sha256": digest}))
+
+    queue_media(media, medium, db, 1)
+    assert len(prepare_and_restore([media], small, db, 2)[2]) == 1
+    assert db.get(job)["state"] == "completed"
+
+    queue_media(media, medium, db, 2)
+    output.unlink()
+    assert len(prepare_and_restore([media], small, db, 3)[2]) == 0
+    assert not output.exists()
+    assert db.get(job)["state"] == "queued"
+
+    output.write_bytes(b"edited outside Crowbarr")
+    assert len(prepare_and_restore([media], small, db, 4)[2]) == 0
+    assert db.get(job)["state"] == "queued"
+
+
+def test_exact_result_restore_does_not_replace_another_output(tmp_path):
+    import hashlib
+    import json
+
+    from crowbarr.config import Settings
+    from crowbarr.library import prepare_and_restore, queue_media
+
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"video")
+    output = tmp_path / "movie.crowbarr.en.srt"
+    output.write_bytes(b"small result")
+    small_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    small = Settings(roots=[str(tmp_path)], model="small.en", settle_seconds=0, subtitle_wait_minutes=0)
+    medium = small.model_copy(update={"model": "medium.en"})
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    queue_media(media, small, db, 0)
+    with db.connect() as connection:
+        job = connection.execute("SELECT id FROM jobs WHERE media=?", (str(media),)).fetchone()[0]
+    db.update(
+        job, state="completed", output=str(output),
+        report=json.dumps({"output_sha256": small_digest}),
+    )
+
+    queue_media(media, medium, db, 1)
+    output.write_bytes(b"medium result")
+    medium_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    db.register_artifact(str(media), str(output), medium_digest, job)
+
+    assert len(prepare_and_restore([media], small, db, 2)[2]) == 0
+    assert output.read_bytes() == b"medium result"
+    assert db.get(job)["state"] == "queued"
+
+
+def test_exact_review_is_reused_only_while_its_candidate_still_matches(tmp_path):
+    import hashlib
+    import json
+
+    from crowbarr.config import Settings
+    from crowbarr.library import prepare_and_restore, queue_media
+    from crowbarr.processor import new_review_candidate_path
+
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
+    small = Settings(roots=[str(tmp_path)], model="small.en", settle_seconds=0, subtitle_wait_minutes=0)
+    medium = small.model_copy(update={"model": "medium.en"})
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    queue_media(media, small, db, 0)
+    with db.connect() as connection:
+        job = connection.execute("SELECT id FROM jobs WHERE media=?", (str(media),)).fetchone()[0]
+    small_job = db.get(job)
+    candidate = new_review_candidate_path(tmp_path, small_job)
+    candidate.parent.mkdir()
+    candidate.write_bytes(b"small review candidate")
+    digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    db.update(job, state="review", report=json.dumps({"candidate": str(candidate), "output_sha256": digest}))
+
+    queue_media(media, medium, db, 1)
+    medium_job = db.get(job)
+    medium_candidate = new_review_candidate_path(tmp_path, medium_job)
+    medium_candidate.write_bytes(b"medium review candidate")
+    medium_digest = hashlib.sha256(medium_candidate.read_bytes()).hexdigest()
+    db.update(
+        job,
+        state="review",
+        report=json.dumps({"candidate": str(medium_candidate), "output_sha256": medium_digest}),
+    )
+
+    assert candidate != medium_candidate
+    assert candidate.read_bytes() == b"small review candidate"
+    assert len(prepare_and_restore([media], small, db, 2)[2]) == 1
+    assert db.get(job)["state"] == "review"
+
+    queue_media(media, medium, db, 2)
+    candidate.write_bytes(b"changed candidate")
+    assert len(prepare_and_restore([media], small, db, 3)[2]) == 0
+    assert db.get(job)["state"] == "queued"
+
+
+def test_new_review_does_not_overwrite_a_legacy_candidate(tmp_path):
+    from crowbarr.processor import new_review_candidate_path, review_candidate_path
+
+    directory = tmp_path / "state"
+    legacy = directory / "candidates" / "7.srt"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("legacy candidate")
+    job = {
+        "id": 7,
+        "signature": "a" * 64,
+        "report": json.dumps({"candidate": str(legacy)}),
+    }
+
+    assert review_candidate_path(directory, job) == legacy
+    write_path = new_review_candidate_path(directory, job)
+    assert write_path != legacy
+    write_path.write_text("new candidate")
+    assert legacy.read_text() == "legacy candidate"
+
+
+def test_pruning_a_saved_review_removes_its_signature_candidate(tmp_path):
+    from crowbarr.processor import new_review_candidate_path
+
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    job_id = db.enqueue("show.mkv", "0" * 64, None, 0)
+    first_candidate = None
+    for index in range(6):
+        signature = f"{index:064x}"
+        with db.connect() as connection:
+            connection.execute("UPDATE jobs SET signature=? WHERE id=?", (signature, job_id))
+        job = db.get(job_id)
+        candidate = new_review_candidate_path(db.path.parent, job)
+        candidate.parent.mkdir(exist_ok=True)
+        candidate.write_text(f"candidate {index}")
+        if index == 0:
+            first_candidate = candidate
+        db.update(
+            job_id,
+            state="review",
+            report=json.dumps({"candidate": str(candidate), "output_sha256": "unused"}),
+        )
+        time.sleep(0.001)
+
+    assert first_candidate is not None and not first_candidate.exists()
+    assert len(list((db.path.parent / "candidates").iterdir())) == 5
+
+
+def test_result_digest_backfill_runs_only_once(tmp_path):
+    import hashlib
+    import json
+
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"video")
+    output = tmp_path / "movie.crowbarr.en.srt"
+    output.write_bytes(b"subtitle")
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    job = db.enqueue(str(media), "signature", None, 0)
+    db.update(job, state="completed", output=str(output), report=json.dumps({"output_sha256": digest}))
+    with db.connect() as connection:
+        connection.execute("UPDATE results SET output_sha256=NULL")
+        connection.execute("DELETE FROM meta WHERE key='result_digest_backfill_v1'")
+
+    assert db.backfill_result_digests() == 1
+    output.unlink()
+    assert db.backfill_result_digests() == 0
+
+
+def test_scan_hashes_each_signature_once(tmp_path, monkeypatch):
+    from crowbarr import library
+    from crowbarr.config import Settings
+
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    settings = Settings(roots=[str(tmp_path)], settle_seconds=0, subtitle_wait_minutes=0)
+    calls = 0
+    original = library.signature
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(library, "signature", counted)
+    assert library.scan(settings, db) == 1
+    assert calls == 1
+
+
+def test_one_unreadable_file_does_not_leave_keep_results_pending(tmp_path, monkeypatch):
+    from crowbarr import library
+    from crowbarr.config import Settings
+
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
+    settings = Settings(roots=[str(tmp_path)])
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    db.request_carry_forward("old", settings.fingerprint())
+    monkeypatch.setattr(
+        library, "prepare_media", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError())
+    )
+
+    assert library.scan(settings, db) == 0
+    assert db.carried_fingerprint(settings.fingerprint()) == ("", "")

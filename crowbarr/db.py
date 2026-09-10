@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -74,6 +75,16 @@ class Database:
                 "CREATE TABLE IF NOT EXISTS resource_usage (started REAL NOT NULL, seconds REAL NOT NULL)"
             )
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS results ("
+                " media TEXT NOT NULL, signature TEXT NOT NULL, state TEXT NOT NULL,"
+                " stage TEXT NOT NULL DEFAULT '', error TEXT, report TEXT, output TEXT,"
+                " output_sha256 TEXT, finished REAL NOT NULL,"
+                " PRIMARY KEY(media,signature))"
+            )
+            result_columns = {row[1] for row in db.execute("PRAGMA table_info(results)")}
+            if "output_sha256" not in result_columns:
+                db.execute("ALTER TABLE results ADD COLUMN output_sha256 TEXT")
             # `jobs` holds what is true now; `history` holds what happened. Keeping both
             # in one table is what made a re-queued file erase its own past.
             db.execute(
@@ -113,6 +124,11 @@ class Database:
                 db.execute("UPDATE history SET job_id=NULL WHERE job_id=?", (row["id"],))
                 db.execute("DELETE FROM jobs WHERE id=?", (row["id"],))
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_media ON jobs(media)")
+            db.execute(
+                "INSERT OR IGNORE INTO results(media,signature,state,stage,error,report,output,finished) "
+                "SELECT media,signature,state,stage,error,report,output,updated FROM jobs "
+                "WHERE state IN ('completed','unchanged','review','skipped')"
+            )
             if "generation" not in {row[1] for row in db.execute("PRAGMA table_info(provider_sync)")}:
                 db.execute("ALTER TABLE provider_sync ADD COLUMN generation TEXT NOT NULL DEFAULT ''")
 
@@ -227,6 +243,66 @@ class Database:
             )
             return row["id"]
 
+    def restore_results(self, candidates: list[tuple[str, str, str | None]]) -> set[str]:
+        """Restore exact prior verdicts together before a scan changes queue totals."""
+        restored: set[str] = set()
+        now = time.time()
+        matches = []
+        with self.connect() as db:
+            for media, signature, source in candidates:
+                saved = db.execute(
+                    "SELECT * FROM results WHERE media=? AND signature=?", (media, signature)
+                ).fetchone()
+                current_row = db.execute("SELECT * FROM jobs WHERE media=?", (media,)).fetchone()
+                if not saved or not current_row:
+                    continue
+                if (
+                    current_row["signature"] == signature
+                    or current_row["state"] == "processing"
+                    or current_row["origin"] == "manual"
+                    or current_row["directive"]
+                ):
+                    continue
+                if saved["state"] == "completed":
+                    try:
+                        output = Path(saved["output"] or "")
+                        if (
+                            not output.is_file()
+                            or not saved["output_sha256"]
+                            or hashlib.sha256(output.read_bytes()).hexdigest()
+                            != saved["output_sha256"]
+                        ):
+                            continue
+                    except (OSError, ValueError, TypeError):
+                        continue
+                if saved["state"] == "review":
+                    try:
+                        report = json.loads(saved["report"] or "{}")
+                        candidate = Path(report.get("candidate", ""))
+                        if (
+                            not candidate.is_file()
+                            or hashlib.sha256(candidate.read_bytes()).hexdigest()
+                            != report.get("output_sha256")
+                        ):
+                            continue
+                    except (OSError, ValueError, TypeError):
+                        continue
+                matches.append((dict(saved), dict(current_row), signature, source))
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for saved, current_row, signature, source in matches:
+                result = db.execute(
+                    "UPDATE jobs SET signature=?,source=?,state=?,stage=?,error=?,report=?,output=?,"
+                    "updated=?,attempts=0,cancel_requested=0,directive='',progress_current=NULL,"
+                    "progress_total=NULL,started=NULL,cached=NULL,generation=generation+1 "
+                    "WHERE id=? AND generation=? AND state<>'processing' AND origin<>'manual' AND directive=''",
+                    (signature, source, saved["state"], saved["stage"], saved["error"], saved["report"],
+                     saved["output"], now, current_row["id"], current_row["generation"]),
+                )
+                if result.rowcount:
+                    restored.add(current_row["media"])
+        return restored
+
     def restamp(self, media: str, previous: str, signature: str) -> bool:
         """Carry a settled verdict forward under new settings instead of re-running it.
 
@@ -240,6 +316,89 @@ class Database:
                     (signature, time.time(), media, previous),
                 ).rowcount
             )
+
+    def request_carry_forward(self, previous: str, target: str) -> None:
+        """Persist a settings transition until the matching scan completes."""
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key='carry_forward'").fetchone()
+            source = previous
+            if row:
+                try:
+                    pending = json.loads(row[0])
+                    if pending.get("target") == previous:
+                        source = pending["source"]
+                except (ValueError, TypeError, KeyError):
+                    pass
+            value = json.dumps({"source": source, "target": target}, sort_keys=True)
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES('carry_forward',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (value,),
+            )
+
+    def cancel_carry_forward(self) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM meta WHERE key='carry_forward'")
+
+    def carried_fingerprint(self, target: str) -> tuple[str, str]:
+        """Return (source, token) only for the scan the request belongs to."""
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key='carry_forward'").fetchone()
+        if not row:
+            return "", ""
+        try:
+            pending = json.loads(row[0])
+            if pending.get("target") == target and isinstance(pending.get("source"), str):
+                return pending["source"], row[0]
+        except (ValueError, TypeError):
+            pass
+        return "", ""
+
+    def finish_carry_forward(self, token: str) -> bool:
+        """Consume only the request this scan read, never a newer replacement."""
+        if not token:
+            return False
+        with self.connect() as db:
+            return bool(
+                db.execute(
+                    "DELETE FROM meta WHERE key='carry_forward' AND value=?", (token,)
+                ).rowcount
+            )
+
+    def backfill_result_digests(self) -> int:
+        """Index pre-upgrade outputs once, without holding a write lock during I/O."""
+        with self.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM meta WHERE key='result_digest_backfill_v1'"
+            ).fetchone():
+                return 0
+            rows = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT media,signature,report,output FROM results "
+                    "WHERE state='completed' AND output_sha256 IS NULL AND output IS NOT NULL"
+                )
+            ]
+        updates = []
+        for row in rows:
+            try:
+                expected = json.loads(row["report"] or "{}").get("output_sha256")
+                content = Path(row["output"]).read_bytes()
+                if expected and hashlib.sha256(content).hexdigest() == expected:
+                    updates.append((expected, row["media"], row["signature"]))
+            except (OSError, ValueError, TypeError):
+                continue
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany(
+                "UPDATE results SET output_sha256=? WHERE media=? AND signature=?", updates
+            )
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES('result_digest_backfill_v1',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(time.time()),),
+            )
+        return len(updates)
 
     def replace_catalog(self, provider: str, records: list[dict], generation: str = "") -> None:
         now = time.time()
@@ -386,6 +545,7 @@ class Database:
         if "stage" in values and "progress_current" not in values:
             values.update(progress_current=None, progress_total=None)
         values["updated"] = time.time()
+        stale_candidates: list[Path] = []
         with self.connect() as db:
             result = db.execute(
                 "UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?"
@@ -395,18 +555,61 @@ class Database:
             if not result.rowcount:
                 return False
             if values.get("state") in ("completed", "unchanged", "review", "failed"):
-                row = db.execute("SELECT media,state,error,output FROM jobs WHERE id=?", (job_id,)).fetchone()
+                row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
                 if row:
                     db.execute(
                         "INSERT INTO history(job_id,media,state,error,output,finished)"
                         " VALUES (?,?,?,?,?,?)",
                         (job_id, row["media"], row["state"], row["error"], row["output"], values["updated"]),
                     )
+                    if row["state"] in ("completed", "unchanged", "review"):
+                        output_sha256 = None
+                        if row["state"] == "completed" and row["output"]:
+                            try:
+                                report = json.loads(row["report"] or "{}")
+                                content = Path(row["output"]).read_bytes()
+                                digest = hashlib.sha256(content).hexdigest()
+                                if digest == report.get("output_sha256"):
+                                    output_sha256 = digest
+                            except (OSError, ValueError, TypeError):
+                                pass
+                        db.execute(
+                            "INSERT OR REPLACE INTO results"
+                            "(media,signature,state,stage,error,report,output,output_sha256,"
+                            "finished) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (row["media"], row["signature"], row["state"], row["stage"],
+                             row["error"], row["report"], row["output"], output_sha256,
+                             values["updated"]),
+                        )
+                        pruned = db.execute(
+                            "SELECT signature,report FROM results WHERE media=? ORDER BY finished DESC "
+                            "LIMIT -1 OFFSET 5",
+                            (row["media"],),
+                        ).fetchall()
+                        candidate_directory = self.path.parent / "candidates"
+                        for old in pruned:
+                            try:
+                                candidate = Path(json.loads(old["report"] or "{}").get("candidate", ""))
+                                expected = candidate_directory / f"{job_id}-{old['signature']}.srt"
+                                if candidate == expected:
+                                    stale_candidates.append(candidate)
+                            except (TypeError, ValueError):
+                                pass
+                        db.execute(
+                            "DELETE FROM results WHERE media=? AND signature NOT IN "
+                            "(SELECT signature FROM results WHERE media=? ORDER BY finished DESC LIMIT 5)",
+                            (row["media"], row["media"]),
+                        )
                     db.execute(
                         "DELETE FROM history WHERE id NOT IN "
                         "(SELECT id FROM history ORDER BY finished DESC LIMIT 5000)"
                     )
-            return True
+        for candidate in stale_candidates:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return True
 
     def recover(self, max_attempts: int = 3) -> None:
         # Called only after the service acquires the exclusive process lock.
@@ -460,10 +663,17 @@ class Database:
                 (time.time(), job_id),
             )
             if result.rowcount:
-                row = db.execute("SELECT media,error,output FROM jobs WHERE id=?", (job_id,)).fetchone()
+                row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
                 db.execute(
                     "INSERT INTO history(job_id,media,state,error,output,finished) VALUES (?,?,?,?,?,?)",
                     (job_id, row["media"], "skipped", row["error"], row["output"], time.time()),
+                )
+                db.execute(
+                    "INSERT OR REPLACE INTO results"
+                    "(media,signature,state,stage,error,report,output,output_sha256,"
+                    "finished) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (row["media"], row["signature"], "skipped", row["stage"], row["error"],
+                     row["report"], row["output"], None, time.time()),
                 )
             return bool(result.rowcount)
 

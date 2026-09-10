@@ -92,6 +92,7 @@ class Service:
         self.wait_until = None
         self.wait_total = None
         self.scan_count = 0
+        self.scan_in_progress = False
         self.resources = {}
         self.wait_reason = ""
         self.last_background_end = 0
@@ -107,6 +108,7 @@ class Service:
             self.lock_file.close()
             raise RuntimeError("Another Crowbarr service is already using this data directory") from None
         self.db.recover(self.store.get().max_attempts)
+        self.db.backfill_result_digests()
         from .audit import AUDIT_VERSION
 
         reopened = self.db.adopt_policy(AUDIT_VERSION)
@@ -154,6 +156,7 @@ class Service:
     def scanner(self):
         while not self.stop_event.is_set():
             self.scan_event.clear()
+            self.scan_in_progress = True
             try:
                 self.scan_count = scan(self.store.get(), self.db)
                 if self.stop_event.is_set():
@@ -198,6 +201,8 @@ class Service:
                             log.warning("Plex refresh failed; retrying at the next library check")
             except Exception as error:
                 self.db.notice("scan", f"Library scan failed ({type(error).__name__}); Crowbarr will retry.")
+            finally:
+                self.scan_in_progress = False
             self.scan_event.wait(self.store.get().scan_seconds)
 
     def worker(self):

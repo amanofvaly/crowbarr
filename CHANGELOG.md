@@ -71,6 +71,22 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.4
+
+- Fixed: Model changes now keep their chosen queue behavior even when an older library scan
+  is still running. Keeping finished results is stored as a versioned database request.
+- Fixed: Finished results are retained by complete input signature. Returning to the same
+  model, device, precision and audit settings restores unchanged files together without
+  running inference again. Externally changed or missing subtitle outputs are rechecked.
+  Crowbarr retains up to five audit records per file without storing subtitle bodies in
+  the database.
+- Settings show how many files a recheck affects and distinguish library synchronization
+  from an idle worker while queue totals are being reconciled.
+- Review candidates are retained per input signature, so returning to a previous model can
+  restore its review result. Existing review candidates remain available after upgrade.
+- Symbolic links and non-video extras reported by Sonarr or Radarr are ignored without
+  creating a persistent connection warning.
+
 ### 0.4.3
 
 - Fixed: choosing a speech model saved the previous one, and never offered to re-check

@@ -29,6 +29,14 @@ def test_dashboard_and_health_public_but_data_private(client):
     assert client.get("/static/vendor/bootstrap.min.css").status_code == 200
 
 
+def test_settings_explain_model_change_and_library_reconciliation(client):
+    script = client.get("/static/app.js").text
+    assert "Use for new work; keep finished results" in script
+    assert "Save and re-check${files}" in script
+    assert "Syncing libraries" in script
+    assert "Queue totals can change until this finishes" in script
+
+
 def test_settings_secrets_are_write_only_and_preserved(client, tmp_path):
     payload = {"roots": [str(tmp_path)], "sonarr": {"url": "http://sonarr:8989", "api_key": "secret-value"}}
     response = client.put("/api/settings", headers=auth(client), json=payload)
