@@ -86,7 +86,8 @@ let savedSettings,
   section = "connections",
   pageOffset = 0;
 let listQuery = "",
-  libraryProvider = "all",
+  libraryKind = "shows",
+  libraryStatus = "all",
   historyFilter = "history",
   routeRevision = 0,
   listRevision = 0,
@@ -418,23 +419,45 @@ function libraryShell() {
   return (
     heading(
       "Library",
-      "Find a movie or episode. Check its subtitles or request a fresh transcript.",
+      "Manage subtitles by title. Skip what you don’t need; keep exceptions where you do.",
       button(icon("refresh") + "Sync libraries", "scan"),
     ) +
-    `<div class="search-hero">${icon("search")}<label class="sr-only" for="library-query">Search library</label><input id="library-query" type="search" placeholder="Search titles, episodes, or file paths…" value="${esc(listQuery)}" autocomplete="off"><label class="sr-only" for="library-provider">Library source</label><select id="library-provider">${[
-      ["all", "All sources"],
-      ["sonarr", "Sonarr · TV"],
-      ["radarr", "Radarr · Movies"],
-      ["folders", "Folders"],
-    ]
-      .map(
-        ([value, label]) =>
-          `<option value="${value}" ${libraryProvider === value ? "selected" : ""}>${label}</option>`,
-      )
-      .join(
-        "",
-      )}</select></div><section class="panel"><div class="panel-header"><h2>Media library</h2><span class="hint">Audit preserves usable authored subtitles</span></div><div id="list-content" aria-live="polite"><div class="loading">Loading your library…</div></div></section>`
+    `<div class="library-tabs" aria-label="Library type">${["shows", "movies"].map(kind => button(`${kind === "shows" ? "Shows" : "Movies"} <span id="count-${kind}"></span>`, "library-kind", kind === libraryKind ? "active" : "", `data-kind="${kind}" aria-pressed="${kind === libraryKind}"`)).join("")}</div>
+    <div class="library-toolbar"><div class="library-search">${icon("search")}<label class="sr-only" for="library-query">Search library</label><input id="library-query" type="search" placeholder="Search titles or S01E02…" value="${esc(listQuery)}" autocomplete="off"></div><label class="library-filter">Show<select id="library-filter">${[["all", "All titles"], ["eligible", "With eligible files"], ["skipped", "With skipped files"]].map(([value, name]) => `<option value="${value}" ${value === libraryStatus ? "selected" : ""}>${name}</option>`).join("")}</select></label></div>
+    <div class="library-policy"><label><input type="checkbox" id="audio-policy" disabled> Skip known non-English audio</label><span class="hint">Unknown languages stay eligible. File overrides take priority over season and title rules.</span></div>
+    <div id="list-content" aria-live="polite"><div class="loading">Loading your subtitle library…</div></div>
+    <p class="hint library-queue-note">Background work follows title → season → episode within the same priority and age. Ready files run first; manual requests and new imports can take precedence.</p>`
   );
+}
+
+const openShows = new Set();
+const languageNames = new Intl.DisplayNames(["en"], { type: "language" });
+function preferenceSelect(scope, target, value, label) {
+  return `<select class="library-preference" data-scope="${scope}" data-target="${esc(target)}" aria-label="${esc(label)}">${[["auto", scope === "file" ? "Use season / title rule" : scope === "season" ? "Use title / audio rule" : "Use audio rule"], ["include", "Always include"], ["skip", "Skip"]].map(([key, text]) => `<option value="${key}" ${value === key ? "selected" : ""}>${text}</option>`).join("")}</select>`;
+}
+function libraryFileRow(file, show) {
+  const index = media.push(file) - 1;
+  const episode = file.episodes?.length ? file.episodes.map(n => `E${String(n).padStart(2, "0")}`).join("–") : "Episode";
+  const title = show ? file.episode_title || file.path.split("/").pop().replace(/\.[^.]+$/, "") : file.title;
+  const languages = file.audio_languages?.length ? file.audio_languages.map(code => {
+    try { return code === "und" ? "Unknown" : languageNames.of(code); } catch { return code; }
+  }).join(", ") : "Unknown";
+  return `<tr class="${file.skipped ? "file-skipped" : ""}"><td class="library-file"><div>${show ? `<span class="episode-number">${esc(episode)}</span>` : file.poster ? `<img class="library-poster" src="${esc(file.poster)}" alt="" loading="lazy" width="40" height="60">` : ""}<strong>${esc(title)}${!show && file.year ? `<small class="movie-year">${file.year}</small>` : ""}</strong></div><details class="file-path"><summary>File path</summary><span>${esc(file.path)}</span></details></td>
+    <td data-label="Audio"><span title="${esc(file.audio_source)}">${esc(languages)}</span></td>
+    <td data-label="Subtitles">${file.state ? badge(file.state) : '<span class="muted">Not queued</span>'}${file.job_id ? button("Details", "details", "small", `data-id="${file.job_id}"`) : ""}</td>
+    <td data-label="Processing"><span class="library-decision ${file.skipped ? "muted" : ""}">${file.skipped ? "Skipped" : "Included"}</span><small class="decision-reason">${esc(file.reason)}</small>${preferenceSelect(show ? "file" : "title", show ? file.path : file.key, show ? (file.decision_scope === "file" ? file.decision : "auto") : file.title_preference, `Processing preference for ${title}`)}</td>
+    <td class="library-file-actions"><div class="row-actions">${file.download ? `<a class="button small" href="${esc(file.download)}" download>Download subtitle</a>` : file.candidate_download ? `<a class="button small" href="${esc(file.candidate_download)}" download>Download candidate</a>` : '<span class="hint">No published subtitle</span>'}${button("Audit", "audit", "small", `data-index="${index}" ${file.skipped ? 'disabled title="Choose Always include before requesting an audit"' : ""}`)}${button("Generate", "generate", "small", `data-index="${index}" ${file.skipped ? 'disabled title="Choose Always include before generating"' : ""}`)}</div></td></tr>`;
+}
+function libraryTable(files, show) {
+  return `<div class="table-wrap library-table"><table><thead><tr><th>${show ? "Episode" : "Movie / file"}</th><th>Audio</th><th>Subtitle status</th><th>Processing rule</th><th>Actions</th></tr></thead><tbody>${files.map(f => libraryFileRow(f, show)).join("")}</tbody></table></div>`;
+}
+function libraryGroup(group) {
+  const show = group.kind === "shows";
+  const identity = `<span class="title-identity">${group.poster ? `<img class="library-poster" src="${esc(group.poster)}" alt="" loading="lazy" width="40" height="60">` : ""}<span><strong>${esc(group.title)}</strong><small>${group.year ? `${group.year} · ` : ""}${esc(group.provider === "folders" ? "Folders" : group.provider === "sonarr" ? "Sonarr" : "Radarr")} · ${group.file_count} ${show ? "episode files" : "files"} · ${group.skipped_count} skipped</small></span></span>`;
+  const preference = `<div class="title-rule"><label>${show ? "Whole show" : "Movie"}${preferenceSelect("title", group.key, group.preference, `${group.title}: ${show ? "whole show" : "movie"} processing`)}</label><span class="hint">Applies to future imports too. Specific overrides remain.</span></div>`;
+  const seasons = [...new Set(group.files.map(f => f.season))];
+  const searchOpen = listQuery.length > 1 && (group.title.toLowerCase().includes(listQuery.toLowerCase()) || /s\d+e\d+/i.test(listQuery));
+  return `<details class="library-title show-group" data-key="${esc(group.key)}" ${openShows.has(group.key) || searchOpen ? "open" : ""}><summary>${identity}<span class="show-expand">Seasons & episodes</span></summary>${preference}${seasons.map(season => `<section class="library-season"><div class="season-heading"><h3>${season === null ? "Unnumbered episodes" : season === 0 ? "Specials" : `Season ${season}`}</h3>${season !== null ? preferenceSelect("season", `${group.key}:${season}`, group.season_preferences[String(season)], `${group.title}, season ${season} processing`) : ""}</div>${libraryTable(group.files.filter(f => f.season === season), true)}</section>`).join("")}</details>`;
 }
 async function loadList(silent = false) {
   const revision = ++listRevision,
@@ -446,7 +469,7 @@ async function loadList(silent = false) {
       offset: pageOffset,
       limit: 25,
       ...(view === "library"
-        ? { provider: libraryProvider }
+        ? { kind: libraryKind, status: libraryStatus }
         : {
             state:
               view === "activity"
@@ -457,7 +480,7 @@ async function loadList(silent = false) {
           }),
     });
     const result = await api(
-      `/${view === "library" ? "media" : "jobs"}?${params}`,
+      `/${view === "library" ? "library" : "jobs"}?${params}`,
     );
     if (revision !== listRevision || view !== route || !session) return;
     total = result.total;
@@ -466,18 +489,25 @@ async function loadList(silent = false) {
       return loadList();
     }
     if (view === "library") {
-      media = result.results;
-      const libraryMarkup = media.length
-        ? `<div class="table-wrap"><table><thead><tr><th>Title / file</th><th>Source</th><th>Subtitle actions</th></tr></thead><tbody>${media.map((item, index) => `<tr><td class="title-cell"><strong>${esc(item.label !== item.path ? item.label : item.title)}</strong><small>${esc(item.path)}</small></td><td><span class="badge">${esc(item.provider === "folders" ? "Folders" : item.provider === "sonarr" ? "Sonarr" : "Radarr")}</span></td><td><div class="row-actions">${button("Audit subtitles", "audit", "small primary", `data-index="${index}"`)}${button("Generate fresh", "generate", "small", `data-index="${index}"`)}</div></td></tr>`).join("")}</tbody></table></div>${pager()}`
+      media = [];
+      for (const kind of ["shows", "movies"]) if ($(`count-${kind}`)) $(`count-${kind}`).textContent = fmt(result.counts[kind]);
+      if ($("audio-policy")) { $("audio-policy").checked = result.skip_other_audio; $("audio-policy").disabled = false; }
+      const libraryMarkup = result.results.length
+        ? (libraryKind === "shows" ? result.results.map(libraryGroup).join("") : `<section class="panel">${libraryTable(result.results.flatMap(group => group.files.map(file => ({...file, title_preference: group.preference, poster: group.poster, year: group.year}))), false)}</section>`) + pager()
         : empty(
             listQuery ? "No matching media" : "Your library is waiting",
             listQuery
-              ? "Try a shorter title, episode number, or another source."
+              ? "Try a shorter title, episode number, or switch between Shows and Movies."
               : "Connect your media managers or folders, then sync your library.",
             link("Manage libraries", "settings/connections"),
             "search",
           );
       paint("list-content", libraryMarkup);
+      // Attribute reconciliation alone does not reset a select's dirty live value.
+      // The server's selected option is authoritative, including after a failed save.
+      $("list-content").querySelectorAll(".library-preference").forEach(select => {
+        select.value = select.querySelector("option[selected]")?.value || "auto";
+      });
     } else {
       const listMarkup = result.results.length
         ? rows(result.results) + pager()
@@ -876,6 +906,9 @@ function settingsPage() {
 }
 function apiPage() {
   const endpoints = [
+    ["GET", "/api/library", "Browse movie or show groups, episode status, preferences, and subtitle downloads."],
+    ["PUT", "/api/library/preferences", "Set skip, include, or inherited rules for a title, season, or file; configure audio skipping."],
+    ["GET", "/api/jobs/{id}/subtitle", "Download a published subtitle or an authored track that passed audit."],
     [
       "GET",
       "/api/status",
@@ -1384,7 +1417,13 @@ async function perform(target) {
     id = Number(target.dataset.id);
   target.disabled = true;
   try {
-    if (action === "pause" || action === "scan") {
+    if (action === "library-kind") {
+      libraryKind = target.dataset.kind;
+      pageOffset = 0;
+      listRevision++;
+      $("page").innerHTML = libraryShell();
+      await loadList();
+    } else if (action === "pause" || action === "scan") {
       const response = await api(`/${action}`, "POST");
       if (action === "pause") {
         settings.paused = response.paused;
@@ -1476,7 +1515,7 @@ async function perform(target) {
         directive: action === "generate" ? "generate" : "",
       });
       toast(
-        `${item.label !== item.path ? item.label : item.title} was added to the priority queue. Manual requests run ahead of background work. Job #${response.job_id}.`,
+        `${item.title} was added to the priority queue. Manual requests run ahead of background work. Job #${response.job_id}.`,
         false,
         action === "generate" ? "Fresh generation queued" : "Subtitle audit queued",
       );
@@ -1601,7 +1640,29 @@ document.addEventListener("input", (event) => {
     timer = setTimeout(() => loadList(), 250);
   }
 });
-document.addEventListener("change", (event) => {
+document.addEventListener("toggle", event => {
+  if (event.target.matches?.(".show-group")) {
+    if (event.target.open) openShows.add(event.target.dataset.key);
+    else openShows.delete(event.target.dataset.key);
+  }
+}, true);
+document.addEventListener("error", event => {
+  if (event.target.matches?.(".library-poster")) event.target.hidden = true;
+}, true);
+document.addEventListener("change", async (event) => {
+  if (event.target.matches?.(".library-preference, #audio-policy")) {
+    const target = event.target;
+    target.disabled = true;
+    try {
+      const payload = target.id === "audio-policy" ? { scope: "audio", enabled: target.checked } :
+        { scope: target.dataset.scope, target: target.dataset.target, decision: target.value };
+      const response = await api("/library/preferences", "PUT", payload);
+      toast(response.message);
+      await loadList();
+      await refresh();
+    } catch (error) { toast(error.message, true); await loadList(); }
+    finally { if (target.isConnected) target.disabled = false; }
+  }
   if (event.target.closest("#settings-form") && ["device", "cpu_fallback"].includes(event.target.name)) {
     const form = $("settings-form");
     const precision = form.elements.compute_type;
@@ -1623,8 +1684,8 @@ document.addEventListener("change", (event) => {
     dirty = draftDirty = true;
     $("save-state").textContent = "Unsaved changes";
   }
-  if (event.target.id === "library-provider") {
-    libraryProvider = event.target.value;
+  if (event.target.id === "library-filter") {
+    libraryStatus = event.target.value;
     pageOffset = 0;
     loadList();
   }

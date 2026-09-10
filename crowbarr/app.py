@@ -264,7 +264,8 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         condition = " AND ".join(where) or "1"
         order = (
             "CASE WHEN state='processing' THEN 0 ELSE 1 END, "
-            f"(priority + MIN(120, CAST(({time.time()}-created)/3600 AS INTEGER))) DESC,created,id"
+            f"(priority + MIN(120, CAST(({time.time()}-created)/3600 AS INTEGER))) DESC,"
+            "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id"
             if state == "queue"
             else "updated DESC,id DESC"
         )
@@ -416,6 +417,10 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
 
     @app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(authenticate)])
     def retry(job_id: int):
+        db.refresh_library_policy()
+        job = db.get(job_id)
+        if job and job.get("library_blocked"):
+            raise HTTPException(409, "This file is skipped. Choose Always include in Library before retrying.")
         if not db.retry(job_id):
             raise HTTPException(409, "Only failed, attention-needed, or set-aside jobs can be retried")
         return {"message": "Job queued again"}
@@ -436,6 +441,12 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         current = store.get()
         if not media.is_absolute() or not db.eligible(str(media), current.providers(), healthy=False):
             raise HTTPException(422, "Select an absolute path from the managed library")
+        from .catalog import decision, preferences, rows
+
+        with db.connect() as connection:
+            record = next((r for r in rows(connection) if r["path"] == str(media)), None)
+            if record and decision(record, *preferences(connection))["skipped"]:
+                raise HTTPException(409, "This file is skipped. Choose Always include in Library to process it.")
         try:
             queue_media(media, current, db, time.time(), origin="manual")
             source = source_subtitle(media, current)
@@ -497,6 +508,156 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             "offset": offset,
             "limit": limit,
         }
+
+    @app.get("/api/library", dependencies=[Depends(authenticate)])
+    def browse_library(kind: str = "shows", q: str = "", status: str = "all",
+                       offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)):
+        from .catalog import library
+
+        if kind not in {"shows", "movies"} or status not in {"all", "skipped", "eligible"}:
+            raise HTTPException(422, "Unknown library view")
+        with db.connect() as connection:
+            return library(connection, kind, q, offset, limit, status)
+
+    @app.put("/api/library/preferences", dependencies=[Depends(authenticate)])
+    def library_preference(payload: dict):
+        from .catalog import file_targets, refresh_policy, rows
+
+        scope, target, choice = payload.get("scope"), payload.get("target"), payload.get("decision")
+        with db.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if scope == "audio":
+                if not isinstance(payload.get("enabled"), bool):
+                    raise HTTPException(422, "Choose whether to skip other audio languages")
+                connection.execute("INSERT OR REPLACE INTO meta VALUES ('skip_other_audio',?)",
+                                   ("true" if payload["enabled"] else "false",))
+            else:
+                if scope not in {"title", "season", "file"} or choice not in {"skip", "include", "auto"}:
+                    raise HTTPException(422, "Choose a title, season, or file preference")
+                records = rows(connection)
+                targets = {r["path"] if scope == "file" else r["key"] if scope == "title" else
+                           f"{r['key']}:{r['season']}" for r in records if scope != "season" or r["season"] is not None}
+                if not isinstance(target, str) or target not in targets:
+                    raise HTTPException(404, "Library item is no longer available; sync and try again")
+                affected = file_targets(next(r for r in records if r["path"] == target)) if scope == "file" else [target]
+                for rule_target in affected:
+                    if choice == "auto":
+                        connection.execute("DELETE FROM library_rules WHERE scope=? AND target=?", (scope, rule_target))
+                    else:
+                        connection.execute("INSERT OR REPLACE INTO library_rules VALUES (?,?,?)", (scope, rule_target, choice))
+            refresh_policy(connection)
+        return {"message": "Library preference saved. More specific file or season overrides still apply."}
+
+    @app.get("/api/library/artwork/{provider}/{item_id}", dependencies=[Depends(authenticate)])
+    def library_artwork(provider: str, item_id: int):
+        import httpx
+
+        if provider not in {"sonarr", "radarr"} or item_id <= 0:
+            raise HTTPException(404, "No artwork")
+        with db.connect() as connection:
+            if not connection.execute("SELECT 1 FROM managed_media WHERE provider=? AND item_id=?",
+                                      (provider, item_id)).fetchone():
+                raise HTTPException(404, "No artwork")
+        current = getattr(store.get(), provider)
+        if not current.url or not current.api_key:
+            raise HTTPException(404, "No artwork")
+        # Fixed manager endpoint: no client-supplied URL, redirects, or exposed API key.
+        try:
+            with httpx.Client(timeout=8, trust_env=False, follow_redirects=False) as client:
+                with client.stream("GET", current.url + f"/api/v3/mediacover/{item_id}/poster.jpg",
+                                   headers={"X-Api-Key": current.api_key}) as upstream:
+                    upstream.raise_for_status()
+                    mime = upstream.headers.get("content-type", "").split(";")[0]
+                    if mime not in {"image/jpeg", "image/png", "image/webp"}:
+                        raise ValueError("Not an image")
+                    content = bytearray()
+                    for chunk in upstream.iter_bytes():
+                        content.extend(chunk)
+                        if len(content) > 4 * 1024 * 1024:
+                            raise ValueError("Image too large")
+            return Response(bytes(content), media_type=mime)
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(404, "Artwork unavailable") from None
+
+    @app.get("/api/jobs/{job_id}/subtitle", dependencies=[Depends(authenticate)])
+    def download_subtitle(job_id: int):
+        import hashlib
+        import json
+        from urllib.parse import quote
+
+        from .library import allowed
+
+        job = db.get(job_id)
+        if not job:
+            raise HTTPException(404, "No published subtitle is available for this file")
+        report = json.loads(job["report"] or "{}")
+        if not job.get("output") and job["state"] == "unchanged":
+            try:
+                if report.get("audited_subtitle"):
+                    path = Path(report["audited_subtitle"])
+                    if path.is_symlink() or path.resolve().parent != (store.directory / "subtitles").resolve():
+                        raise ValueError("Invalid saved subtitle")
+                    if path.stat().st_size > 8 * 1024 * 1024:
+                        raise ValueError("Subtitle too large")
+                    content = path.read_bytes()
+                    if hashlib.sha256(content).hexdigest() != report.get("audited_subtitle_sha256"):
+                        raise ValueError("Saved subtitle changed")
+                elif report.get("selected_source_kind") == "external":
+                    from .library import subtitle_sources
+                    from .processor import current
+
+                    path = Path(report.get("selected_source", ""))
+                    if (not allowed(Path(job["media"]), store.get()) or
+                            path not in subtitle_sources(Path(job["media"]), store.get()) or
+                            path.stat().st_size > 8 * 1024 * 1024 or not current(job, store.get())):
+                        raise ValueError("Authored subtitle changed")
+                    content = path.read_bytes()
+                elif report.get("selected_source_kind") == "embedded":
+                    import re
+                    import subprocess
+
+                    from .processor import current
+
+                    match = re.fullmatch(r"embedded stream (\d+)", report.get("selected_source", ""))
+                    if not match or not allowed(Path(job["media"]), store.get()) or not current(job, store.get()):
+                        raise ValueError("Audited video changed")
+                    # Legacy unchanged audits predate saved downloads. Extract just
+                    # their selected text track; no audio decoding or inference.
+                    try:
+                        result = subprocess.run(
+                            ["ffmpeg", "-nostdin", "-v", "error", "-i", job["media"], "-map", f"0:{match[1]}",
+                             "-f", "srt", "-fs", str(8 * 1024 * 1024), "pipe:1"],
+                            capture_output=True, timeout=60, check=True,
+                        )
+                    except (OSError, subprocess.SubprocessError):
+                        raise ValueError("Cannot extract audited subtitle") from None
+                    content = result.stdout
+                    if not content or len(content) >= 8 * 1024 * 1024 or not current(job, store.get()):
+                        raise ValueError("Audited subtitle unavailable")
+                else:
+                    raise ValueError("No downloadable subtitle")
+                filename = Path(job["media"]).stem + ".audited.en.srt"
+                return Response(content, media_type="application/x-subrip", headers={
+                    "Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename)})
+            except (OSError, ValueError):
+                raise HTTPException(404, "Audited subtitle is unavailable or changed; audit the file again") from None
+        if not job.get("output"):
+            raise HTTPException(404, "No published subtitle is available for this file")
+        path = Path(job["output"])
+        media_path = Path(job["media"])
+        try:
+            if (not allowed(media_path, store.get()) or path.is_symlink() or not path.is_file()
+                    or path.resolve().parent != media_path.resolve().parent or path.suffix.lower() != ".srt"
+                    or path.stat().st_size > 8 * 1024 * 1024):
+                raise ValueError("Invalid output")
+            content = path.read_bytes()
+            if not db.owns_output(str(media_path), str(path), hashlib.sha256(content).hexdigest()):
+                raise ValueError("Output changed")
+        except (OSError, ValueError):
+            raise HTTPException(404, "Published subtitle is missing or changed; audit the file again") from None
+        return Response(content, media_type="application/x-subrip", headers={
+            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(path.name),
+        })
 
     @app.post("/api/jobs/{job_id}/promote", dependencies=[Depends(authenticate)])
     def promote(job_id: int):
@@ -630,8 +791,10 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                                 file.title,
                             ),
                         )
+                    db.save_library_metadata(connection, [file.record() for file in files])
                 for file in files:
                     queue_media(Path(file.path), current, db, time.time(), origin="import")
+                db.refresh_library_policy()
                 return {"message": f"Queued {len(files)} imported files"}
             path = payload.get("path") or payload.get("video_path")
             if path:

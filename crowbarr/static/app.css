@@ -25,6 +25,73 @@
     Helvetica,
     sans-serif;
 }
+.library-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 20px 0 16px; }
+.library-tabs .button { border: 0; border-bottom: 3px solid transparent; border-radius: 0; padding: 10px 20px; background: transparent; }
+.library-tabs .button.active, .library-tabs .button.active:hover { border-bottom-color: var(--green); color: var(--green); font-weight: 600; background: transparent; }
+.library-tabs span { margin-left: 8px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.library-toolbar { display: flex; gap: 18px; align-items: center; }
+.library-search { display: flex; align-items: center; gap: 10px; flex: 1; }
+.library-search input { width: 100%; }
+.library-filter { display: flex; align-items: center; gap: 10px; }
+.library-policy { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; padding: 14px 0 20px; }
+.library-policy label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.library-policy input { accent-color: var(--green); width: 16px; height: 16px; flex: none; }
+.library-title { background: var(--surface); border: 1px solid var(--line); margin-bottom: 12px; }
+.show-group > summary, .movie-heading { padding: 12px 16px; display: flex; align-items: center; gap: 16px; }
+.show-group > summary { cursor: pointer; list-style: none; }
+.show-group > summary::-webkit-details-marker { display: none; }
+.show-group > summary::before { content: ''; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); flex-shrink: 0; }
+.show-group[open] > summary::before { transform: rotate(45deg); }
+.show-group > summary:hover { background: var(--hover); }
+.title-identity { display: flex; gap: 14px; align-items: center; min-width: 0; flex: 1; }
+.title-identity strong { display: block; font-size: 16px; overflow-wrap: anywhere; }
+.title-identity small { display: block; color: var(--muted); margin-top: 4px; }
+.library-poster { object-fit: cover; flex-shrink: 0; background: var(--raised); }
+.show-expand { color: var(--muted); font-size: 12px; }
+.title-rule { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.title-rule label { display: flex; align-items: center; gap: 12px; font-weight: 600; white-space: nowrap; }
+.title-rule select { width: 190px; flex: none; }
+.movie-heading .title-rule { border-top: 0; padding: 0; max-width: 430px; }
+.season-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; background: var(--raised); border-top: 1px solid var(--line); }
+.library-preference { font-size: 12px; max-width: 210px; min-height: 34px; width: 100%; }
+.library-table table { width: 100%; table-layout: fixed; }
+.library-table th:first-child { width: 30%; }
+.library-table th:nth-child(2) { width: 10%; }
+.library-table th:nth-child(3) { width: 15%; }
+.library-table th:nth-child(4) { width: 22%; }
+.library-table th:last-child { width: 23%; }
+.library-table td { vertical-align: top; overflow-wrap: anywhere; }
+.library-file > div { display: flex; gap: 10px; align-items: center; }
+.show-group .library-file > div { align-items: baseline; }
+.episode-number { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.movie-year { display: block; color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 3px; }
+.file-path { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.file-path summary { cursor: pointer; }
+.file-path span { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.library-decision { display: block; font-weight: 600; }
+.decision-reason { display: block; color: var(--muted); font-size: 11px; margin: 3px 0 7px; }
+.library-file-actions .row-actions { flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
+.library-queue-note { margin-top: 16px; max-width: none; }
+@media (max-width: 900px) {
+  .library-table table, .library-table tbody { display: block; }
+  .library-table thead { display: none; }
+  .library-table tr { display: grid; grid-template-columns: 1fr 1fr; padding: 10px; border-bottom: 1px solid var(--line); gap: 8px; }
+  .library-table td { display: block; border: 0; padding: 5px; min-width: 0; }
+  .library-table td[data-label]::before { content: attr(data-label); display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+  .library-table .library-file, .library-table .library-file-actions { grid-column: 1 / -1; }
+  .library-table td[data-label="Processing"] { grid-column: 1 / -1; }
+  .movie-heading { align-items: flex-start; flex-direction: column; }
+}
+@media (max-width: 540px) {
+  .library-toolbar { flex-direction: column; align-items: stretch; gap: 10px; }
+  .library-filter select { flex: 1; }
+  .show-expand { display: none; }
+  .title-rule label { width: 100%; justify-content: space-between; }
+  .season-heading { padding: 10px; }
+  .season-heading select { max-width: 180px; }
+  .show-group > summary { padding: 12px; gap: 12px; }
+  .title-identity { gap: 10px; }
+}
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #22262b;

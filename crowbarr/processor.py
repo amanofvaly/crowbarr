@@ -392,6 +392,9 @@ def process(
         return {"state": "superseded", "error": "Media, subtitle, or processing settings changed"}
     media = Path(job["media"])
     metadata = probe(media)
+    preference = db.cache_audio(str(media), metadata)
+    if preference["skipped"]:
+        return {"state": "skipped", "stage": "Library preference", "error": preference["reason"]}
     audio_stream = choose_audio(metadata, settings)
     audio_selection = _describe_audio_choice(audio_candidates(metadata), audio_stream)
     cache = directory / "models"
@@ -659,6 +662,13 @@ def process(
                     atomic_write(directory / "reports" / f"{job['id']}.json", json.dumps(report, indent=2))
                     return publish_candidate(job, settings, directory, db, rendered, report)
                 if passed:
+                    # Preserve the audited authored track for download, including an
+                    # embedded track that otherwise disappears with the work folder.
+                    rendered = render_srt(original)
+                    download_path = directory / "subtitles" / f"{job['id']}-{job['signature']}.srt"
+                    atomic_write(download_path, rendered)
+                    report["audited_subtitle"] = str(download_path)
+                    report["audited_subtitle_sha256"] = hashlib.sha256(rendered.encode()).hexdigest()
                     output = media.with_name(f"{media.stem}.crowbarr.{settings.language}.srt")
                     if output.is_symlink():
                         raise ReviewRequired(
@@ -683,6 +693,7 @@ def process(
                     "stage": "Audit passed — unchanged" if passed else "Audit inconclusive",
                     "error": None if passed else before["reason"],
                     "report": json.dumps(report),
+                    "output": None if passed else job.get("output"),
                 }
         if original:
             if report["matched_token_ratio"] < settings.min_match_ratio:
@@ -918,7 +929,17 @@ def publish_candidate(job, settings, directory, db, rendered, report):
     # Journal intended content before the atomic rename so a crash cannot orphan a valid output.
     db.register_artifact(str(media), str(output), report["output_sha256"], job["id"])
     db.update(job["id"], stage="Publishing subtitles", output=str(output), report=json.dumps(report))
-    atomic_write(output, rendered, mode=0o644)
+    # Serialize the publication boundary with library skip decisions. The worker
+    # guard rechecks its generation and preference while holding this transaction.
+    with db.connect() as connection:
+        if db.worker_job is None:
+            connection.execute("BEGIN IMMEDIATE")
+        latest = connection.execute("SELECT library_blocked FROM jobs WHERE id=?", (job["id"],)).fetchone()
+        if latest and latest[0]:
+            from .db import StaleJob
+
+            raise StaleJob("Library preference changed before publication")
+        atomic_write(output, rendered, mode=0o644)
     if not current(job, settings):
         if output.exists() and hashlib.sha256(output.read_bytes()).hexdigest() == report["output_sha256"]:
             output.unlink()

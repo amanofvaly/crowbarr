@@ -315,10 +315,11 @@ class Service:
                     expected_generation=job["generation"],
                     state="superseded"
                     if interrupted == "Media is no longer eligible in the arr library"
+                    else "skipped" if latest.get("library_blocked")
                     else "cancelled" if interrupted == "Cancelled by user"
                     else ("retry" if retry else "failed"),
-                    stage="",
-                    error=interrupted or "Inference process exited unexpectedly; check available memory",
+                    stage="Library preference" if latest.get("library_blocked") else "",
+                    error=latest.get("library_blocked") or interrupted or "Inference process exited unexpectedly; check available memory",
                     ready=time.time() + (0 if interrupted in {"Service stopping", "Processing settings changed"} else 120),
                     origin=job.get("origin", "backlog") if interrupted in {"Service stopping", "Processing settings changed"} else "retry",
                     priority=job.get("priority", 0) if interrupted in {"Service stopping", "Processing settings changed"} else 40,

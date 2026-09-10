@@ -68,6 +68,8 @@ class Database:
                 "cached": "INTEGER",
                 "started": "REAL",
                 "generation": "INTEGER NOT NULL DEFAULT 0",
+                "library_order": "TEXT NOT NULL DEFAULT ''",
+                "library_blocked": "TEXT NOT NULL DEFAULT ''",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
@@ -75,6 +77,9 @@ class Database:
                 "CREATE TABLE IF NOT EXISTS resource_usage (started REAL NOT NULL, seconds REAL NOT NULL)"
             )
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS library_metadata (path TEXT PRIMARY KEY, metadata TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS audio_metadata (path TEXT PRIMARY KEY, revision TEXT NOT NULL, languages TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS library_rules (scope TEXT NOT NULL, target TEXT NOT NULL, decision TEXT NOT NULL, PRIMARY KEY(scope,target))")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS results ("
                 " media TEXT NOT NULL, signature TEXT NOT NULL, state TEXT NOT NULL,"
@@ -127,7 +132,7 @@ class Database:
             db.execute(
                 "INSERT OR IGNORE INTO results(media,signature,state,stage,error,report,output,finished) "
                 "SELECT media,signature,state,stage,error,report,output,updated FROM jobs "
-                "WHERE state IN ('completed','unchanged','review','skipped')"
+                "WHERE state IN ('completed','unchanged','review','skipped') AND stage<>'Library preference'"
             )
             if "generation" not in {row[1] for row in db.execute("PRAGMA table_info(provider_sync)")}:
                 db.execute("ALTER TABLE provider_sync ADD COLUMN generation TEXT NOT NULL DEFAULT ''")
@@ -141,7 +146,7 @@ class Database:
                 if self.worker_job is not None:
                     db.execute("BEGIN IMMEDIATE")
                     if not db.execute(
-                        "SELECT 1 FROM jobs WHERE id=? AND generation=?", self.worker_job
+                        "SELECT 1 FROM jobs WHERE id=? AND generation=? AND library_blocked=''", self.worker_job
                     ).fetchone():
                         raise StaleJob("Job request was replaced")
                 yield db
@@ -411,10 +416,42 @@ class Database:
                     for r in records
                 ],
             )
+            self.save_library_metadata(db, records)
             db.execute(
                 "INSERT OR REPLACE INTO provider_sync (provider,last_attempt,last_success,healthy,file_count,error,generation) VALUES (?,?,?,?,?,NULL,?)",
                 (provider, now, now, 1, len(records), generation),
             )
+
+    @staticmethod
+    def save_library_metadata(connection, records: list[dict]) -> None:
+        fields = ("season", "episodes", "episode_title", "audio_languages", "poster", "year")
+        connection.executemany(
+            "INSERT OR REPLACE INTO library_metadata VALUES (?,?)",
+            [(r["path"], json.dumps({k: r[k] for k in fields if k in r})) for r in records],
+        )
+
+    def refresh_library_policy(self) -> None:
+        from .catalog import refresh_policy
+
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            refresh_policy(connection)
+
+    def cache_audio(self, media: str, metadata: dict) -> dict:
+        from .catalog import decision, identity, language_codes, preferences
+        from .media import audio_candidates
+
+        stat = Path(media).stat()
+        languages = language_codes([c["language"] for c in audio_candidates(metadata)])
+        with self.connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO audio_metadata VALUES (?,?,?)",
+                               (media, f"{stat.st_size}:{stat.st_mtime_ns}", json.dumps(languages)))
+            row = connection.execute("SELECT * FROM managed_media WHERE path=? LIMIT 1", (media,)).fetchone()
+            saved = connection.execute("SELECT metadata FROM library_metadata WHERE path=?", (media,)).fetchone()
+            record = identity({**(dict(row) if row else {"path": media}),
+                               **(json.loads(saved[0]) if saved else {})})
+            record["audio_languages"] = languages
+            return decision(record, *preferences(connection))
 
     def sync_failed(self, provider: str, error: str) -> None:
         with self.connect() as db:
@@ -483,6 +520,9 @@ class Database:
             scope += "AND origin IN ('manual','import') "
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            from .catalog import refresh_policy
+
+            refresh_policy(db)
             if db.execute("SELECT 1 FROM jobs WHERE state='processing'").fetchone():
                 return None
             row = db.execute(
@@ -491,7 +531,8 @@ class Database:
                 # `ready` gates eligibility only. Ordering by it would let the Bazarr
                 # wait permanently demote media that arrived without a subtitle behind
                 # every file that already had one, so order by arrival instead.
-                + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,created,id LIMIT 1",
+                + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,"
+                "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id LIMIT 1",
                 parameters,
             ).fetchone()
             if not row:
@@ -625,9 +666,9 @@ class Database:
                 # attempt. Anything still 'processing' died with the service, so it must keep
                 # the attempt: a job that reliably kills the container has to fail out instead
                 # of restart-looping forever.
-                "UPDATE jobs SET state=CASE WHEN cancel_requested=1 THEN 'cancelled' "
+                "UPDATE jobs SET state=CASE WHEN library_blocked<>'' THEN 'skipped' WHEN cancel_requested=1 THEN 'cancelled' "
                 "WHEN attempts>=? THEN 'failed' ELSE 'retry' END,"
-                "stage='',ready=?,updated=?,progress_current=NULL,progress_total=NULL,started=NULL,cached=NULL,"
+                "stage=CASE WHEN library_blocked<>'' THEN 'Library preference' ELSE '' END,ready=?,updated=?,progress_current=NULL,progress_total=NULL,started=NULL,cached=NULL,"
                 "generation=generation+1,error=CASE WHEN cancel_requested=1 THEN 'Cancelled by user' "
                 "WHEN attempts>=? THEN 'Service restarted; attempt limit reached' "
                 "ELSE 'Service restarted; job will resume' END WHERE state='processing'",
@@ -813,7 +854,8 @@ class Database:
                     # dashboard shows a different "next up" than the queue will run.
                     select
                     + f"WHERE state IN {pending} "
-                    + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,created,id "
+                    + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,"
+                    "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id "
                     + "LIMIT 25"
                 )
             ]

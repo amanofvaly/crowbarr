@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PureWindowsPath
 
 import httpx
@@ -18,6 +18,12 @@ class ManagedFile:
     path: str
     remote_path: str
     title: str
+    season: int | None = None
+    episodes: list[int] = field(default_factory=list)
+    episode_title: str = ""
+    audio_languages: list[str] = field(default_factory=list)
+    poster: bool = False
+    year: int | None = None
 
     def record(self) -> dict:
         return asdict(self)
@@ -105,13 +111,18 @@ class ArrClient:
             for e in episodes
             if e.get("hasFile") and (e.get("monitored") or not self.connection.monitored_only)
         }
-        return [self._file(item, f) for f in files if f["id"] in eligible and f["id"] == file_id]
+        return [self._file(item, f, episodes) for f in files if f["id"] in eligible and f["id"] == file_id]
 
     def catalog(self) -> list[ManagedFile]:
         return self._sonarr() if self.provider == "sonarr" else self._radarr()
 
-    def _file(self, item: dict, file: dict) -> ManagedFile:
+    def _file(self, item: dict, file: dict, episodes: list[dict] | None = None) -> ManagedFile:
+        from .catalog import language_codes
+
         remote = _remote_path(item, file)
+        matched = sorted([e for e in episodes or [] if e.get("episodeFileId") == file["id"]],
+                         key=lambda e: e.get("episodeNumber", 0))
+        info = file.get("mediaInfo") or {}
         return ManagedFile(
             self.provider,
             int(file["id"]),
@@ -119,6 +130,12 @@ class ArrClient:
             str(map_path(remote, self.connection)),
             remote,
             item.get("title", ""),
+            matched[0].get("seasonNumber") if matched else file.get("seasonNumber"),
+            [e["episodeNumber"] for e in matched if "episodeNumber" in e],
+            " / ".join(e.get("title", "") for e in matched),
+            language_codes(info.get("audioLanguages") or info.get("audioLanguage") or []),
+            any(i.get("coverType") == "poster" for i in item.get("images", [])),
+            item.get("year"),
         )
 
     def _radarr(self) -> list[ManagedFile]:
@@ -140,9 +157,9 @@ class ArrClient:
             if self.connection.monitored_only and not series.get("monitored", False):
                 continue
             files = self.get_list("episodefile", seriesId=series["id"])
+            episodes = self.get_list("episode", seriesId=series["id"]) if files else []
             eligible_ids = None
             if self.connection.monitored_only and files:
-                episodes = self.get_list("episode", seriesId=series["id"])
                 eligible_ids = {
                     e["episodeFileId"]
                     for e in episodes
@@ -155,5 +172,5 @@ class ArrClient:
                 if file_id in seen or (eligible_ids is not None and file_id not in eligible_ids):
                     continue
                 seen.add(file_id)
-                result.append(self._file(series, file))
+                result.append(self._file(series, file, episodes))
         return result

@@ -64,6 +64,8 @@ def retire_stale_output(media: Path, db: Database) -> None:
     stat = media.stat()
     revision = f"{stat.st_size}:{stat.st_mtime_ns}"
     previous = db.video_revision(str(media))
+    with db.connect() as connection:
+        connection.execute("DELETE FROM audio_metadata WHERE path=? AND revision<>?", (str(media), revision))
     if previous and previous != revision:
         published = db.published(str(media))
         if published and published["output"]:
@@ -268,6 +270,7 @@ def scan_arr(settings: Settings, db: Database, client_factory=ArrClient) -> int:
         db.notice("results", f"Restored {len(restored)} exact previous results without processing.")
     else:
         db.notice("results", "")
+    db.refresh_library_policy()
     return total
 
 
@@ -321,4 +324,5 @@ def scan(settings: Settings, db: Database) -> int:
         db.notice("results", f"Restored {len(restored)} exact previous results without processing.")
     else:
         db.notice("results", "")
+    db.refresh_library_policy()
     return total
