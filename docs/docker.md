@@ -105,6 +105,14 @@ Press **Test folders** to check the paths in the box before saving. It creates a
 removes a temporary file in each folder to check write access. Subfolders can have
 different permissions. Fix any reported errors, then save changes.
 
+Changing a model or another audit setting offers two save actions. **Save and re-check**
+queues files whose exact result is not already stored. **Use for new work; keep finished
+results** changes pending and future work while retaining finished files. Returning to an
+exact model, device, precision and audit configuration restores all matching files together;
+it does not run inference again unless the media, subtitle or published output changed.
+Crowbarr retains up to five audit records per file. Missing or changed output subtitles
+are processed again, so deleting a Crowbarr subtitle remains a way to regenerate it.
+
 
 ## Docker Run
 
