@@ -99,10 +99,26 @@ class ArrConnection(Connection):
     monitored_only: bool = True
 
 
+# Every input a verdict depends on. Changing one re-checks the library, so the UI
+# reads this list rather than keeping its own copy that could drift out of step.
+FINGERPRINT_FIELDS = (
+    "language",
+    "model",
+    "device",
+    "compute_type",
+    "allow_untagged_audio",
+    "allow_untagged_subtitles",
+    "min_match_ratio",
+    "min_alignment_score",
+    "max_generated_ratio",
+    "sampled_audit",
+)
+
+
 class Settings(BaseModel):
     roots: list[str] = Field(default_factory=list, max_length=32)
     language: str = "en"
-    model: str = "small"
+    model: str = "small.en"
     device: str = "cpu"
     compute_type: str = "int8"
     cpu_threads: int = Field(default=2, ge=1, le=64)
@@ -194,7 +210,12 @@ class Settings(BaseModel):
     @field_validator("model")
     @classmethod
     def valid_model(cls, value: str) -> str:
-        if value not in {"tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"}:
+        # The .en builds are English-only and better on English audio at the same size.
+        # The multilingual names stay valid so existing installations keep working.
+        if value not in {
+            "tiny", "base", "small", "medium", "large-v3", "large-v3-turbo",
+            "tiny.en", "base.en", "small.en", "medium.en",
+        }:
             raise ValueError("Choose a supported Whisper model")
         return value
 
@@ -214,21 +235,9 @@ class Settings(BaseModel):
         """
         import hashlib
 
-        keys = (
-            "language",
-            "model",
-            "device",
-            "compute_type",
-            "allow_untagged_audio",
-            "allow_untagged_subtitles",
-            "min_match_ratio",
-            "min_alignment_score",
-            "max_generated_ratio",
-            "sampled_audit",
-        )
         return hashlib.sha256(
             json.dumps(
-                {k: getattr(self, k) for k in keys}, sort_keys=True
+                {k: getattr(self, k) for k in FINGERPRINT_FIELDS}, sort_keys=True
             ).encode()
         ).hexdigest()
 

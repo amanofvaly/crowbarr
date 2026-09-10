@@ -301,3 +301,34 @@ def test_a_changed_file_is_a_new_request_but_an_unchanged_one_keeps_waiting(tmp_
     time.sleep(0.01)
     db.enqueue("movie.mkv", "inputs-two", None, 0)          # its subtitle changed
     assert db.get(job)["created"] > first, "a changed file is a fresh request"
+
+
+def test_keeping_results_across_a_model_change_does_not_requeue(tmp_path):
+    """Changing the model re-checks everything. A user who declines that keeps their
+    verdicts, and only files whose media actually changed come back."""
+    from crowbarr.config import Settings
+    from crowbarr.db import Database
+    from crowbarr.library import queue_media, signature
+
+    media = tmp_path / "library" / "show.mkv"
+    media.parent.mkdir()
+    media.write_bytes(b"video")
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    before = Settings(roots=[str(media.parent)], settle_seconds=0, subtitle_wait_minutes=0)
+    assert queue_media(media, before, db, 0.0)
+    job = db.get(db.claim()["id"])
+    db.update(job["id"], state="unchanged", stage="")
+
+    after = before.model_copy(update={"model": "medium"})
+    assert after.fingerprint() != before.fingerprint()
+
+    # Without the carried fingerprint the settled verdict is thrown away.
+    assert queue_media(media, after, db, 1.0)
+    assert db.get(job["id"])["state"] == "queued"
+
+    db.update(job["id"], state="unchanged", stage="")
+    later = after.model_copy(update={"model": "large-v3"})
+    assert queue_media(media, later, db, 2.0, carried=after.fingerprint())
+    kept = db.get(job["id"])
+    assert kept["state"] == "unchanged", "the verdict was carried forward"
+    assert kept["signature"] == signature(media, None, later)

@@ -362,3 +362,109 @@ def test_only_an_unresolved_result_can_be_set_aside(client):
 def test_a_review_with_no_candidate_cannot_be_published(client):
     _, job = review_job(client)
     assert client.post(f"/api/jobs/{job}/approve", headers=auth(client)).status_code == 409
+
+
+def test_media_folders_are_offered_from_the_container_mounts(client):
+    """Asking someone to copy a path from another application is work Crowbarr can do."""
+    assert client.get("/api/media-folders").status_code == 401
+    found = client.get("/api/media-folders", headers=auth(client)).json()
+    assert set(found) == {"source", "paths", "folders", "mounts", "errors"}
+    assert found["source"] in {"managers", "mounts", "none"}
+    assert all(path.startswith("/") for path in found["paths"])
+
+
+def test_folder_test_checks_unsaved_paths_and_leaves_no_files(client, tmp_path):
+    folder = tmp_path / 'videos'
+    folder.mkdir()
+    before = client.app.state.store.get().roots
+    response = client.post('/api/media-folders/test', headers=auth(client), json={'roots': [str(folder)]})
+    assert response.json()['results'][0]['ok']
+    assert list(folder.iterdir()) == []
+    assert client.app.state.store.get().roots == before
+    assert client.post('/api/media-folders/test', json={'roots': [str(folder)]}).status_code == 401
+
+
+def test_folder_test_explains_invalid_missing_and_file_paths(client, tmp_path):
+    file = tmp_path / 'movie.mkv'
+    file.touch()
+    results = client.post('/api/media-folders/test', headers=auth(client), json={
+        'roots': ['relative', str(tmp_path / 'missing'), str(file)]
+    }).json()['results']
+    assert all(not row['ok'] for row in results)
+    assert 'full folder path' in results[0]['message']
+    assert 'not found' in results[1]['message']
+    assert 'This is a file' in results[2]['message']
+    assert client.post('/api/media-folders/test', headers=auth(client), json={'roots': []}).status_code == 422
+
+
+def test_folder_test_reports_write_failure(client, tmp_path, monkeypatch):
+    import tempfile
+
+    def denied(*args, **kwargs):
+        raise PermissionError('read only')
+
+    monkeypatch.setattr(tempfile, 'TemporaryFile', denied)
+    row = client.post('/api/media-folders/test', headers=auth(client), json={
+        'roots': [str(tmp_path)]
+    }).json()['results'][0]
+    assert not row['ok']
+    assert 'Cannot write' in row['message']
+
+
+def test_detection_maps_roots_and_reports_unreachable_paths(tmp_path, monkeypatch):
+    from crowbarr.arr import ArrClient
+    from crowbarr.config import Settings
+    from crowbarr.library import suggested_roots
+
+    settings = Settings(sonarr={'url': 'http://sonarr', 'api_key': 'secret', 'mappings': [
+        {'remote': '/remote/tv', 'local': str(tmp_path)}
+    ]})
+    monkeypatch.setattr(ArrClient, 'get_list', lambda *args: [
+        {'path': '/remote/tv'}, {'path': '/missing-library-for-test'}
+    ])
+    result = suggested_roots(settings)
+    assert result['paths'] == [str(tmp_path)]
+    assert result['folders'][0]['accessible']
+    assert not result['folders'][1]['accessible']
+    assert result['folders'][1]['remote'] == '/missing-library-for-test'
+
+
+def test_detection_keeps_other_provider_results_when_one_fails(tmp_path, monkeypatch):
+    from crowbarr.arr import ArrClient
+    from crowbarr.config import Settings
+    from crowbarr.library import suggested_roots
+
+    settings = Settings(sonarr={'url': 'http://sonarr', 'api_key': 'secret'},
+                        radarr={'url': 'http://radarr', 'api_key': 'secret'})
+
+    def roots(client, endpoint):
+        if client.provider == 'sonarr':
+            raise ValueError('private connection detail')
+        return [{'path': str(tmp_path)}]
+
+    monkeypatch.setattr(ArrClient, 'get_list', roots)
+    result = suggested_roots(settings)
+    assert result['paths'] == [str(tmp_path)]
+    assert 'Sonarr' in result['errors'][0]
+    assert 'private' not in result['errors'][0]
+
+
+def test_mount_detection_decodes_spaces_and_excludes_system_folders(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from crowbarr.config import Settings
+    from crowbarr.library import suggested_roots
+
+    media = tmp_path / 'TV Shows'
+    media.mkdir()
+    # Use a non-system path while keeping the test independent of host mounts.
+    original_read = Path.read_text
+    original_dir = Path.is_dir
+    monkeypatch.setattr(Path, 'read_text', lambda path, *args, **kwargs:
+                        '1 2 0:1 / /media/TV\\040Shows rw - ext4 /dev/test rw\n'
+                        '2 2 0:1 / /etc/hosts rw - ext4 /dev/test rw\n'
+                        if str(path) == '/proc/self/mountinfo' else original_read(path, *args, **kwargs))
+    monkeypatch.setattr(Path, 'is_dir', lambda path: True if str(path) == '/media/TV Shows' else original_dir(path))
+    found = suggested_roots(Settings())
+    assert found['mounts'] == ['/media/TV Shows']
+    assert found['paths'] == [], 'Shared folders are offered for selection, not assumed to contain media'

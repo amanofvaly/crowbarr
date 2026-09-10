@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -7,7 +8,45 @@ import httpx
 from .config import Connection
 
 
-def check_connection(name: str, connection: Connection) -> dict:
+def _library_paths(name: str, connection, settings) -> str:
+    """Say whether the media manager's own library paths reach Crowbarr's folders.
+
+    An empty library is the usual symptom of two containers mounting the same media
+    under different names, and it looks identical to having nothing to do. Asking the
+    manager where its libraries are turns that into a specific instruction.
+    """
+    from .arr import map_path
+    from .library import allowed
+
+    with httpx.Client(timeout=15, follow_redirects=False, trust_env=False) as client:
+        response = client.get(
+            connection.url + "/api/v3/rootfolder", headers={"X-Api-Key": connection.api_key}
+        )
+        response.raise_for_status()
+        folders = [str(item["path"]) for item in response.json() if item.get("path")]
+    unreachable = []
+    for folder in folders:
+        try:
+            local = map_path(folder, connection)
+            if local.is_dir() and allowed(local, settings):
+                continue
+        except (ValueError, OSError):
+            pass
+        unreachable.append(folder)
+    if not folders or not unreachable:
+        return ""
+    listed = ", ".join(unreachable)
+    return (
+        f" Crowbarr cannot use its library folders: {listed}. "
+        "Open Settings → Media & discovery and use Find my media folders, then Test folders. "
+        f"Current Crowbarr folders: {', '.join(settings.roots) or 'none'}. "
+        "If the same folder has a different path in Crowbarr, add a path mapping in "
+        f"Settings → Connections → {name.title()} → Path mappings."
+    )
+
+
+
+def check_connection(name: str, connection: Connection, settings=None) -> dict:
     paths = {
         "sonarr": "/api/v3/system/status",
         "radarr": "/api/v3/system/status",
@@ -24,7 +63,11 @@ def check_connection(name: str, connection: Connection) -> dict:
             ET.fromstring(response.text)
         else:
             response.json()
-    return {"ok": True, "message": f"Connected to {name.title()}"}
+    detail = ""
+    if name in ("sonarr", "radarr") and settings is not None:
+        with contextlib.suppress(Exception):
+            detail = _library_paths(name, connection, settings)
+    return {"ok": not detail, "message": f"Connected to {name.title()}.{detail}"}
 
 
 def refresh_plex(connection: Connection) -> None:

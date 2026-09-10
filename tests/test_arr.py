@@ -239,3 +239,37 @@ def test_existing_catalog_schema_migrates(tmp_path):
     assert db.snapshot()["integrations"][0]["last_success"] == 1
     db.replace_catalog("radarr", [], "current")
     assert db.snapshot()["integrations"][0]["healthy"] == 1
+
+
+def test_connection_test_names_the_mapping_a_library_needs(tmp_path):
+    """An empty library and a correct one look identical. Asking the manager where its
+    libraries are turns silence into an instruction."""
+    import httpx
+
+    from crowbarr.config import Settings
+    from crowbarr.integrations import check_connection
+
+    def handler(request):
+        if request.url.path.endswith("/system/status"):
+            return httpx.Response(200, json={"version": "4.0"})
+        return httpx.Response(200, json=[{"path": "/data/tv"}])
+
+    transport = httpx.MockTransport(handler)
+    original = httpx.Client
+
+    class Client(original):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    httpx.Client = Client
+    try:
+        settings = Settings(roots=[str(tmp_path / "tv")], sonarr={"url": "http://arr", "api_key": "k"})
+        result = check_connection("sonarr", settings.sonarr, settings)
+    finally:
+        httpx.Client = original
+
+    assert result["ok"] is False
+    assert "/data/tv" in result["message"]
+    assert "path mapping" in result["message"]
+    assert str(tmp_path / "tv") in result["message"]

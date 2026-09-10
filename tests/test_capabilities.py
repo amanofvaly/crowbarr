@@ -138,8 +138,12 @@ def test_capabilities_are_authenticated_and_in_settings(client):
     served = client.get("/api/capabilities").json()
     # The probe result is served verbatim, with on-disk model state alongside it.
     assert {key: served[key] for key in report()} == report()
+    from crowbarr.config import FINGERPRINT_FIELDS
+
+    assert served["recheck_fields"] == list(FINGERPRINT_FIELDS)
     assert served["models"] == {
         "speech": [],
+        "speech_downloads": {},
         "alignment": {"present": False, "bytes": 0, "status": "idle", "reason": ""},
     }
     assert client.get("/api/settings").json()["capabilities"]["models"] == served["models"]
@@ -195,7 +199,7 @@ const fields = [];
 for (const section of ["library", "processing", "resources", "quality"]) {
   const context = vm.createContext({
     settings, section, groups: [], heading: () => "", esc: v => String(v ?? ""),
-    $: () => ({}), status: {media_count: 1}, fmt: v => String(v),
+    $: () => ({}), status: {media_count: 1}, fmt: v => String(v), savedSettings: null,
     button: (l, a) => `<button data-action="${a}">${l}</button>`,
     document: {addEventListener: () => {}, documentElement: {dataset: {}}},
   });
@@ -225,6 +229,46 @@ console.log(JSON.stringify(fields));
         )
 
 
+def test_a_model_larger_than_the_card_cannot_be_selected():
+    """A 3 GB model will not load on a 2 GB card, so offering it only wastes a download
+    and a job. Sizes below the card's total are left alone rather than guessed at."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is needed to render the settings form")
+    script = r"""
+const fs = require("node:fs"), vm = require("node:vm");
+const source = fs.readFileSync("crowbarr/static/app.js", "utf8");
+const assert = require("node:assert/strict");
+function render(device) {
+  const context = vm.createContext({
+    settings: {device, compute_type: "int8", model: "small.en", cpu_threads: 2, roots: [],
+      cpu_fallback: true, refine_generated: false,
+      capabilities: {cpu: {available: true}, cuda: {available: true}, refinement: {available: false, reason: "no"},
+        models: {speech: ["small.en", "large-v3"], speech_downloads: {},
+          alignment: {present: false, bytes: 0, status: "idle", reason: ""}}}},
+    section: "processing", groups: [], heading: () => "", esc: v => String(v ?? ""),
+    $: () => ({}), status: {media_count: 1, resources: {vram_total_mb: 2048}},
+    fmt: v => String(v), savedSettings: null,
+    button: (l, a, s, at) => `<button data-action="${a}" ${at || ""}>${l}</button>`,
+    document: {addEventListener: () => {}, documentElement: {dataset: {}}, querySelector: () => null},
+  });
+  vm.runInContext(source.slice(source.indexOf("const field ="), source.indexOf("function apiPage()")), context);
+  return vm.runInContext("settingsPage()", context);
+}
+const gpu = render("cuda");
+assert.match(gpu, /Larger than the 2 GB GPU/);
+assert.match(gpu, /value="large-v3"[^>]*disabled/);
+assert.doesNotMatch(gpu, /value="small.en"[^>]*disabled/);
+// The same 3 GB model is fine on the CPU, where the card's size is irrelevant.
+assert.doesNotMatch(render("cpu"), /Larger than the/);
+"""
+    result = subprocess.run(
+        [node, "-e", script], cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_settings_ui_retains_unavailable_choices_and_changes_cpu_precision():
     node = shutil.which("node")
     if not node:
@@ -246,11 +290,11 @@ const context = vm.createContext({
       refinement: {available: false, reason: "Whisper word timestamps will be used instead."},
       models: {speech: ["small"], alignment: {present: true, bytes: 377487360, status: "ready", reason: ""}}}},
   section: "processing", groups: [], heading: () => "", esc: value => String(value ?? ""),
-  status: {media_count: 2218}, fmt: value => String(value),
+  status: {media_count: 2218}, fmt: value => String(value), savedSettings: null,
   button: (label, action, style, attrs) => `<button data-action="${action}" ${attrs || ""}>${label}</button>`,
   $: id => nodes[id], dirty: false, draftDirty: false,
   captureSettings: () => {context.settings.device = elements.device.value;},
-  document: {addEventListener: (name, fn) => {change = fn;}},
+  document: {addEventListener: (name, fn) => {change = fn;}, querySelector: () => null},
 });
 vm.runInContext(source.slice(source.indexOf("const field ="), source.indexOf("function apiPage()")), context);
 let html = vm.runInContext("settingsPage()", context);
@@ -271,15 +315,16 @@ context.settings.capabilities.refinement.available = true;
 html = vm.runInContext("settingsPage()", context);
 assert.doesNotMatch(html, /value="cuda" selected disabled/);
 assert.doesNotMatch(html, /name="refine_generated"[^>]*disabled/);
-assert.match(html, /alignment model is downloaded \(360 MB\)/);
+// Downloadable assets all report the same way: name, size, state.
+assert.match(html, /WhisperX alignment<\/td><td class="asset-size">360 MB<\/td>/);
+assert.match(html, /state-ready">Ready</);
 // Without the model, refinement cannot be turned on and the download is offered instead.
 context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "idle", reason: ""};
 const missing = vm.runInContext("settingsPage()", context);
 assert.match(missing, /name="refine_generated"[^>]*disabled/);
 assert.match(missing, /data-action="fetch-alignment"/);
-assert.match(missing, /Download alignment model/);
 context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "running", reason: ""};
-assert.match(vm.runInContext("settingsPage()", context), /Downloading…/);
+assert.match(vm.runInContext("settingsPage()", context), /state-busy">Downloading</);
 vm.runInContext(source.slice(source.indexOf('document.addEventListener("change"'),
   source.indexOf('document.addEventListener("submit"')), context);
 elements.device.value = "cpu";

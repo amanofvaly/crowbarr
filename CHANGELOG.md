@@ -143,6 +143,13 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.2
+
+- Media folder setup now shows paths from Sonarr/Radarr, applies saved mappings, and
+  reports folders Crowbarr cannot reach. Shared folders can be added individually.
+- Test folders checks unsaved paths for read and write access without changing media.
+  Setup instructions cover Docker, TrueNAS, native installs, and path mappings.
+
 ### 0.4.1
 
 - Audit policy 0.3.6. Repairs no longer publish overlapping cues they created, and a

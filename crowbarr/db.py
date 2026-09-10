@@ -227,6 +227,20 @@ class Database:
             )
             return row["id"]
 
+    def restamp(self, media: str, previous: str, signature: str) -> bool:
+        """Carry a settled verdict forward under new settings instead of re-running it.
+
+        Only the row that still carries the old signature is touched, so a file whose
+        media or subtitles actually changed is left for the normal re-queue.
+        """
+        with self.connect() as db:
+            return bool(
+                db.execute(
+                    "UPDATE jobs SET signature=?,updated=? WHERE media=? AND signature=?",
+                    (signature, time.time(), media, previous),
+                ).rowcount
+            )
+
     def replace_catalog(self, provider: str, records: list[dict], generation: str = "") -> None:
         now = time.time()
         with self.connect() as db:

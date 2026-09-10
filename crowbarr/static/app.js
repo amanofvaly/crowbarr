@@ -545,6 +545,103 @@ function connectionSettings() {
     })
     .join("");
 }
+const SPEECH_MODELS = [
+  ["tiny.en", "Tiny (English)", "75 MB"],
+  ["base.en", "Base (English)", "145 MB"],
+  ["small.en", "Small (English)", "480 MB"],
+  ["medium.en", "Medium (English)", "1.5 GB"],
+  ["large-v3-turbo", "Large v3 Turbo", "1.6 GB"],
+  ["large-v3", "Large v3", "3 GB"],
+];
+// Every downloadable asset is listed the same way: what it is, how big, and whether
+// it is on disk. State is never described in prose beside an unrelated control.
+function assetState(ready, entry, action) {
+  if (ready) return `<span class="state-ready">Ready</span>`;
+  if (entry?.status === "running") return `<span class="state-busy">Downloading</span>`;
+  if (entry?.status === "failed")
+    return `<span class="state-failed">${esc(entry.reason || "Download failed")}</span>`;
+  return action;
+}
+function assetTable(caption, rows, note) {
+  const body = rows
+    .map(
+      ([control, label, size, state]) =>
+        `<tr><td class="asset-pick">${control}</td><td>${esc(label)}</td><td class="asset-size">${esc(
+          size,
+        )}</td><td class="asset-state">${state}</td></tr>`,
+    )
+    .join("");
+  return `<div class="wide asset-table"><table><caption>${esc(caption)}</caption><tbody>${body}</tbody></table>${
+    note ? `<small>${esc(note)}</small>` : ""
+  }</div>`;
+}
+// Multilingual builds stay valid so existing settings keep working, but they are not
+// offered: Crowbarr is English only, and the .en build of a size is better at it.
+const LEGACY_MODELS = {
+  tiny: ["Tiny (multilingual)", "75 MB"],
+  base: ["Base (multilingual)", "145 MB"],
+  small: ["Small (multilingual)", "480 MB"],
+  medium: ["Medium (multilingual)", "1.5 GB"],
+};
+function megabytes(size) {
+  const [value, unit] = size.split(" ");
+  return unit === "GB" ? Number(value) * 1024 : Number(value);
+}
+function modelChooser(chosen, downloaded, fetching) {
+  // A model is selectable only once it is on disk, so no job ever waits on a download.
+  const listed = SPEECH_MODELS.some(([id]) => id === chosen)
+    ? SPEECH_MODELS
+    : [...SPEECH_MODELS, [chosen, ...(LEGACY_MODELS[chosen] || [chosen, ""])]];
+  // On a GPU, a model whose weights exceed the card cannot load at all. The download
+  // size understates memory use, so only a model larger than the whole card is refused.
+  const vram = settings.device === "cuda" ? status?.resources?.vram_total_mb : 0;
+  const rows = listed.map(([id, label, size]) => {
+    const ready = downloaded.has(id);
+    const toobig = Boolean(vram) && size && megabytes(size) > vram;
+    const control = `<input type="radio" name="model" value="${esc(id)}" ${
+      chosen === id ? "checked" : ""
+    } ${ready && !toobig ? "" : "disabled"} aria-label="${esc(label)}">`;
+    const action = button("Download", "fetch-model", "", `data-model="${esc(id)}"`);
+    const state = toobig
+      ? `<span class="state-failed">Larger than the ${Math.round(vram / 1024)} GB GPU</span>`
+      : assetState(ready, fetching[id], action);
+    return [control, label, size, state];
+  });
+  return assetTable("Speech model", rows, "Larger is more accurate and slower.");
+}
+function alignmentAsset(alignment, available) {
+  if (!available) return "";
+  const ready = alignment?.present === true;
+  const size = ready ? `${Math.round((alignment.bytes || 0) / 1048576)} MB` : "360 MB";
+  const action = button("Download", "fetch-alignment", "", alignment?.status === "running" ? "disabled" : "");
+  return assetTable("Refinement model", [
+    ["", "WhisperX alignment", size, assetState(ready, alignment, action)],
+  ]);
+}
+// The server owns the list of settings a verdict depends on. Changing one re-checks
+// the library, which is a decision worth offering rather than performing silently.
+function recheckFields() {
+  return settings?.capabilities?.recheck_fields || [];
+}
+function saveActions() {
+  const changed = recheckFields().some(
+    (key) => savedSettings && settings[key] !== savedSettings[key],
+  );
+  if (!changed)
+    return `<button class="button primary" type="submit">Save changes</button>`;
+  return (
+    `<button class="button primary" type="submit">Save and re-check library</button>` +
+    `<button class="button" type="submit" data-keep="true">Save, keep existing results</button>`
+  );
+}
+function refreshSaveActions() {
+  const bar = document.querySelector(".save-bar");
+  if (!bar) return;
+  captureSettings();
+  const state = $("save-state");
+  bar.innerHTML = saveActions();
+  bar.append(state);
+}
 function settingsPage() {
   const capabilities = settings.capabilities;
   const recheckCount = status?.media_count
@@ -554,26 +651,14 @@ function settingsPage() {
   const cudaAvailable = capabilities?.cuda?.available === true;
   const refinementAvailable = capabilities?.refinement?.available === true;
   const downloaded = new Set(capabilities?.models?.speech || []);
+  const fetching = capabilities?.models?.speech_downloads || {};
   const alignment = capabilities?.models?.alignment;
   const downloading = alignment?.status === "running";
-  const alignmentNote = !refinementAvailable
-    ? ""
-    : alignment?.present
-      ? ` The alignment model is downloaded (${Math.round((alignment.bytes || 0) / 1048576)} MB). Refinement runs on the CPU even when recognition uses the GPU.`
-      : downloading
-        ? " Downloading the alignment model. This page updates when it finishes."
-        : alignment?.status === "failed"
-          ? ` ${alignment.reason || "The download did not finish."} Refinement stays off until the model is downloaded.`
-          : " Refinement needs an alignment model of about 360 MB. Download it before turning this on.";
-  const alignmentAction =
-    !refinementAvailable || alignment?.present
-      ? ""
-      : `<div class="wide actions">${button(
-          downloading ? "Downloading…" : alignment?.status === "failed" ? "Try the download again" : "Download alignment model (about 360 MB)",
-          "fetch-alignment",
-          "",
-          downloading ? "disabled" : "",
-        )}</div>`;
+  // Available needs no explanation; the table shows size and state. Unavailable does.
+  const refinementHelp = refinementAvailable
+    ? "Runs on the CPU."
+    : capabilities?.refinement?.reason || "Availability could not be determined.";
+  const alignmentAction = alignmentAsset(alignment, refinementAvailable);
   const deviceHelp = [
     !cpuAvailable ? capabilities?.cpu?.reason || "CPU runtime availability could not be determined." : "",
     cudaAvailable
@@ -590,26 +675,16 @@ function settingsPage() {
   if (section === "library")
     content = settingPanel(
       "Media & discovery",
-      "Set the folders Crowbarr may read and how often it looks for new files.",
-      `<label class="wide">Media folders<textarea name="roots" rows="4" placeholder="/media/tv&#10;/media/movies">${esc(settings.roots.join("\n"))}</textarea><small>One absolute path per line. Crowbarr needs permission to write subtitles next to the videos. Folders mapped from Sonarr or Radarr are allowed too.</small></label>${numeric("scan_seconds", "Sync interval (seconds)", 10, 86400, "How often Crowbarr looks for new or changed media files.")}${numeric("settle_seconds", "File settling time (seconds)", 0, 86400, "Wait for files to stop changing before processing.")}${numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "How long to wait for Bazarr to supply a subtitle. After that, Crowbarr checks subtitles inside the video file, then writes its own.")}`,
+      status?.discovery_mode === "arr"
+        ? "Your library comes from Sonarr/Radarr. These folders tell Crowbarr where it can access the videos and write subtitles. Plex does not supply the library."
+        : "No media manager is connected, so Crowbarr scans these folders for media itself.",
+      `<label class="wide">Media folders<textarea name="roots" rows="4" placeholder="/media/tv&#10;/media/movies">${esc(settings.roots.join("\n"))}</textarea><small>Enter one folder path per line, or use Find my media folders. You can edit the paths before saving.</small></label><div class="wide actions">${button("Find my media folders", "suggest-folders")}${button("Test folders", "test-folders")}</div><div class="wide" id="folder-results" role="status" aria-live="polite"></div><details class="wide folder-help"><summary>Where do I find this path?</summary><p>Use the folder path as Crowbarr sees it. This box selects a folder; it does not share a folder with the app.</p><ul><li><strong>Docker Compose:</strong> Open Crowbarr’s compose file and look under <code>volumes</code>. For <code>/mnt/pool/TV:/tv</code>, enter <code>/tv</code>. If your library is missing, add its folder there and recreate the Crowbarr container.</li><li><strong>TrueNAS:</strong> Open Apps, select Crowbarr, then Edit. Under Storage, find your media folder and copy its Mount Path. If it is missing, add storage for that folder, choose a Mount Path such as <code>/tv</code>, allow writes, and save the app.</li><li><strong>Native install:</strong> Copy the full path of your media folder on the computer running Crowbarr, such as <code>/srv/media/tv</code>.</li></ul><p>Find uses saved Sonarr/Radarr connections and shows the paths they report. You can also find those paths in Sonarr/Radarr → Settings → Media Management → Root Folders.</p><p>If a manager uses a different path for the same folder, open <a href="#settings/connections">Settings → Connections</a>. In that manager’s Path mappings box, enter its path on the left and Crowbarr’s path on the right, for example <code>/data/tv => /tv</code>. Save, then find and test again.</p></details>${numeric("scan_seconds", "Sync interval (seconds)", 10, 86400, "How often Crowbarr looks for new or changed media files.")}${numeric("settle_seconds", "File settling time (seconds)", 0, 86400, "Wait for files to stop changing before processing.")}${numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "How long to wait for Bazarr to supply a subtitle. After that, Crowbarr checks subtitles inside the video file, then writes its own.")}`,
     );
   if (section === "processing")
     content = settingPanel(
       "Speech processing",
-      `Whisper listens to the audio and writes down what it hears. English dialogue and same-language subtitles are supported. Changing the model, device or precision re-checks ${recheckCount}.`,
-      select(
-        "model",
-        "Whisper model",
-        [
-          ["tiny", "Tiny (about 75 MB, fastest, least accurate)"],
-          ["base", "Base (about 145 MB)"],
-          ["small", "Small (about 500 MB, default)"],
-          ["medium", "Medium (about 1.5 GB)"],
-          ["large-v3", "Large v3 (about 3 GB, most accurate, slowest)"],
-          ["large-v3-turbo", "Large v3 Turbo (about 1.6 GB, close to Large v3 and much faster)"],
-        ].map(([id, label]) => [id, downloaded.has(id) ? `${label} · downloaded` : label]),
-        "Bigger models are more accurate and need more memory. A model that is not yet downloaded is fetched the first time it is used, which makes that job slower.",
-      ) +
+      `English only. Changing the model, device or precision re-checks ${recheckCount}.`,
+      modelChooser(settings.model, downloaded, fetching) +
         select("device", "Processing device", [
           ["cpu", cpuAvailable ? "CPU" : "CPU (unavailable)", !cpuAvailable],
           ["cuda", cudaAvailable ? "NVIDIA GPU · CUDA" : "NVIDIA GPU · CUDA (unavailable)", !cudaAvailable],
@@ -634,7 +709,7 @@ function settingsPage() {
           "CPU threads",
           1,
           64,
-          "How many CPU cores processing may use. Setting this above the number of cores in the machine makes jobs slower.",
+          "Used for CPU processing and for refinement. Ignored while recognition runs on the GPU. Setting it above the machine's core count makes jobs slower.",
         ) +
         check(
           "cpu_fallback",
@@ -649,7 +724,7 @@ function settingsPage() {
         check(
           "refine_generated",
           refinementAvailable ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
-          esc((capabilities?.refinement?.reason || "WhisperX availability could not be determined. Whisper word timestamps are used if refinement cannot run.") + alignmentNote),
+          esc(refinementHelp),
           !refinementAvailable || !alignment?.present,
         ) +
         alignmentAction +
@@ -725,7 +800,7 @@ function settingsPage() {
   if (section === "quality")
     content = settingPanel(
       "Audit & recovery",
-      `An authored subtitle is one written by a person, as opposed to one Crowbarr writes from the audio. These settings decide how closely an authored subtitle must match what is spoken. Changing the three match settings re-checks ${recheckCount}.`,
+      `An authored subtitle is one a person wrote. These settings decide how closely it must match what is spoken. Changing a threshold re-checks ${recheckCount}.`,
       check(
         "sampled_audit",
         "Check short samples first",
@@ -790,7 +865,7 @@ function settingsPage() {
     );
   return (
     heading("Settings", "") +
-    `<div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">${groups.map(([id, label]) => `<a href="#settings/${id}" class="nav-link ${id === section ? "active" : ""}" ${id === section ? 'aria-current="page"' : ""}>${label}</a>`).join("")}</nav><form id="settings-form" class="settings-form">${content}${section !== "appearance" ? `<div class="save-bar"><button class="button primary" type="submit">Save changes</button><span id="save-state" class="settings-status">All changes saved</span></div>` : ""}</form></div>`
+    `<div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">${groups.map(([id, label]) => `<a href="#settings/${id}" class="nav-link ${id === section ? "active" : ""}" ${id === section ? 'aria-current="page"' : ""}>${label}</a>`).join("")}</nav><form id="settings-form" class="settings-form">${content}${section !== "appearance" ? `<div class="save-bar">${saveActions()}<span id="save-state" class="settings-status">All changes saved</span></div>` : ""}</form></div>`
   );
 }
 function apiPage() {
@@ -1263,6 +1338,22 @@ async function copy(value) {
   if (!ok)
     throw new Error("Copy unavailable. Reveal the key and copy it manually.");
 }
+let modelPoll = null;
+async function pollModels() {
+  clearInterval(modelPoll);
+  modelPoll = setInterval(async () => {
+    const state = await api("/capabilities");
+    settings.capabilities = state;
+    const busy = Object.values(state.models?.speech_downloads || {}).some(
+      (entry) => entry.status === "running",
+    );
+    if (!busy) {
+      clearInterval(modelPoll);
+      modelPoll = null;
+      await navigate();
+    }
+  }, 5000);
+}
 let alignmentPoll = null;
 async function pollAlignment() {
   clearInterval(alignmentPoll);
@@ -1311,6 +1402,46 @@ async function perform(target) {
         "Fresh generation queued",
       );
       $("detail-dialog").close();
+    } else if (action === "suggest-folders" || action === "test-folders") {
+      const box = document.querySelector("#settings-form textarea[name=roots]");
+      const output = $("folder-results");
+      const value = box.value;
+      delete output.dataset.tested;
+      output.textContent = action === "suggest-folders" ? "Looking for folders using saved connections…" : "Testing folder access…";
+      try {
+        if (action === "test-folders") {
+          const roots = value.split("\n").map((line) => line.trim()).filter(Boolean);
+          if (!roots.length) {
+            output.textContent = "Enter a folder or use Find my media folders first.";
+            return;
+          }
+          const result = await api("/media-folders/test", "POST", { roots });
+          if (!output.isConnected || box.value !== value) return;
+          output.dataset.tested = "true";
+          output.innerHTML = result.results.map((row) => `<p><strong>${esc(row.path)}: ${row.ok ? "Passed" : "Needs attention"}</strong><br>${esc(row.message)}</p>`).join("") + "<p>These results apply to the paths above. Save changes when you are ready.</p>";
+        } else {
+          const found = await api("/media-folders");
+          if (!output.isConnected) return;
+          const existing = box.value.split("\n").map((line) => line.trim()).filter(Boolean);
+          box.value = [...new Set([...existing, ...found.paths])].join("\n");
+          if (found.paths.length) box.dispatchEvent(new Event("input", { bubbles: true }));
+          output.innerHTML = found.folders.map((row) => `<p><strong>${esc(row.provider === "sonarr" ? "Sonarr" : "Radarr")}</strong>: <code>${esc(row.remote)}</code>${row.path && row.path !== row.remote ? ` → <code>${esc(row.path)}</code>` : ""}<br>${row.accessible ? "Added to the box. Test folders to check write access." : `Crowbarr cannot reach this folder. Check its storage using the instructions below. If the same folder has a different path here, add a mapping in <a href="#settings/connections">Settings → Connections → ${esc(row.provider === "sonarr" ? "Sonarr" : "Radarr")} → Path mappings</a>.`}</p>`).join("") + found.errors.map((error) => `<p>${esc(error)}</p>`).join("") + (found.mounts.length ? `<p>Folders shared with Crowbarr. Choose the ones containing your videos:</p><div class="actions">${found.mounts.map((path) => button(`Add ${esc(path)}`, "add-folder", "", `data-path="${esc(path)}"`)).join("")}</div>` : "") + (!found.folders.length && !found.mounts.length ? "<p>No folders found. Enter a path using the instructions below, then test it.</p>" : "");
+        }
+      } catch (error) {
+        if (output.isConnected) output.textContent = error.message;
+      }
+    } else if (action === "add-folder") {
+      const box = document.querySelector("#settings-form textarea[name=roots]");
+      box.value = [...new Set([...box.value.split("\n").map((line) => line.trim()).filter(Boolean), target.dataset.path])].join("\n");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      target.textContent = `Added ${target.dataset.path}`;
+      target.disabled = true;
+    } else if (action === "fetch-model") {
+      const name = target.dataset.model;
+      settings.capabilities = await api(`/capabilities/model/${encodeURIComponent(name)}`, "POST");
+      toast(`Downloading ${name}.`);
+      await navigate();
+      pollModels();
     } else if (action === "fetch-alignment") {
       const response = await api("/capabilities/alignment", "POST");
       settings.capabilities = response;
@@ -1342,7 +1473,7 @@ async function perform(target) {
         `/connections/${target.dataset.name}/test`,
         "POST",
       );
-      toast(result.message || `${target.dataset.name} connection passed.`);
+      toast(result.message || `${target.dataset.name} connection passed.`, result.ok === false);
     } else if (action === "reveal") {
       $("api-key").type =
         $("api-key").type === "password" ? "text" : "password";
@@ -1439,8 +1570,12 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("input", (event) => {
   if (event.target.closest("#settings-form") && event.target.name) {
+    if (event.target.name === "roots" && $("folder-results")?.dataset.tested) {
+      $("folder-results").textContent = "Folders changed. Test again to check these paths.";
+    }
     dirty = draftDirty = true;
     $("save-state").textContent = "Unsaved changes";
+    if (recheckFields().includes(event.target.name)) refreshSaveActions();
   }
   if (["library-query", "queue-query"].includes(event.target.id)) {
     listQuery = event.target.value;
@@ -1462,6 +1597,7 @@ document.addEventListener("change", (event) => {
       $("precision-help").textContent = "Precision changed to INT8 because the CPU cannot use FP16. Save changes to apply.";
     }
     captureSettings();
+    refreshSaveActions();
     const help = settings.device === "cuda" && !settings.capabilities?.cuda?.available
       ? settings.cpu_fallback
         ? "Crowbarr is set to use a graphics card, but none is available. Processing runs on the CPU instead."
@@ -1492,7 +1628,9 @@ document.addEventListener("submit", async (event) => {
   submit.disabled = true;
   try {
     captureSettings();
-    settings = await api("/settings", "PUT", settings);
+    const body =
+      submit.dataset.keep === "true" ? { ...settings, carry_forward: true } : settings;
+    settings = await api("/settings", "PUT", body);
     savedSettings = structuredClone(settings);
     dirty = draftDirty = false;
     toast("Settings saved. Library reconciliation requested.");

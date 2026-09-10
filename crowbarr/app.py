@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from . import __version__
-from .capabilities import capabilities_for, start_alignment_download
+from .capabilities import SPEECH_MODELS, capabilities_for, start_download
 from .config import ConfigStore, Settings
 from .db import Database
 from .integrations import check_connection
@@ -335,7 +335,17 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             raise HTTPException(409, runtime["refinement"]["reason"])
         if runtime["models"]["alignment"]["present"]:
             return runtime
-        start_alignment_download(store.directory)
+        start_download(store.directory, "alignment")
+        return capabilities_for(store.directory)
+
+    @app.post("/api/capabilities/model/{name}", dependencies=[Depends(authenticate)], status_code=202)
+    def fetch_speech_model(name: str):
+        if name not in SPEECH_MODELS:
+            raise HTTPException(404, "Unknown speech model")
+        runtime = capabilities_for(store.directory)
+        if name in runtime["models"]["speech"]:
+            return runtime
+        start_download(store.directory, name)
         return capabilities_for(store.directory)
 
     @app.put("/api/settings", dependencies=[Depends(authenticate)])
@@ -346,6 +356,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                 value = payload[name]
                 if not value.get("api_key") and value.get("url"):
                     value["api_key"] = getattr(previous, name).api_key
+        carry_forward = bool(payload.pop("carry_forward", False))
         try:
             settings = Settings.model_validate({**previous.model_dump(), **payload})
         except ValidationError as error:
@@ -356,11 +367,35 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         runtime = capabilities_for(store.directory)
         if settings.device == "cuda" and previous.device != "cuda" and not runtime["cuda"]["available"]:
             raise HTTPException(422, runtime["cuda"]["reason"])
+        # A model is chosen after it is downloaded, never before. Otherwise the first
+        # job to run pays for the download and looks like it has stalled.
+        if settings.model != previous.model and settings.model not in runtime["models"]["speech"]:
+            raise HTTPException(422, f"Download the {settings.model} model before selecting it")
         if settings.discovery_fingerprint() != previous.discovery_fingerprint():
             db.invalidate_sync()
+        # Changing the model re-checks the whole library. Carrying the old fingerprint
+        # lets the next scan keep settled verdicts instead of re-running every file.
+        if carry_forward and settings.fingerprint() != previous.fingerprint():
+            (store.directory / "carry-forward").write_text(previous.fingerprint())
         store.save(settings)
         service.scan_event.set()
         return {**store.public(), "api_key": store.token, "capabilities": runtime}
+
+    @app.get("/api/media-folders", dependencies=[Depends(authenticate)])
+    def media_folders():
+        from .library import suggested_roots
+
+        return suggested_roots(store.get())
+
+    @app.post("/api/media-folders/test", dependencies=[Depends(authenticate)])
+    def test_media_folders(payload: dict):
+        from .library import check_media_folder
+
+        roots = payload.get("roots")
+        if (not isinstance(roots, list) or not roots or len(roots) > 100
+                or any(not isinstance(root, str) or len(root) > 4096 for root in roots)):
+            raise HTTPException(422, "Enter between 1 and 100 folder paths to test")
+        return {"results": [check_media_folder(root.strip()) for root in dict.fromkeys(roots)]}
 
     @app.post("/api/scan", dependencies=[Depends(authenticate)], status_code=202)
     def trigger_scan():
@@ -538,7 +573,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         if name not in {"sonarr", "radarr", "bazarr", "plex"}:
             raise HTTPException(404, "Unknown integration")
         try:
-            return check_connection(name, getattr(store.get(), name))
+            return check_connection(name, getattr(store.get(), name), store.get())
         except Exception as error:
             # Do not reflect URLs or upstream response bodies containing secrets.
             raise HTTPException(

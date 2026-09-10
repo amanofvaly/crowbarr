@@ -944,6 +944,8 @@ label small {
 .check-field input {
   height: 16px;
   width: 16px;
+  /* The label is a flex sibling, so without this a long one shrinks the box. */
+  flex-shrink: 0;
   accent-color: var(--green);
   margin-top: 2px;
 }
@@ -951,6 +953,59 @@ label small {
   display: grid;
   gap: 4px;
 }
+.asset-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.asset-table caption {
+  caption-side: top;
+  text-align: left;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding-bottom: 4px;
+}
+.asset-table td {
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.asset-table tr:last-child td {
+  border-bottom: 0;
+}
+.asset-table .asset-pick {
+  width: 26px;
+  padding-right: 6px;
+}
+.asset-table .asset-pick input {
+  height: 15px;
+  width: 15px;
+  accent-color: var(--green);
+  vertical-align: middle;
+}
+.asset-table td:nth-child(2) {
+  width: 100%;
+}
+.asset-table .asset-size,
+.asset-table .asset-state {
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-align: right;
+}
+.asset-table .asset-state button {
+  padding: 1px 8px;
+  font-size: 0.8rem;
+}
+.asset-table .state-ready {
+  color: var(--green);
+}
+.asset-table .state-failed {
+  color: var(--danger);
+}
+.asset-table small {
+  display: block;
+  margin-top: 6px;
+}
+
 .settings-layout {
   display: grid;
   grid-template-columns: 180px minmax(0, 950px);
@@ -1713,3 +1768,10 @@ dialog::backdrop {
   .save-bar { position: static; }
   .topbar .global-search { max-width: none; }
 }
+
+.folder-help { max-width: 75ch; }
+.folder-help summary { cursor: pointer; font-weight: 600; }
+.folder-help p, .folder-help ul { margin-top: 12px; }
+.folder-help li + li { margin-top: 10px; }
+#folder-results { overflow-wrap: anywhere; }
+#folder-results:empty { display: none; }

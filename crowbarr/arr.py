@@ -32,6 +32,8 @@ def map_path(remote: str, connection: ArrConnection) -> Path:
     for mapping in sorted(connection.mappings, key=lambda m: len(m.remote), reverse=True):
         prefix = mapping.remote.casefold() if windows else mapping.remote
         boundary = prefix.rstrip("/") + "/"
+        if comparison.rstrip("/") == prefix.rstrip("/"):
+            return Path(mapping.local).resolve()
         if comparison.startswith(boundary):
             relative = normalized[len(boundary) :]
             result = (Path(mapping.local) / relative).resolve()

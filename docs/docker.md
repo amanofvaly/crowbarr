@@ -40,6 +40,8 @@ services:
           create_host_path: false
       - type: bind
         source: /path/to/media        # existing library directory
+        # Using Sonarr or Radarr? Set this to the path they use, shown in their
+        # Settings under Media Management, Root Folders.
         target: /media
         bind:
           create_host_path: false
@@ -84,8 +86,25 @@ On TrueNAS, use its own GPU support instead of installing drivers on the host.
 
 Open `http://localhost:8449`, or the server's IP from another machine. Create your
 account, then add Sonarr and Radarr in Settings. Their URLs must be reachable from
-inside the container, so `localhost` will not work. Map their media paths to the
-container paths.
+inside the container, so `localhost` will not work.
+
+In Settings → Media & discovery, press **Find my media folders**. Crowbarr reads
+saved Sonarr/Radarr connections and applies their path mappings. Choose any shared
+folders containing videos. You can also enter paths by hand.
+
+For manual entry, open Crowbarr’s compose file and look under `volumes`. For
+`/mnt/pool/TV:/tv`, enter `/tv`. On TrueNAS, open Apps → Crowbarr → Edit → Storage
+and copy the media storage’s Mount Path. If the media folder is not shared yet,
+add it to Crowbarr’s storage first and restart or recreate the app.
+
+If Sonarr or Radarr uses a different path for the same folder, open **Crowbarr’s
+Settings → Connections**. In that service’s **Path mappings** box, enter its path
+on the left and Crowbarr’s path on the right, such as `/data/tv => /tv`. Save it.
+
+Press **Test folders** to check the paths in the box before saving. It creates and
+removes a temporary file in each folder to check write access. Subfolders can have
+different permissions. Fix any reported errors, then save changes.
+
 
 ## Docker Run
 

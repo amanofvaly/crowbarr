@@ -55,37 +55,48 @@ _expires = 0.0
 _variant = ""
 
 _download_lock = threading.Lock()
-_download = {"status": "idle", "reason": ""}
+_downloads: dict[str, dict] = {}
 
 
-def _fetch_worker(model_dir, language):
+def _alignment_worker(target, language):
     from whisperx.alignment import load_align_model
 
-    load_align_model(language_code=language, device="cpu", model_dir=model_dir)
+    load_align_model(language_code=language, device="cpu", model_dir=target)
 
 
-def download_state() -> dict:
+def _speech_worker(target, name):
+    from faster_whisper.utils import download_model
+
+    download_model(name, cache_dir=target)
+
+
+def download_state(name: str = "alignment") -> dict:
     with _download_lock:
-        return dict(_download)
+        return dict(_downloads.get(name, {"status": "idle", "reason": ""}))
 
 
-def start_alignment_download(directory, language: str = "en") -> bool:
-    """Fetch the alignment model once, in a child, so the web process stays light.
+def start_download(directory, name: str = "alignment") -> bool:
+    """Fetch one model in a child, so the web process never imports a runtime.
 
-    Returns False when a download is already running, so a second click is ignored
+    Returns False when that model is already downloading, so a second click is ignored
     rather than starting a competing fetch into the same directory.
     """
     from pathlib import Path as _Path
 
     with _download_lock:
-        if _download["status"] == "running":
+        if _downloads.get(name, {}).get("status") == "running":
             return False
-        _download.update(status="running", reason="")
+        _downloads[name] = {"status": "running", "reason": ""}
+
+    alignment = name == "alignment"
+    models = _Path(directory) / "models"
+    target = str(models / ("alignment" if alignment else "whisper"))
+    worker = _alignment_worker if alignment else _speech_worker
+    argument = "en" if alignment else name
 
     def run():
-        model_dir = str(_Path(directory) / "models" / "alignment")
         context = multiprocessing.get_context("spawn")
-        process = context.Process(target=_fetch_worker, args=(model_dir, language), daemon=True)
+        process = context.Process(target=worker, args=(target, argument), daemon=True)
         status, reason = "failed", "The download did not finish. Check network access and disk space."
         try:
             process.start()
@@ -103,7 +114,7 @@ def start_alignment_download(directory, language: str = "en") -> bool:
                 with contextlib.suppress(ValueError):
                     process.close()
             with _download_lock:
-                _download.update(status=status, reason=reason)
+                _downloads[name] = {"status": status, "reason": reason}
 
     threading.Thread(target=run, daemon=True).start()
     return True
@@ -145,6 +156,10 @@ def _run_probe() -> dict:
 
 # WhisperX names the English alignment model after its torchaudio pipeline bundle.
 ALIGNMENT_MODEL = "alignment/wav2vec2_fairseq_base_ls960_asr_ls960.pth"
+SPEECH_MODELS = (
+    "tiny.en", "base.en", "small.en", "medium.en", "large-v3", "large-v3-turbo",
+    "tiny", "base", "small", "medium",
+)
 
 
 def model_inventory(directory) -> dict:
@@ -164,6 +179,11 @@ def model_inventory(directory) -> dict:
     state = download_state()
     return {
         "speech": sorted(speech),
+        "speech_downloads": {
+            name: download_state(name)
+            for name in SPEECH_MODELS
+            if name not in speech and download_state(name)["status"] != "idle"
+        },
         "alignment": {
             "present": present,
             "bytes": alignment.stat().st_size if present else 0,
@@ -174,9 +194,12 @@ def model_inventory(directory) -> dict:
 
 
 def capabilities_for(directory) -> dict:
-    """Runtime probe plus which models are already on disk."""
+    """Runtime probe, which models are on disk, and what a change would re-check."""
+    from .config import FINGERPRINT_FIELDS
+
     result = runtime_capabilities()
     result["models"] = model_inventory(directory)
+    result["recheck_fields"] = list(FINGERPRINT_FIELDS)
     return result
 
 
