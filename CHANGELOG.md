@@ -71,6 +71,11 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.5
+
+- Fixed: Release packaging retries transient Hugging Face failures while downloading the
+  small speech model used to verify the installed inference dependencies.
+
 ### 0.4.4
 
 - Fixed: Model changes now keep their chosen queue behavior even when an older library scan

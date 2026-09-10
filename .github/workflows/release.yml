@@ -61,7 +61,11 @@ jobs:
           publish=false
           git fetch --tags
           if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
-            test "$(git rev-list -n 1 "$tag")" = "$GITHUB_SHA"
+            tagged_commit="$(git rev-list -n 1 "$tag")"
+            if [[ "$tagged_commit" != "$GITHUB_SHA" ]]; then
+              echo "::error::Release $tag already points to $tagged_commit; bump APPLICATION_VERSION for $GITHUB_SHA."
+              exit 1
+            fi
             publish=true
           else
             git config user.name "github-actions[bot]"
