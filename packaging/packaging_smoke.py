@@ -6,8 +6,10 @@ alignment imports fail instead of becoming an optional-refinement warning.
 """
 
 import multiprocessing
+import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -24,6 +26,27 @@ def check_imports():
     assert torch.ones(2).sum().item() == 2
 
 
+def load_smoke_model(model_class, root, sleep=time.sleep):
+    """Download the small test model with retries for transient Hub failures."""
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+    error = None
+    for delay in (0, 3, 10):
+        if delay:
+            sleep(delay)
+        try:
+            return model_class(
+                "tiny",
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=2,
+                download_root=str(root / "models"),
+            )
+        except Exception as caught:
+            error = caught
+    raise RuntimeError("Could not download the tiny model after three attempts") from error
+
+
 def process_fixture(directory, check_inference=True):
     if check_inference:
         check_imports()
@@ -37,8 +60,7 @@ def process_fixture(directory, check_inference=True):
         import numpy as np
         from faster_whisper import WhisperModel
 
-        model = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=2,
-                             download_root=str(root / "models"))
+        model = load_smoke_model(WhisperModel, root)
         audio = (0.1 * np.sin(2 * np.pi * 440 * np.arange(16000) / 16000)).astype(np.float32)
         segments, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=False)
         # Exhaust the lazy iterator to execute the encoder and decoder.

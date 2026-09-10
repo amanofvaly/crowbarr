@@ -116,3 +116,18 @@ def test_release_guard_rejects_newer_published_release(tmp_path, monkeypatch):
 
 def test_packaging_fixture_uses_real_spawned_processing():
     packaging_smoke.smoke(check_inference=False)
+
+
+def test_packaging_model_download_retries_transient_failures(tmp_path):
+    attempts = []
+
+    def model(*args, **kwargs):
+        attempts.append((args, kwargs))
+        if len(attempts) < 3:
+            raise OSError("temporary Hub failure")
+        return "loaded"
+
+    delays = []
+    assert packaging_smoke.load_smoke_model(model, tmp_path, delays.append) == "loaded"
+    assert delays == [3, 10]
+    assert len(attempts) == 3
