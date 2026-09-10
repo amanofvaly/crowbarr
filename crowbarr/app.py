@@ -139,6 +139,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                 "wait_reason": service.wait_reason,
                 "wait_until": service.wait_until,
                 "wait_total": service.wait_total,
+                "background_budget": db.background_budget(store.get().background_budget_minutes),
                 "version": __version__,
                 "audit_policy_version": AUDIT_POLICY_VERSION,
                 "paused": store.get().paused,

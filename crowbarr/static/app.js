@@ -214,6 +214,19 @@ function cooldownMarkup() {
   const done = Math.min(100, Math.max(0, ((total - left) / total) * 100));
   return `<div class="cooldown"><div class="progress-label"><span data-countdown="${until}" data-total="${total}">Resuming in ${Math.ceil(left)}s</span></div><div class="bar"><span data-fill style="width:${done}%"></span></div></div>`;
 }
+function budgetText(includeResume = true) {
+  const budget = status?.background_budget;
+  if (!budget) return "Unavailable";
+  const used = Math.min(budget.used_seconds, budget.limit_seconds) / 60;
+  const limit = budget.limit_seconds / 60;
+  const resume = includeResume && budget.resume_at
+    ? ` Background work can resume around ${new Date(budget.resume_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+    : "";
+  return `${used.toFixed(used < 10 ? 1 : 0)} of ${limit} minutes used in the rolling hour.${resume}`;
+}
+function budgetMarkup() {
+  return `<p class="progress-context">${esc(budgetText())}</p>`;
+}
 function progressMarkup(job, compact = false) {
   const measured =
     Number.isFinite(job.progress_current) && job.progress_total > 0;
@@ -262,7 +275,7 @@ function activeJob() {
   if (!job && status?.scan_in_progress)
     return `<div class="worker-band idle">${icon("refresh")}<div class="idle-body"><strong>Syncing libraries</strong><span>Crowbarr is checking which files need work. Queue totals can change until this finishes.</span></div></div>`;
   if (!job)
-    return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Worker idle"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${cooldownMarkup()}</div></div>`;
+    return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Worker idle"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${status?.wait_reason === "Hourly background budget reached" ? budgetMarkup() : cooldownMarkup()}</div></div>`;
   return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library sweep")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
 }
 
@@ -321,7 +334,7 @@ function systemStrip() {
             : "Configured";
       return `<a class="system-service" href="#settings/connections" title="${esc(state)}"><span class="status-dot ${!connected ? "neutral" : !sync?.healthy ? "warning" : ""}" aria-hidden="true"></span>${name[0].toUpperCase() + name.slice(1)}<span class="sr-only">: ${esc(state)}</span></a>`;
     })
-    .join("")}<a href="#settings/resources">Resources</a></div>${status?.wait_reason ? `<p class="system-wait">${esc(status.wait_reason)}</p>` : ""}`;
+    .join("")}<span class="system-value"><span>Background budget:</span> ${esc(budgetText(false))}</span><a href="#settings/resources">Resources</a></div>${status?.wait_reason ? `<p class="system-wait">${esc(status.wait_reason)}</p>` : ""}`;
 }
 function dashboard() {
   const counts = status?.counts || {};
@@ -1012,6 +1025,7 @@ function dashboardKey() {
   return JSON.stringify([
     status?.paused,
     status?.wait_reason,
+    status?.background_budget,
     status?.media_count,
     status?.last_scan,
     status?.audit_policy_version,
@@ -1630,6 +1644,11 @@ document.addEventListener("submit", async (event) => {
   submit.disabled = true;
   try {
     captureSettings();
+    const recheckChanged = recheckFields().some(
+      (key) => savedSettings && settings[key] !== savedSettings[key],
+    );
+    const budgetChanged =
+      savedSettings && settings.background_budget_minutes !== savedSettings.background_budget_minutes;
     const body =
       submit.dataset.keep === "true" ? { ...settings, carry_forward: true } : settings;
     settings = await api("/settings", "PUT", body);
@@ -1638,7 +1657,11 @@ document.addEventListener("submit", async (event) => {
     toast(
       submit.dataset.keep === "true"
         ? "Settings saved. Finished results will be kept; pending and changed files use the new settings."
-        : "Settings saved. Crowbarr will re-check the library with the new settings.",
+        : recheckChanged
+          ? "Settings saved. Crowbarr will re-check the library with the new settings."
+          : budgetChanged
+            ? `Processing budget saved. Background work may run for ${settings.background_budget_minutes} minutes in each rolling hour.`
+            : "Settings saved.",
     );
     await navigate();
   } catch (error) {

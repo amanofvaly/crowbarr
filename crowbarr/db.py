@@ -724,6 +724,41 @@ class Database:
                 (now, now - 3600),
             ).fetchone()[0]
 
+    def background_budget(self, minutes: int) -> dict:
+        """Describe rolling-hour background use and when a reached limit clears."""
+        now = time.time()
+        with self.connect() as db:
+            intervals = [
+                (row["started"], row["started"] + row["seconds"])
+                for row in db.execute(
+                    "SELECT started,seconds FROM resource_usage WHERE started+seconds>?",
+                    (now - 3600,),
+                )
+            ]
+
+        def used(at: float) -> float:
+            window_start = at - 3600
+            return sum(max(0, min(end, at) - max(start, window_start)) for start, end in intervals)
+
+        limit = minutes * 60
+        consumed = used(now)
+        resume_at = None
+        if consumed >= limit and intervals:
+            low, high = now, now + 3601
+            for _ in range(32):
+                middle = (low + high) / 2
+                if used(middle) >= limit:
+                    low = middle
+                else:
+                    high = middle
+            resume_at = max(now + 1, high)
+        return {
+            "used_seconds": consumed,
+            "limit_seconds": limit,
+            "remaining_seconds": max(0, limit - consumed),
+            "resume_at": resume_at,
+        }
+
     def adopt_policy(self, policy: str) -> int:
         """Re-open unresolved work when the installed decision policy changes.
 

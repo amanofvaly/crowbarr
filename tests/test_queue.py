@@ -619,6 +619,30 @@ def test_result_digest_backfill_runs_only_once(tmp_path):
     assert db.backfill_result_digests() == 0
 
 
+def test_background_budget_reports_rolling_use_and_resume_time(tmp_path, monkeypatch):
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    monkeypatch.setattr(time, "time", lambda: 10_000)
+    db.record_usage(6_500, 3_000)
+
+    budget = db.background_budget(50)
+
+    assert budget["used_seconds"] == 3_000
+    assert budget["remaining_seconds"] == 0
+    assert 10_000 < budget["resume_at"] <= 10_101
+
+
+def test_background_budget_has_no_resume_time_below_the_limit(tmp_path, monkeypatch):
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    monkeypatch.setattr(time, "time", lambda: 10_000)
+    db.record_usage(9_400, 300)
+
+    budget = db.background_budget(50)
+
+    assert budget["used_seconds"] == 300
+    assert budget["remaining_seconds"] == 2_700
+    assert budget["resume_at"] is None
+
+
 def test_scan_hashes_each_signature_once(tmp_path, monkeypatch):
     from crowbarr import library
     from crowbarr.config import Settings

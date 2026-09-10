@@ -75,6 +75,9 @@ re-audits anything.
 
 - Fixed: Release packaging retries transient Hugging Face failures while downloading the
   small speech model used to verify the installed inference dependencies.
+- The dashboard shows background processing used in the rolling hour and estimates when
+  work can resume after reaching the limit. Budget-only saves no longer claim that the
+  library will be rechecked.
 
 ### 0.4.4
 
