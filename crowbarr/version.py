@@ -12,5 +12,5 @@ require an audit policy increase.
 
 """
 
-APPLICATION_VERSION = "0.4.5"
+APPLICATION_VERSION = "0.4.6"
 AUDIT_POLICY_VERSION = "0.3.6"
