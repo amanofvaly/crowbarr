@@ -431,6 +431,7 @@ function libraryShell() {
 }
 
 const openShows = new Set();
+const openSeasons = new Set();
 const languageNames = new Intl.DisplayNames(["en"], { type: "language" });
 function preferenceSelect(scope, target, value, label) {
   return `<select class="library-preference" data-scope="${scope}" data-target="${esc(target)}" aria-label="${esc(label)}">${[["auto", scope === "file" ? "Use season / title rule" : scope === "season" ? "Use title / audio rule" : "Use audio rule"], ["include", "Always include"], ["skip", "Skip"]].map(([key, text]) => `<option value="${key}" ${value === key ? "selected" : ""}>${text}</option>`).join("")}</select>`;
@@ -454,10 +455,16 @@ function libraryTable(files, show) {
 function libraryGroup(group) {
   const show = group.kind === "shows";
   const identity = `<span class="title-identity">${group.poster ? `<img class="library-poster" src="${esc(group.poster)}" alt="" loading="lazy" width="40" height="60">` : ""}<span><strong>${esc(group.title)}</strong><small>${group.year ? `${group.year} · ` : ""}${esc(group.provider === "folders" ? "Folders" : group.provider === "sonarr" ? "Sonarr" : "Radarr")} · ${group.file_count} ${show ? "episode files" : "files"} · ${group.skipped_count} skipped</small></span></span>`;
-  const preference = `<div class="title-rule"><label>${show ? "Whole show" : "Movie"}${preferenceSelect("title", group.key, group.preference, `${group.title}: ${show ? "whole show" : "movie"} processing`)}</label><span class="hint">Applies to future imports too. Specific overrides remain.</span></div>`;
   const seasons = [...new Set(group.files.map(f => f.season))];
   const searchOpen = listQuery.length > 1 && (group.title.toLowerCase().includes(listQuery.toLowerCase()) || /s\d+e\d+/i.test(listQuery));
-  return `<details class="library-title show-group" data-key="${esc(group.key)}" ${openShows.has(group.key) || searchOpen ? "open" : ""}><summary>${identity}<span class="show-expand">Seasons & episodes</span></summary>${preference}${seasons.map(season => `<section class="library-season"><div class="season-heading"><h3>${season === null ? "Unnumbered episodes" : season === 0 ? "Specials" : `Season ${season}`}</h3>${season !== null ? preferenceSelect("season", `${group.key}:${season}`, group.season_preferences[String(season)], `${group.title}, season ${season} processing`) : ""}</div>${libraryTable(group.files.filter(f => f.season === season), true)}</section>`).join("")}</details>`;
+  const expanded = openShows.has(group.key) || searchOpen;
+  return `<section class="library-title show-group ${expanded ? "expanded" : ""}" data-key="${esc(group.key)}"><div class="show-heading"><button type="button" class="show-toggle" data-action="show-toggle" aria-expanded="${expanded}">${identity}<span class="show-expand">${expanded ? "Hide seasons" : "Seasons & episodes"}</span></button><label class="show-rule"><span>Whole show</span>${preferenceSelect("title", group.key, group.preference, `${group.title}: whole show processing`)}</label></div><div class="show-content" ${expanded ? "" : "hidden"}>${seasons.map(season => {
+    const seasonKey = `${group.key}:${season ?? "none"}`;
+    const seasonOpen = openSeasons.has(seasonKey) || searchOpen;
+    const seasonName = season === null ? "Unnumbered episodes" : season === 0 ? "Specials" : `Season ${season}`;
+    const files = group.files.filter(f => f.season === season);
+    return `<section class="library-season ${seasonOpen ? "expanded" : ""}" data-season-key="${esc(seasonKey)}"><div class="season-heading"><button type="button" class="season-toggle" data-action="season-toggle" aria-expanded="${seasonOpen}"><span>${seasonName}</span><small>${files.length} episode ${files.length === 1 ? "file" : "files"}</small></button>${season !== null ? preferenceSelect("season", `${group.key}:${season}`, group.season_preferences[String(season)], `${group.title}, season ${season} processing`) : ""}</div><div class="season-content" ${seasonOpen ? "" : "hidden"}>${libraryTable(files, true)}</div></section>`;
+  }).join("")}</div></section>`;
 }
 async function loadList(silent = false) {
   const revision = ++listRevision,
@@ -1423,6 +1430,25 @@ async function perform(target) {
       listRevision++;
       $("page").innerHTML = libraryShell();
       await loadList();
+    } else if (action === "show-toggle") {
+      const group = target.closest(".show-group");
+      const content = group.querySelector(".show-content");
+      const expanded = target.getAttribute("aria-expanded") !== "true";
+      target.setAttribute("aria-expanded", String(expanded));
+      target.querySelector(".show-expand").textContent = expanded ? "Hide episodes" : "Seasons & episodes";
+      content.hidden = !expanded;
+      group.classList.toggle("expanded", expanded);
+      if (expanded) openShows.add(group.dataset.key);
+      else openShows.delete(group.dataset.key);
+    } else if (action === "season-toggle") {
+      const season = target.closest(".library-season");
+      const content = season.querySelector(".season-content");
+      const expanded = target.getAttribute("aria-expanded") !== "true";
+      target.setAttribute("aria-expanded", String(expanded));
+      content.hidden = !expanded;
+      season.classList.toggle("expanded", expanded);
+      if (expanded) openSeasons.add(season.dataset.seasonKey);
+      else openSeasons.delete(season.dataset.seasonKey);
     } else if (action === "pause" || action === "scan") {
       const response = await api(`/${action}`, "POST");
       if (action === "pause") {
@@ -1640,12 +1666,6 @@ document.addEventListener("input", (event) => {
     timer = setTimeout(() => loadList(), 250);
   }
 });
-document.addEventListener("toggle", event => {
-  if (event.target.matches?.(".show-group")) {
-    if (event.target.open) openShows.add(event.target.dataset.key);
-    else openShows.delete(event.target.dataset.key);
-  }
-}, true);
 document.addEventListener("error", event => {
   if (event.target.matches?.(".library-poster")) event.target.hidden = true;
 }, true);

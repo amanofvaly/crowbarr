@@ -37,12 +37,13 @@
 .library-policy label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .library-policy input { accent-color: var(--green); width: 16px; height: 16px; flex: none; }
 .library-title { background: var(--surface); border: 1px solid var(--line); margin-bottom: 12px; }
-.show-group > summary, .movie-heading { padding: 12px 16px; display: flex; align-items: center; gap: 16px; }
-.show-group > summary { cursor: pointer; list-style: none; }
-.show-group > summary::-webkit-details-marker { display: none; }
-.show-group > summary::before { content: ''; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); flex-shrink: 0; }
-.show-group[open] > summary::before { transform: rotate(45deg); }
-.show-group > summary:hover { background: var(--hover); }
+.show-heading, .movie-heading { padding: 12px 16px; display: flex; align-items: center; gap: 16px; }
+.show-toggle { display: flex; align-items: center; gap: 14px; flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
+.show-toggle::before { content: ''; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); flex-shrink: 0; }
+.show-group.expanded .show-toggle::before { transform: rotate(45deg); }
+.show-heading:hover { background: var(--hover); }
+.show-rule { display: flex; align-items: center; gap: 10px; flex: none; font-weight: 600; }
+.show-rule .library-preference { width: 190px; }
 .title-identity { display: flex; gap: 14px; align-items: center; min-width: 0; flex: 1; }
 .title-identity strong { display: block; font-size: 16px; overflow-wrap: anywhere; }
 .title-identity small { display: block; color: var(--muted); margin-top: 4px; }
@@ -53,6 +54,11 @@
 .title-rule select { width: 190px; flex: none; }
 .movie-heading .title-rule { border-top: 0; padding: 0; max-width: 430px; }
 .season-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; background: var(--raised); border-top: 1px solid var(--line); }
+.season-toggle { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font-weight: 600; text-align: left; }
+.season-toggle::before { content: ''; width: 7px; height: 7px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); flex: none; }
+.library-season.expanded .season-toggle::before { transform: rotate(45deg); }
+.season-toggle small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.season-toggle:hover span { text-decoration: underline; text-underline-offset: 3px; }
 .library-preference { font-size: 12px; max-width: 210px; min-height: 34px; width: 100%; }
 .library-table table { width: 100%; table-layout: fixed; }
 .library-table th:first-child { width: 30%; }
@@ -89,7 +95,10 @@
   .title-rule label { width: 100%; justify-content: space-between; }
   .season-heading { padding: 10px; }
   .season-heading select { max-width: 180px; }
-  .show-group > summary { padding: 12px; gap: 12px; }
+  .show-heading { padding: 12px; flex-wrap: wrap; gap: 10px; }
+  .show-toggle { width: 100%; flex-basis: 100%; }
+  .show-rule { width: 100%; justify-content: space-between; padding-left: 22px; }
+  .show-rule .library-preference { max-width: 180px; }
   .title-identity { gap: 10px; }
 }
 :root[data-theme="dark"] {
