@@ -71,6 +71,17 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.6
+
+- Library browsing now separates Shows and Movies. Shows expand into season and episode
+  tables, with compact artwork supplied by Sonarr or Radarr.
+- Processing preferences can skip or include a movie, show, season, or episode. Known
+  non-English audio is skipped by default, unknown language remains eligible, and more
+  specific choices override inherited rules. Title and episode rules continue to apply
+  after future imports and file upgrades.
+- Fixed: a recovered library scan could leave its old failure notice on the dashboard.
+  Scan failures now retain their underlying exception and traceback in server logs.
+
 ### 0.4.5
 
 - Fixed: Release packaging retries transient Hugging Face failures while downloading the

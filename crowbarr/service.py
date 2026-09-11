@@ -159,6 +159,9 @@ class Service:
             self.scan_in_progress = True
             try:
                 self.scan_count = scan(self.store.get(), self.db)
+                # A manager-backed scan used to leave the last top-level failure on
+                # the dashboard forever, even after later reconciliations succeeded.
+                self.db.notice("scan", "")
                 if self.stop_event.is_set():
                     break
                 self.db.prune()
@@ -200,6 +203,10 @@ class Service:
                             # Durable notice is retried by the next reconciliation, including after restarts.
                             log.warning("Plex refresh failed; retrying at the next library check")
             except Exception as error:
+                # The dashboard stays deliberately terse because exception messages
+                # can contain media paths or upstream details. Server logs retain the
+                # traceback and concrete SQLite reason needed to diagnose a repeat.
+                log.exception("Library scan failed; Crowbarr will retry")
                 self.db.notice("scan", f"Library scan failed ({type(error).__name__}); Crowbarr will retry.")
             finally:
                 self.scan_in_progress = False

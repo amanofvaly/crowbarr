@@ -1,5 +1,6 @@
 import fcntl
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -12,6 +13,40 @@ from crowbarr import inference, processor, service
 from crowbarr.config import ConfigStore, Settings
 from crowbarr.db import Database, StaleJob
 from crowbarr.subtitles import Word
+
+
+def test_scan_failure_is_logged_and_later_success_clears_notice(tmp_path, monkeypatch, caplog):
+    store = ConfigStore(tmp_path)
+    db = Database(tmp_path / "crowbarr.db")
+    daemon = service.Service(store, db)
+    attempts = iter([sqlite3.OperationalError("database is locked"), None])
+
+    def scan_once(*args):
+        result = next(attempts)
+        if result:
+            raise result
+        return 12
+
+    waits = 0
+
+    def wait(_timeout):
+        nonlocal waits
+        waits += 1
+        if waits == 2:
+            daemon.stop_event.set()
+        return False
+
+    monkeypatch.setattr(service, "scan", scan_once)
+    monkeypatch.setattr(daemon.scan_event, "wait", wait)
+    with caplog.at_level(logging.ERROR, logger="crowbarr"):
+        daemon.scanner()
+
+    records = [record for record in caplog.records if "Library scan failed" in record.message]
+    assert len(records) == 1
+    assert records[0].exc_info[0] is sqlite3.OperationalError
+    assert "database is locked" in caplog.text
+    assert daemon.scan_count == 12
+    assert not any(notice["name"] == "scan" for notice in db.snapshot()["notices"])
 
 
 def test_repeated_crashes_exhaust_attempts_and_clear_progress(tmp_path):
