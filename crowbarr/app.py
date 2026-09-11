@@ -384,6 +384,9 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             else:
                 db.cancel_carry_forward()
         store.save(settings)
+        from .library import skip_short_pending
+
+        skip_short_pending(settings, db)
         service.scan_event.set()
         return {**store.public(), "api_key": store.token, "capabilities": runtime}
 

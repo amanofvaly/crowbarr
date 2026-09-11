@@ -23,6 +23,13 @@ def probe(path: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def duration_seconds(metadata: dict) -> float:
+    duration = float(metadata.get("format", {}).get("duration", 0))
+    if not math.isfinite(duration) or duration <= 0:
+        raise ReviewRequired("Video has an invalid or unknown timeline")
+    return duration
+
+
 COMMENTARY_WORDS = ("commentary", "description", "descriptive")
 
 
@@ -94,8 +101,8 @@ def choose_audio(metadata: dict, settings: Settings) -> dict:
 def extract_audio(media: Path, destination: Path, metadata: dict, stream: dict) -> tuple[float, float]:
     origin = float(metadata.get("format", {}).get("start_time", 0))
     offset = float(stream.get("start_time", origin)) - origin
-    duration = float(metadata.get("format", {}).get("duration", 0))
-    if not math.isfinite(duration) or duration <= 0 or not math.isfinite(offset):
+    duration = duration_seconds(metadata)
+    if not math.isfinite(offset):
         raise ReviewRequired("Video has an invalid or unknown timeline")
     subprocess.run(
         [

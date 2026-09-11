@@ -124,6 +124,7 @@ class Settings(BaseModel):
     cpu_threads: int = Field(default=2, ge=1, le=64)
     scan_seconds: int = Field(default=300, ge=10, le=86400)
     settle_seconds: int = Field(default=120, ge=0, le=86400)
+    min_duration_minutes: int = Field(default=10, ge=0, le=600)
     subtitle_wait_minutes: int = Field(default=30, ge=0, le=10080)
     max_attempts: int = Field(default=3, ge=1, le=10)
     job_timeout_minutes: int = Field(default=240, ge=1, le=1440)

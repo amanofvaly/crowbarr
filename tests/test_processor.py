@@ -67,7 +67,10 @@ def alignment_stub(audio, passages, settings, cache):
 
 def queued(video, tmp_path):
     db = Database(tmp_path / "state" / "crowbarr.db")
-    settings = Settings(roots=[str(video.parent)], settle_seconds=0, subtitle_wait_minutes=0)
+    settings = Settings(
+        roots=[str(video.parent)], settle_seconds=0, subtitle_wait_minutes=0,
+        min_duration_minutes=0,
+    )
     scan(settings, db)
     return settings, db, db.claim()
 
@@ -97,6 +100,21 @@ def test_automatic_fallback_publishes_separate_sidecar(video, tmp_path):
     assert result["state"] == "completed"
     assert video.with_suffix(".crowbarr.en.srt").exists()
     assert json.loads(result["report"])["mode"] == "generated"
+
+
+def test_short_video_is_skipped_before_audio_extraction(video, tmp_path, monkeypatch):
+    settings, db, job = queued(video, tmp_path)
+    settings = settings.model_copy(update={"min_duration_minutes": 10})
+    monkeypatch.setattr(
+        "crowbarr.processor.extract_audio",
+        lambda *args: pytest.fail("Short videos must be skipped before audio extraction"),
+    )
+
+    result = process(job, settings, db.path.parent, db, inference_stub, alignment_stub)
+
+    assert result["state"] == "skipped"
+    assert result["stage"] == "Short video"
+    assert "minimum is 10 minutes" in result["error"]
 
 
 def test_wrong_cut_timing_repaired_without_changing_original(video, tmp_path):
@@ -423,6 +441,7 @@ def test_a_provider_download_that_bazarr_discards_retries_instead_of_parking(vid
     monkeypatch.setattr("crowbarr.bazarr.try_alternative", fake_try_alternative)
     settings = Settings(
         roots=[str(video.parent)],
+        min_duration_minutes=0,
         bazarr={"url": "http://bazarr", "api_key": "k"},
         sonarr={"url": "http://sonarr", "api_key": "k"},
         bazarr_download_alternatives=True,

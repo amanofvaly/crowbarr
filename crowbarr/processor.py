@@ -15,6 +15,7 @@ from .media import (
     ReviewRequired,
     audio_candidates,
     choose_audio,
+    duration_seconds,
     embedded_subtitles,
     extract_audio,
     probe,
@@ -392,6 +393,17 @@ def process(
         return {"state": "superseded", "error": "Media, subtitle, or processing settings changed"}
     media = Path(job["media"])
     metadata = probe(media)
+    duration = duration_seconds(metadata)
+    minimum = settings.min_duration_minutes * 60
+    if minimum and duration < minimum:
+        return {
+            "state": "skipped",
+            "stage": "Short video",
+            "error": (
+                f"Video is {duration / 60:.1f} minutes long; "
+                f"minimum is {settings.min_duration_minutes} minutes"
+            ),
+        }
     preference = db.cache_audio(str(media), metadata)
     if preference["skipped"]:
         return {"state": "skipped", "stage": "Library preference", "error": preference["reason"]}

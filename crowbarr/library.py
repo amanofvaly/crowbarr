@@ -3,14 +3,35 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
 from .arr import ArrClient
 from .config import Settings, atomic_write
 from .db import Database
+from .media import ReviewRequired, duration_seconds, probe
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".webm"}
+
+
+def skip_short_pending(settings: Settings, db: Database) -> int:
+    minimum = settings.min_duration_minutes * 60
+    if not minimum:
+        return 0
+    skipped = 0
+    for job in db.pending():
+        try:
+            duration = duration_seconds(probe(Path(job["media"])))
+        except (OSError, ValueError, ReviewRequired, subprocess.SubprocessError):
+            continue
+        if duration < minimum:
+            reason = (
+                f"Video is {duration / 60:.1f} minutes long; "
+                f"minimum is {settings.min_duration_minutes} minutes"
+            )
+            skipped += int(db.skip_short(job["id"], reason))
+    return skipped
 
 
 def allowed(path: Path, settings: Settings) -> bool:

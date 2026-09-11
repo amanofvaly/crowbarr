@@ -680,6 +680,26 @@ class Database:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             return dict(row) if row else None
 
+    def pending(self) -> list[dict]:
+        with self.connect() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT * FROM jobs WHERE state IN ('waiting','queued','retry') ORDER BY id"
+                )
+            ]
+
+    def skip_short(self, job_id: int, error: str) -> bool:
+        with self.connect() as db:
+            return bool(
+                db.execute(
+                    "UPDATE jobs SET state='skipped',stage='Short video',error=?,updated=?,"
+                    "generation=generation+1,progress_current=NULL,progress_total=NULL,started=NULL "
+                    "WHERE id=? AND state IN ('waiting','queued','retry')",
+                    (error, time.time(), job_id),
+                ).rowcount
+            )
+
     def retry(self, job_id: int) -> bool:
         with self.connect() as db:
             result = db.execute(

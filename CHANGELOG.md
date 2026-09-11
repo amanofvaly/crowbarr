@@ -71,6 +71,10 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.8
+
+- Videos shorter than set length are skipped. Useful for trailers.
+
 ### 0.4.7
 
 - Media library: UI improvements

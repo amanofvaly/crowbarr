@@ -37,6 +37,33 @@ def test_settings_explain_model_change_and_library_reconciliation(client):
     assert "Queue totals can change until this finishes" in script
 
 
+def test_minimum_duration_defaults_to_ten_minutes(client):
+    response = client.get("/api/settings", headers=auth(client))
+    assert response.json()["min_duration_minutes"] == 10
+
+
+def test_saving_minimum_duration_removes_short_pending_jobs(client, tmp_path, monkeypatch):
+    store = client.app.state.store
+    store.save(store.get().model_copy(update={"min_duration_minutes": 0}))
+    db = client.app.state.db
+    media = tmp_path / "trailer.mkv"
+    media.write_bytes(b"video")
+    job_id = db.enqueue(str(media), "signature", None, 0)
+    monkeypatch.setattr(
+        "crowbarr.library.probe",
+        lambda path: {"format": {"duration": "120"}, "streams": []},
+    )
+
+    response = client.put(
+        "/api/settings", headers=auth(client), json={"min_duration_minutes": 10}
+    )
+
+    assert response.status_code == 200
+    job = db.get(job_id)
+    assert job["state"] == "skipped"
+    assert job["stage"] == "Short video"
+
+
 def test_settings_secrets_are_write_only_and_preserved(client, tmp_path):
     payload = {"roots": [str(tmp_path)], "sonarr": {"url": "http://sonarr:8989", "api_key": "secret-value"}}
     response = client.put("/api/settings", headers=auth(client), json=payload)

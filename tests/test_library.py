@@ -147,7 +147,7 @@ def test_audio_probe_before_expensive_work_and_override(library_client, monkeypa
     db.refresh_library_policy()
     job = db.claim()
     monkeypatch.setattr(processor, "current", lambda *args: True)
-    monkeypatch.setattr(processor, "probe", lambda *args: {"streams": [
+    monkeypatch.setattr(processor, "probe", lambda *args: {"format": {"duration": "1200"}, "streams": [
         {"codec_type": "audio", "index": 1, "tags": {"language": "hin"}}]})
     monkeypatch.setattr(processor, "extract_audio", lambda *args: pytest.fail("Must skip before decoding"))
     result = processor.process(job, c.app.state.store.get(), c.app.state.store.directory, db)

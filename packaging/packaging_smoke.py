@@ -75,7 +75,10 @@ def process_fixture(directory, check_inference=True):
         check=True, timeout=30,
     )
     media.with_suffix(".en.srt").write_text("not a valid subtitle", encoding="utf-8")
-    settings = Settings(roots=[str(media.parent)], settle_seconds=0, subtitle_wait_minutes=0)
+    settings = Settings(
+        roots=[str(media.parent)], settle_seconds=0, subtitle_wait_minutes=0,
+        min_duration_minutes=0,
+    )
     state = root / "state"
     db = Database(state / "crowbarr.db")
     scan(settings, db)

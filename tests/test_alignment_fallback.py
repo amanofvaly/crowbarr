@@ -240,6 +240,7 @@ def queued_refinement(video, tmp_path, cpu_fallback=True):
         roots=[str(video.parent)],
         settle_seconds=0,
         subtitle_wait_minutes=0,
+        min_duration_minutes=0,
         device="cuda",
         refine_generated=True,
         cpu_fallback=cpu_fallback,
