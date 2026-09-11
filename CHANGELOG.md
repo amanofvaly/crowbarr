@@ -71,6 +71,10 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.7
+
+- Media library: UI improvements
+
 ### 0.4.6
 
 - Library browsing now separates Shows and Movies. Shows expand into season and episode
