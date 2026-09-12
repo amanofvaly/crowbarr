@@ -68,6 +68,9 @@ def _speech_worker(target, name):
     from faster_whisper.utils import download_model
 
     download_model(name, cache_dir=target)
+    if name != "small":
+        # Every recognition model uses the same multilingual language preflight.
+        download_model("small", cache_dir=target)
 
 
 def download_state(name: str = "alignment") -> dict:

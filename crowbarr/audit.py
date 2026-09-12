@@ -273,6 +273,13 @@ def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:
             if short
             else "The subtitle contains no cues to judge"
         )
+        if match["matched_token_ratio"] <= MISMATCH_MATCH_RATIO:
+            failed_mismatch = [check for check in mismatch_checks if not check["passed"]]
+            if failed_mismatch:
+                reason += ". Content mismatch cannot be established: " + "; ".join(
+                    f"{check['name'].lower()} was {check['measured']}, needs {check['limit']}"
+                    for check in failed_mismatch
+                )
     else:
         percentile = math.ceil(len(evidence) * 0.95) - 1
         # Synchronisation lives in the cue starts. A cue's end is a reading-time

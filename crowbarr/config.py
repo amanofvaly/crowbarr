@@ -35,11 +35,12 @@ def verify_password(password: str, stored: str) -> bool:
     return _hmac.compare_digest(candidate.hex(), digest)
 
 
-def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
+def atomic_write(path: Path, content: str | bytes, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".crowbarr-", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        binary = isinstance(content, bytes)
+        with os.fdopen(fd, "wb" if binary else "w", **({} if binary else {"encoding": "utf-8"})) as stream:
             try:
                 os.fchmod(stream.fileno(), mode)
             except OSError:
@@ -147,10 +148,8 @@ class Settings(BaseModel):
     # is preferred to a generated one.
     generate_over_mismatch: bool = True
     max_provider_attempts: int = Field(default=3, ge=1, le=10)
-    # Retained so existing installs keep loading and their cached transcripts stay
-    # valid. Track selection no longer consults it: recognition establishes the spoken
-    # language from the audio, which is a better answer than a checkbox.
-    allow_untagged_audio: bool = False
+    # Verify untagged audio by default; an explicit false still requires language tags.
+    allow_untagged_audio: bool = True
     allow_untagged_subtitles: bool = False
     min_match_ratio: float = Field(default=0.75, ge=0.5, le=1)
     min_alignment_score: float = Field(default=0.4, ge=0, le=1)

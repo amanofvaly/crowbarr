@@ -1271,6 +1271,58 @@ label small {
   margin: 0;
   padding-left: 18px;
 }
+.recognition-notes {
+  padding: 0;
+}
+.recognition-notes summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.recognition-notes summary::-webkit-details-marker {
+  display: none;
+}
+.recognition-notes summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 150ms ease;
+}
+.recognition-notes[open] summary::before {
+  transform: rotate(45deg);
+}
+.recognition-count {
+  min-width: 22px;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.recognition-notes-body {
+  padding: 0 16px 14px 33px;
+}
+.detail-actions {
+  position: sticky;
+  bottom: -20px;
+  z-index: 2;
+  margin: 22px -20px -20px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 -8px 18px -16px rgb(0 0 0 / 45%);
+}
 .api-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 0.85fr);
@@ -1395,6 +1447,11 @@ dialog {
   padding: 0;
   box-shadow: var(--shadow);
 }
+dialog[open] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 dialog::backdrop {
   background: #0007;
 }
@@ -1414,7 +1471,9 @@ dialog::backdrop {
   overflow-wrap: anywhere;
 }
 #detail-content {
+  min-height: 0;
   padding: 20px;
+  overflow-y: auto;
 }
 #detail-content > p {
   margin: 12px 0 18px;

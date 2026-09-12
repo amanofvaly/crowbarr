@@ -13,6 +13,20 @@ results a person deliberately set aside.
 Read this section before upgrading: a bump means recognition work, and it can publish
 subtitles that the previous policy declined to.
 
+### 0.3.7
+
+- Verify spoken language using distributed multilingual speech samples before recognition
+  or provider recovery. Untagged audio is enabled by default and verified by speech;
+  an explicitly saved disabled setting is preserved.
+- Preserve word confidence when accepted speech has a high segment no-speech score;
+  invalidate old recognition caches and resumable chunks containing zeroed probabilities.
+- Try bounded authored alternatives before generation for proven mismatches, and retry
+  provider requests that leave no changed subtitle. Uncertain audits do not reject sources.
+- Timing sufficiency, full-audio escalation, and publication checks remain conservative.
+  A repaired subtitle that passes its full audit is no longer vetoed by the separate
+  configurable text-match gate; inconclusive repairs retain that gate.
+  This policy reopens unresolved work and may generate after authored recovery is exhausted.
+
 ### 0.3.6
 
 - Repairs no longer publish cues that overlap each other.
@@ -70,6 +84,11 @@ release with split versioning requeues nothing.
 
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
+
+### 0.4.9
+
+- Integrated audio-language, recognition-confidence, and authored-provider recovery fixes
+  (audit policy 0.3.7). Provider outcomes distinguish requests from changed subtitle bytes.
 
 ### 0.4.8
 

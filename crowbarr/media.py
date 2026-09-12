@@ -95,6 +95,11 @@ def choose_audio(metadata: dict, settings: Settings) -> dict:
     candidates = audio_candidates(metadata)
     if not candidates:
         raise ReviewRequired(f"No track could carry dialogue. {describe_audio(metadata)}")
+    if candidates[0]["tier"] == 1 and not settings.allow_untagged_audio:
+        raise ReviewRequired(
+            "The selected audio track has no language tag. Enable untagged audio to verify its "
+            "spoken language before processing."
+        )
     return candidates[0]["stream"]
 
 

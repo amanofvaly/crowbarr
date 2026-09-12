@@ -75,7 +75,7 @@ def queued(video, tmp_path):
     return settings, db, db.claim()
 
 
-def test_transcript_cache_is_independent_of_subtitle_revision(video, tmp_path):
+def test_transcript_cache_is_independent_of_subtitle_revision(video, tmp_path, monkeypatch):
     calls = 0
 
     def transcriber(*args):
@@ -92,6 +92,10 @@ def test_transcript_cache_is_independent_of_subtitle_revision(video, tmp_path):
     assert not first[2]
     assert second[2]
     assert second[:2] == first[:2]
+    monkeypatch.setattr("crowbarr.processor.RECOGNITION_POLICY_VERSION", "next-policy")
+    third = _recognized_words(video, audio, settings, tmp_path / "state", tmp_path / "models", transcriber)
+    assert calls == 2
+    assert not third[2]
 
 
 def test_automatic_fallback_publishes_separate_sidecar(video, tmp_path):
@@ -439,6 +443,7 @@ def test_a_provider_download_that_bazarr_discards_retries_instead_of_parking(vid
         return {"state": "downloaded", "provider": "opensubtitlescom", "attempts": len(attempts)}
 
     monkeypatch.setattr("crowbarr.bazarr.try_alternative", fake_try_alternative)
+    monkeypatch.setattr("crowbarr.inference.verify_audio_language", lambda *args: {"language": "en"})
     settings = Settings(
         roots=[str(video.parent)],
         min_duration_minutes=0,
@@ -532,6 +537,94 @@ def test_generation_over_a_mismatch_can_be_refused(long_video, tmp_path):
     result = process(job, settings, db.path.parent, db, transcriber, alignment_stub)
     assert result["state"] == "review"
     assert json.loads(result["report"])["audit"]["before"]["decision"] == "mismatched"
+
+
+@pytest.mark.parametrize("provider_state", ["downloaded", "discarded", "exhausted", "available"])
+def test_mismatch_uses_provider_recovery_before_generation(long_video, tmp_path, monkeypatch, provider_state):
+    transcriber = wrong_episode(long_video)
+    settings, db, job = queued(long_video, tmp_path)
+    settings = settings.model_copy(update={
+        "bazarr": settings.bazarr.model_copy(update={"url": "http://bazarr"}),
+        "radarr": settings.radarr.model_copy(update={"url": "http://radarr"}),
+        "bazarr_download_alternatives": True,
+    })
+    from crowbarr.library import signature
+
+    job["signature"] = signature(long_video, None, settings)
+    calls = []
+
+    def recover(*args):
+        calls.append(args[-1])
+        return {"state": provider_state, "reason": "provider result"}
+
+    monkeypatch.setattr("crowbarr.bazarr.try_alternative", recover)
+    result = process(job, settings, db.path.parent, db, transcriber, alignment_stub)
+    assert calls == [job["id"]]
+    assert result["state"] == {
+        "downloaded": "retry", "discarded": "retry", "exhausted": "completed", "available": "review",
+    }[provider_state]
+    assert long_video.with_suffix(".crowbarr.en.srt").exists() == (provider_state == "exhausted")
+
+
+def test_foreign_language_stops_before_provider_side_effects(video, tmp_path, monkeypatch):
+    settings, db, job = queued(video, tmp_path)
+
+    def refuse(*args):
+        raise ReviewRequired("Audio language is ja")
+
+    monkeypatch.setattr("crowbarr.inference.verify_audio_language", refuse)
+    monkeypatch.setattr("crowbarr.bazarr.try_alternative", lambda *args: pytest.fail("Must not search"))
+    with pytest.raises(ReviewRequired, match="Audio language is ja"):
+        process(job, settings, db.path.parent, db)
+
+
+def test_a_passing_repair_is_not_vetoed_by_the_extra_global_match_gate(video, tmp_path):
+    from test_audit import fixture
+
+    from crowbarr.library import signature
+
+    cues, words = fixture(0.8)
+    cues.append(Cue(7, 7.8, "An unmatched subtitle line here"))
+    video.with_suffix(".en.srt").write_text(render_srt(cues))
+    settings, db, job = queued(video, tmp_path)
+    settings = settings.model_copy(update={"min_match_ratio": 0.9})
+    job["signature"] = signature(video, None, settings)
+    result = process(job, settings, db.path.parent, db, lambda *a: (words, []), alignment_stub)
+    report = json.loads(result["report"])
+    assert report["matched_token_ratio"] < settings.min_match_ratio
+    assert report["audit"]["after"]["decision"] == "pass"
+    assert result["state"] == "completed", report["issues"]
+
+
+def test_changed_provider_file_is_reaudited_before_publication(video, tmp_path, monkeypatch):
+    from test_audit import fixture
+
+    from crowbarr.library import signature
+
+    cues, words = fixture()
+    source = video.with_suffix(".en.srt")
+    source.write_text(render_srt([Cue(0, 1, "Completely unrelated commentary introduction")]))
+    settings, db, job = queued(video, tmp_path)
+    settings = settings.model_copy(update={
+        "bazarr": settings.bazarr.model_copy(update={"url": "http://bazarr"}),
+        "radarr": settings.radarr.model_copy(update={"url": "http://radarr"}),
+    })
+    job["signature"] = signature(video, None, settings)
+
+    def replace(*args):
+        source.write_text(render_srt(cues))
+        return {"state": "downloaded"}
+
+    monkeypatch.setattr("crowbarr.bazarr.try_alternative", replace)
+    result = process(job, settings, db.path.parent, db, lambda *a: (words, []), alignment_stub)
+    assert result["state"] == "superseded"
+    assert not video.with_suffix(".crowbarr.en.srt").exists()
+    # Simulate the new signature the library scan queues after the source changes.
+    job["signature"] = signature(video, None, settings)
+    monkeypatch.setattr("crowbarr.bazarr.try_alternative", lambda *a: pytest.fail("Passing source needs no provider"))
+    result = process(job, settings, db.path.parent, db, lambda *a: (words, []), alignment_stub)
+    assert result["state"] == "unchanged"
+    assert json.loads(result["report"])["audit"]["before"]["decision"] == "pass"
 
 
 def test_an_inconclusive_audit_offers_no_candidate_to_publish(video, tmp_path):

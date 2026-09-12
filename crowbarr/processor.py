@@ -22,6 +22,7 @@ from .media import (
     unreadable_subtitles,
 )
 from .subtitles import Cue, Word, match_passages, parse_srt, render_srt, validate_cues
+from .version import RECOGNITION_POLICY_VERSION
 
 # How much of a retimed file has to come from its own matched speech. Cues with nothing
 # to match are placed between their neighbours, which is sound for a sound caption in a
@@ -286,6 +287,7 @@ def _recognized_words(
         json.dumps(
             {
                 "path": str(media.resolve()),
+                "recognition_policy": RECOGNITION_POLICY_VERSION,
                 "size": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
                 "language": settings.language,
@@ -454,6 +456,27 @@ def process(
             # one fact that would explain it -- what the parser actually objected to --
             # in a warnings list that is then discarded.
             raise ReviewRequired("No discovered subtitle source could be read. " + "; ".join(unreadable))
+        language_evidence = None
+        if cache_transcript:
+            from .inference import verify_audio_language
+
+            db.update(job["id"], stage="Verifying spoken audio language")
+            stat = media.stat()
+            language_key = hashlib.sha256(json.dumps([
+                str(media.resolve()), stat.st_size, stat.st_mtime_ns, audio_stream["index"],
+                settings.language, RECOGNITION_POLICY_VERSION,
+            ]).encode()).hexdigest()
+            language_path = directory / "language" / f"{language_key}.json"
+            if language_path.exists():
+                try:
+                    language_evidence = json.loads(language_path.read_text())
+                    if language_evidence.get("language") != settings.language:
+                        language_evidence = None
+                except (ValueError, AttributeError):
+                    language_evidence = None
+            if language_evidence is None:
+                language_evidence = verify_audio_language(audio, settings, cache)
+                atomic_write(language_path, json.dumps(language_evidence))
         # An English track Crowbarr cannot decode is still worth reporting: without this
         # the job looks as though the file had no English subtitle at all.
         for label in unreadable_subtitles(metadata):
@@ -464,7 +487,7 @@ def process(
 
             db.update(job["id"], stage="Searching Bazarr providers")
             provider_result = try_alternative(settings, db, media, directory, job["id"])
-            if provider_result["state"] == "downloaded":
+            if provider_result["state"] in ("downloaded", "discarded"):
                 if not current(job, settings):
                     return {
                         "state": "superseded",
@@ -597,11 +620,35 @@ def process(
             selected_source=selected["label"] if selected else None,
             selected_source_kind=selected["kind"] if selected else None,
             audio_selection=audio_selection,
+            language_evidence=language_evidence,
         )
         if original:
             db.update(job["id"], stage="Auditing existing subtitle")
             before = selected["audit"]
             report["audit"] = {"before": before, "after": None, "improved": False}
+            # An authored replacement is the first recovery option, including for a
+            # proven mismatch. A successful HTTP request is not a usable subtitle.
+            needs_alternative = before["decision"] in UNUSABLE or (
+                before["decision"] != "pass"
+                and not _worth_retiming(report)
+                and before["matched_token_ratio"] < 0.5
+            )
+            if needs_alternative and settings.bazarr.url and settings.providers():
+                from .bazarr import try_alternative
+
+                db.update(job["id"], stage="Searching Bazarr alternatives before generation")
+                report["bazarr"] = try_alternative(settings, db, media, directory, job["id"])
+                atomic_write(directory / "reports" / f"{job['id']}.json", json.dumps(report, indent=2))
+                if not current(job, settings):
+                    return {"state": "superseded", "error": "Provider subtitle arrived; needs a new audit",
+                            "report": json.dumps(report)}
+                if report["bazarr"]["state"] in ("downloaded", "discarded"):
+                    return {"state": "retry", "stage": "Awaiting next Bazarr candidate",
+                            "error": "Bazarr left no changed subtitle; trying the next candidate",
+                            "ready": time.time() + 60, "report": json.dumps(report)}
+                if report["bazarr"]["state"] == "available":
+                    return {"state": "review", "stage": "Authored alternatives need permission",
+                            "error": report["bazarr"]["reason"], "report": json.dumps(report)}
             if before["decision"] in UNUSABLE and settings.generate_over_mismatch:
                 # The audit did not fail to reach a verdict here; it reached a definite
                 # one, and neither verdict leaves anything a repair could act on: the
@@ -637,19 +684,6 @@ def process(
                     note="Measured against ASR word timestamps; these are heuristic estimates, not ground truth.",
                 )
                 atomic_write(directory / "reports" / f"{job['id']}.json", json.dumps(report, indent=2))
-                if (
-                    not passed
-                    and before["matched_token_ratio"] < 0.5
-                    and settings.bazarr.url
-                    and settings.providers()
-                ):
-                    from .bazarr import reject_source, try_alternative
-
-                    if selected["kind"] == "external":
-                        report["rejected_source_hash"] = reject_source(
-                            directory, str(media), selected["path"], before["reason"]
-                        )
-                    report["bazarr"] = try_alternative(settings, db, media, directory, job["id"])
                 # No candidate is written for a verdict that is not a repair. The only
                 # thing there was to offer was the original subtitle re-rendered, so
                 # "publish reviewed candidate" published the subtitle the audit had just
@@ -703,15 +737,15 @@ def process(
                 return {
                     "state": "unchanged" if passed else "review",
                     "stage": "Audit passed — unchanged" if passed else "Audit inconclusive",
-                    "error": None if passed else before["reason"],
+                    "error": None if passed else before["reason"] + (
+                        f". Bazarr recovery: {report['bazarr']['state']}; "
+                        "generation requires reliable evidence that the authored subtitle is unusable"
+                        if report.get("bazarr") else ""
+                    ),
                     "report": json.dumps(report),
                     "output": None if passed else job.get("output"),
                 }
         if original:
-            if report["matched_token_ratio"] < settings.min_match_ratio:
-                issues.append(
-                    "Too little authored text matches this audio; the subtitle may be a different cut"
-                )
             if report["generated_word_ratio"] > settings.max_generated_ratio:
                 warnings.append(
                     "Some authored dialogue lacks direct anchors; its timing will be interpolated"
@@ -806,6 +840,13 @@ def process(
                     "checks": verdict["checks"],
                 }
             report["audit"].update(after=after, improved=verdict["accepted"], improvement=verdict)
+            # A complete passing audit settles the repair. The configurable match
+            # minimum still protects a repair whose own audit remains inconclusive.
+            if after["decision"] != "pass" and report["matched_token_ratio"] < settings.min_match_ratio:
+                issues.append(
+                    f"Repair remains unverified: authored text match is {report['matched_token_ratio']:.1%}, "
+                    f"below the {settings.min_match_ratio:.0%} repair requirement, and its audit did not pass"
+                )
             if not verdict["accepted"]:
                 issues.append(f"Retimed subtitle withheld because {verdict['reason']}")
         report.update(

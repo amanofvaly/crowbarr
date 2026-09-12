@@ -732,7 +732,7 @@ function settingsPage() {
   if (section === "processing")
     content = settingPanel(
       "Speech processing",
-      `English only. Changing the model, device or precision re-checks ${recheckCount}.`,
+      `English only. Multilingual small verifies the audio language on the CPU and downloads on first use if needed. Changing the model, device or precision re-checks ${recheckCount}.`,
       modelChooser(settings.model, downloaded, fetching) +
         select("device", "Processing device", [
           ["cpu", cpuAvailable ? "CPU" : "CPU (unavailable)", !cpuAvailable],
@@ -856,6 +856,11 @@ function settingsPage() {
         "Listen to samples spread through the file, and recognize the whole file only when the samples are unclear. Applies to media longer than ten minutes.",
       ) +
         check(
+          "allow_untagged_audio",
+          "Process audio without a language tag",
+          "Verify the spoken language before processing an untagged track. Leave off to require a language tag.",
+        ) +
+        check(
           "bazarr_download_alternatives",
           "Download alternatives from Bazarr",
           "Ask Bazarr for other subtitle files when the current one does not match the audio.",
@@ -886,7 +891,7 @@ function settingsPage() {
           "Minimum subtitle match",
           0.5,
           1,
-          "How much of an authored subtitle's text must match the audio. Below this, Crowbarr treats the subtitle as belonging to other content.",
+          "Minimum text match for placing each authored line. Also protects repairs whose final audit is inconclusive; it does not by itself establish a content mismatch.",
           0.01,
         ) +
         numeric(
@@ -1277,6 +1282,13 @@ async function detail(id) {
         : "Not reported",
     ],
   ];
+  if (report.language_evidence) {
+    facts.push(["Spoken language", `${report.language_evidence.language} · verified with multilingual speech samples`]);
+  }
+  if (report.bazarr) {
+    const recovery = report.bazarr;
+    facts.push(["Bazarr recovery", `${recovery.state}${recovery.attempts != null ? ` · ${recovery.attempts} ${recovery.attempts === 1 ? "attempt" : "attempts"} used` : ""}${recovery.reason ? ` · ${recovery.reason}` : ""}`]);
+  }
   if (report.audit) {
     const before = report.audit.before;
     facts.push(
@@ -1367,7 +1379,7 @@ async function detail(id) {
       })()
     : "";
   $("detail-content").innerHTML =
-    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}${auditExplanation}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<section class="recognition-notes"><h3>Recognition regions excluded from the verdict</h3><p>Crowbarr ignored these weak regions when forming timing evidence. They remain here so you can inspect what the recognizer encountered.</p><ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul></section>` : ""}<div class="actions mt-22">${["review", "failed"].includes(job.state) ? `${button("Generate a fresh subtitle", "regenerate", "primary", `data-id="${id}"`)}${button("Set aside", "skip", "", `data-id="${id}"`)}` : ""}${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
+    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}${auditExplanation}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<details class="recognition-notes"><summary><span>Recognition regions excluded from the verdict</span><span class="recognition-count">${warnings.length}</span></summary><div class="recognition-notes-body"><p>Crowbarr ignored these weak regions when forming timing evidence. Expand this section to inspect what the recognizer encountered.</p><ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul></div></details>` : ""}<div class="actions detail-actions">${["review", "failed"].includes(job.state) ? `${button("Generate a fresh subtitle", "regenerate", "primary", `data-id="${id}"`)}${button("Set aside", "skip", "", `data-id="${id}"`)}` : ""}${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
 }
 function download(data, name) {

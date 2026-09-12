@@ -12,5 +12,7 @@ require an audit policy increase.
 
 """
 
-APPLICATION_VERSION = "0.4.8"
-AUDIT_POLICY_VERSION = "0.3.6"
+APPLICATION_VERSION = "0.4.9"
+AUDIT_POLICY_VERSION = "0.3.7"
+# Also separates resumable chunk directories, whose word probabilities are lossy.
+RECOGNITION_POLICY_VERSION = "2"

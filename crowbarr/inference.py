@@ -20,6 +20,66 @@ _resident_key = None
 _resident_runtime = {}
 
 
+def language_verdict(samples: list[dict], expected: str) -> dict:
+    """Require repeated speech evidence, never a vote from a silent opening."""
+    confident = [s for s in samples if s["probability"] >= 0.8 and s["speech_tokens"] >= 8]
+    languages = {s["language"] for s in confident}
+    if len(confident) >= 2 and languages == {expected}:
+        return {"language": expected, "samples": samples, "model": "small"}
+    description = "; ".join(
+        f"{s['start']:.0f}s: {s['language']} {s['probability']:.0%}, "
+        f"{'speech detected' if s['speech_tokens'] >= 8 else 'too little speech'}"
+        for s in samples
+    )
+    if len(confident) >= 2 and len(languages) == 1 and expected not in languages:
+        raise ReviewRequired(
+            f"Audio language is {next(iter(languages))}, not {expected}, across multiple speech samples. "
+            f"English processing and provider recovery stopped. {description}"
+        )
+    raise ReviewRequired(
+        f"Audio language is uncertain or mixed; cannot establish {expected} dialogue safely. {description}"
+    )
+
+
+def verify_audio_language(audio: Path, settings: Settings, cache: Path) -> dict:
+    """Use a multilingual model before .en recognition or provider side effects."""
+    import numpy as np
+    from faster_whisper import WhisperModel
+
+    detector = WhisperModel(
+        "small", device="cpu", compute_type="int8", cpu_threads=settings.cpu_threads,
+        num_workers=1, download_root=str(cache / "whisper"),
+    )
+    samples = []
+    try:
+        with wave.open(str(audio), "rb") as stream:
+            rate = stream.getframerate()
+            duration = stream.getnframes() / rate
+            # Disjoint thirds for short recordings, three distributed 60s probes for films.
+            length = min(60, duration / 3)
+            for fraction in (1 / 6, 1 / 2, 5 / 6):
+                start = max(0, duration * fraction - length / 2)
+                stream.setpos(int(start * rate))
+                clip = np.frombuffer(stream.readframes(int(length * rate)), dtype=np.int16)
+                segments, info = detector.transcribe(
+                    clip.astype(np.float32) / 32768, vad_filter=True,
+                    condition_on_previous_text=False, beam_size=1,
+                )
+                count = 0
+                for segment in segments:
+                    # Whitespace words are not a language-neutral speech measure:
+                    # Japanese sentences often have no spaces at all.
+                    count += len(detector.hf_tokenizer.encode(segment.text, add_special_tokens=False).ids)
+                    if count >= 16:
+                        break
+                samples.append({"start": start, "language": info.language,
+                                "probability": info.language_probability, "speech_tokens": count})
+        return language_verdict(samples, settings.language)
+    finally:
+        del detector
+        gc.collect()
+
+
 def transcribe(audio: Path, settings: Settings, cache: Path) -> tuple[list[Word], list[str]]:
     from faster_whisper import WhisperModel
 
@@ -79,12 +139,12 @@ def transcribe(audio: Path, settings: Settings, cache: Path) -> tuple[list[Word]
         callback = getattr(transcribe, "progress", None)
         if callback:
             callback(segment.end, info.duration)
-        if segment.no_speech_prob > 0.6 or segment.avg_logprob < -1.0:
+        if segment.avg_logprob < -1.0:
             issues.append(f"Uncertain speech near {segment.start:.1f}s")
         for word in segment.words or []:
             if word.end > word.start and word.word.strip():
                 probability = (
-                    0.0 if segment.no_speech_prob > 0.6 or segment.avg_logprob < -1.0 else word.probability
+                    0.0 if segment.avg_logprob < -1.0 else word.probability
                 )
                 words.append(Word(word.start, word.end, word.word.strip(), probability))
     if not words:

@@ -128,17 +128,24 @@ def try_alternative(settings, db, media, directory, job_id):
     selected = max(remaining, key=lambda candidate: candidate.get("score", 0))
     # Bazarr performs the download using its configured provider permissions. It
     # can replace its own sidecar; retain original bytes privately before asking.
+    before = {str(source): hashlib.sha256(source.read_bytes()).hexdigest()
+              for source in subtitle_sources(media, settings)}
     for source in subtitle_sources(media, settings):
-        content = source.read_text(encoding="utf-8-sig")
-        digest = hashlib.sha256(content.encode()).hexdigest()
+        content = source.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
         atomic_write(directory / "provider-backups" / key / f"{digest}-{source.name}", content)
     ledger.append(hashlib.sha256(selected["subtitle"].encode()).hexdigest())
     atomic_write(ledger_path, json.dumps(ledger))  # journal before external side effect
     identified = payload["target"]
     with BazarrClient(settings.bazarr) as client:
         client.download(identified["kind"], identified["item_id"], selected, identified.get("series_id"))
+    after = {str(source): hashlib.sha256(source.read_bytes()).hexdigest()
+             for source in subtitle_sources(media, settings)}
+    changed = any(before.get(path) != digest for path, digest in after.items())
     return {
-        "state": "downloaded",
+        "state": "downloaded" if changed else "discarded",
+        "reason": "Subtitle bytes changed; awaiting audio audit" if changed else
+                  "Bazarr accepted the request but left no new or changed subtitle",
         "provider": selected["provider"],
         "score": selected.get("score"),
         "release_info": selected.get("release_info"),

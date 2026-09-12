@@ -30,8 +30,20 @@ imports must be fixed in the package; a passing web health check is insufficient
 
 Write the entry for the person upgrading, not for the person who wrote the patch. Say
 what verdict or behaviour changed and what it now does to their files; a summary of the
-commit is not an entry. Keep the two sections separate — they cost an installation
-different things — and leave the reconstructed pre-0.3.2 history alone.
+commit is not an entry. Keep it brief: one line per behaviour change, no rationale, no
+implementation detail, no restating what stayed the same. Keep the two sections separate
+(they cost an installation different things) and leave the reconstructed pre-0.3.2
+history alone.
+
+An entry that passes:
+
+    - Untagged audio tracks are refused unless "Process audio without a language tag"
+      is on. Files with `und` audio move to review until it is.
+
+An entry that does not:
+
+    - Verify spoken language using distributed multilingual speech samples before
+      recognition or provider recovery. Untagged audio now honors its explicit opt-in.
 
 Keep Crowbarr useful as an unattended media workflow. New functionality should work
 through discovery/events and durable jobs, not require per-file user submissions.
