@@ -85,6 +85,12 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.10
+
+- Sign-in and page load no longer wait for hardware detection. The Settings page shows
+  "Checking hardware…" until the report arrives.
+- Saving a setting other than the processing device no longer runs hardware detection.
+
 ### 0.4.9
 
 - Integrated audio-language, recognition-confidence, and authored-provider recovery fixes
