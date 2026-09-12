@@ -196,36 +196,77 @@ def model_inventory(directory) -> dict:
     }
 
 
-def capabilities_for(directory) -> dict:
+def capabilities_for(directory, block: bool = True) -> dict:
     """Runtime probe, which models are on disk, and what a change would re-check."""
     from .config import FINGERPRINT_FIELDS
 
-    result = runtime_capabilities()
+    result = runtime_capabilities(block=block)
     result["models"] = model_inventory(directory)
     result["recheck_fields"] = list(FINGERPRINT_FIELDS)
     return result
 
 
-def runtime_capabilities() -> dict:
-    """Cache probes for five minutes; never import inference libraries in this process."""
-    global _cached, _expires, _variant
+_PROBE_KEYS = ("cpu", "cuda", "refinement")
+_refreshing: threading.Thread | None = None
+
+
+def _checking() -> dict:
+    """What a caller gets while the probe runs and nothing is cached yet.
+
+    `available` is None, not False: unknown must never read as missing, or the settings
+    page tells a user with a working GPU that they have none while the check runs.
+    """
+    return {
+        "status": "checking",
+        **{name: {"available": None, "reason": "", "compute_types": []} for name in _PROBE_KEYS},
+    }
+
+
+def _refresh(variant: str) -> None:
+    global _cached, _expires, _variant, _refreshing
+    try:
+        result = _run_probe()
+        if not all(isinstance(result[key]["available"], bool) for key in _PROBE_KEYS):
+            raise ValueError("Invalid runtime probe")
+    except (OSError, EOFError, RuntimeError, ValueError, KeyError, IndexError, TypeError) as error:
+        reason = (
+            f"Runtime detection failed or timed out ({type(error).__name__}). "
+            "Check the inference installation and try again in five minutes."
+        )
+        result = {name: {"available": False, "reason": reason, "compute_types": []} for name in _PROBE_KEYS}
+    result["image_variant"] = variant
+    result["status"] = "ready"
+    with _lock:
+        _cached, _expires, _variant = result, time.monotonic() + 300, variant
+        _refreshing = None
+
+
+def runtime_capabilities(block: bool = True) -> dict:
+    """Cache probes for five minutes; never import inference libraries in this process.
+
+    The probe spawns a process that imports the inference stack, which takes seconds. It
+    runs outside the lock, so a request arriving mid-probe reads the cache instead of
+    waiting behind it. With `block` false the caller gets the cached result even when it
+    has expired (a refresh is started), or a "checking" placeholder when there is none.
+    """
+    global _refreshing
     variant = os.environ.get("CROWBARR_IMAGE_VARIANT", "native")
     with _lock:
-        if _cached is not None and time.monotonic() < _expires and variant == _variant:
+        fresh = _cached is not None and time.monotonic() < _expires and variant == _variant
+        if fresh:
             return copy.deepcopy(_cached)
-        try:
-            result = _run_probe()
-            if not all(isinstance(result[key]["available"], bool) for key in ("cpu", "cuda", "refinement")):
-                raise ValueError("Invalid runtime probe")
-        except (OSError, EOFError, RuntimeError, ValueError, KeyError, IndexError, TypeError) as error:
-            reason = (
-                f"Runtime detection failed or timed out ({type(error).__name__}). "
-                "Check the inference installation and try again in five minutes."
-            )
-            result = {
-                name: {"available": False, "reason": reason, "compute_types": []}
-                for name in ("cpu", "cuda", "refinement")
-            }
-        result["image_variant"] = variant
-        _cached, _expires, _variant = result, time.monotonic() + 300, variant
-        return copy.deepcopy(result)
+        if _refreshing is None or not _refreshing.is_alive():
+            _refreshing = threading.Thread(target=_refresh, args=(variant,), daemon=True)
+            _refreshing.start()
+        thread = _refreshing
+        stale = copy.deepcopy(_cached) if _cached is not None and variant == _variant else None
+    if not block:
+        return stale if stale is not None else _checking()
+    thread.join()
+    with _lock:
+        return copy.deepcopy(_cached)
+
+
+def warm_up() -> None:
+    """Start the first probe at startup so the settings page rarely meets a cold cache."""
+    threading.Thread(target=runtime_capabilities, kwargs={"block": False}, daemon=True).start()

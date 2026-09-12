@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from . import __version__
-from .capabilities import SPEECH_MODELS, capabilities_for, start_download
+from .capabilities import SPEECH_MODELS, capabilities_for, model_inventory, start_download, warm_up
 from .config import ConfigStore, Settings
 from .db import Database
 from .integrations import check_connection
@@ -65,6 +65,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     async def lifespan(app):
         if background:
             service.start()
+            warm_up()
         try:
             yield
         finally:
@@ -325,11 +326,20 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     @app.get("/api/settings", dependencies=[Depends(authenticate)])
     def settings():
         # Shown so it can be copied into Sonarr/Radarr/Bazarr; it is no longer the login.
-        return {**store.public(), "api_key": store.token, "capabilities": capabilities_for(store.directory)}
+        return settings_payload()
+
+    def settings_payload():
+        # No hardware probe here: this answer gates the first paint after sign-in, and
+        # the probe imports the inference stack in a child process, which takes seconds.
+        from .config import FINGERPRINT_FIELDS
+
+        return {**store.public(), "api_key": store.token, "recheck_fields": list(FINGERPRINT_FIELDS)}
 
     @app.get("/api/capabilities", dependencies=[Depends(authenticate)])
     def capabilities():
-        return capabilities_for(store.directory)
+        # Answers at once with the cached probe, or with status "checking" while the
+        # first probe runs; the settings page asks again until it settles.
+        return capabilities_for(store.directory, block=False)
 
     @app.post("/api/capabilities/alignment", dependencies=[Depends(authenticate)], status_code=202)
     def fetch_alignment_model():
@@ -339,17 +349,18 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         if runtime["models"]["alignment"]["present"]:
             return runtime
         start_download(store.directory, "alignment")
-        return capabilities_for(store.directory)
+        return capabilities_for(store.directory, block=False)
 
     @app.post("/api/capabilities/model/{name}", dependencies=[Depends(authenticate)], status_code=202)
     def fetch_speech_model(name: str):
         if name not in SPEECH_MODELS:
             raise HTTPException(404, "Unknown speech model")
-        runtime = capabilities_for(store.directory)
+        # A download needs the model inventory, not the hardware answer.
+        runtime = capabilities_for(store.directory, block=False)
         if name in runtime["models"]["speech"]:
             return runtime
         start_download(store.directory, name)
-        return capabilities_for(store.directory)
+        return capabilities_for(store.directory, block=False)
 
     @app.put("/api/settings", dependencies=[Depends(authenticate)])
     def save_settings(payload: dict):
@@ -367,12 +378,15 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             raise HTTPException(422, "; ".join(details)) from None
         if settings.device == "cpu" and settings.compute_type in {"float16", "int8_float16"}:
             raise HTTPException(422, "CPU processing requires int8 or float32 compute")
-        runtime = capabilities_for(store.directory)
-        if settings.device == "cuda" and previous.device != "cuda" and not runtime["cuda"]["available"]:
-            raise HTTPException(422, runtime["cuda"]["reason"])
+        # Only turning CUDA on needs the hardware answer, so only that change waits for
+        # the probe. Saving anything else must not import the inference stack.
+        if settings.device == "cuda" and previous.device != "cuda":
+            runtime = capabilities_for(store.directory)
+            if not runtime["cuda"]["available"]:
+                raise HTTPException(422, runtime["cuda"]["reason"])
         # A model is chosen after it is downloaded, never before. Otherwise the first
         # job to run pays for the download and looks like it has stalled.
-        if settings.model != previous.model and settings.model not in runtime["models"]["speech"]:
+        if settings.model != previous.model and settings.model not in model_inventory(store.directory)["speech"]:
             raise HTTPException(422, f"Download the {settings.model} model before selecting it")
         if settings.discovery_fingerprint() != previous.discovery_fingerprint():
             db.invalidate_sync()
@@ -388,7 +402,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
 
         skip_short_pending(settings, db)
         service.scan_event.set()
-        return {**store.public(), "api_key": store.token, "capabilities": runtime}
+        return settings_payload()
 
     @app.get("/api/media-folders", dependencies=[Depends(authenticate)])
     def media_folders():

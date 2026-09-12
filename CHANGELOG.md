@@ -89,6 +89,9 @@ re-audits anything.
 
 - Integrated audio-language, recognition-confidence, and authored-provider recovery fixes
   (audit policy 0.3.7). Provider outcomes distinguish requests from changed subtitle bytes.
+- Sign-in and page load no longer wait for hardware detection. The Settings page shows
+  "Checking hardware…" until the report arrives.
+- Saving a setting other than the processing device no longer runs hardware detection.
 
 ### 0.4.8
 

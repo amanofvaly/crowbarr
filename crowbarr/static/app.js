@@ -620,7 +620,7 @@ function megabytes(size) {
 // The server owns the list of settings a verdict depends on. Changing one re-checks
 // the library, which is a decision worth offering rather than performing silently.
 function recheckFields() {
-  return settings?.capabilities?.recheck_fields || [];
+  return settings?.recheck_fields || [];
 }
 function saveActions() {
   const changed = recheckFields().some(
@@ -685,24 +685,34 @@ function refreshSaveActions() {
   bar.innerHTML = saveActions();
   bar.append(state);
 }
+// The hardware report arrives after the page, never before it. Unknown is shown as
+// checking, not as unavailable: a user with a working GPU must not read "no GPU"
+// while the probe is still running.
+function capabilitiesPending() {
+  return !settings.capabilities || settings.capabilities.status === "checking";
+}
 function settingsPage() {
   const capabilities = settings.capabilities;
+  const checking = capabilitiesPending();
+  if (checking) loadCapabilities();
   const recheckCount = status?.media_count
     ? `all ${fmt(status.media_count)} media files`
     : "every media file";
-  const cpuAvailable = capabilities?.cpu?.available === true;
-  const cudaAvailable = capabilities?.cuda?.available === true;
+  const cpuAvailable = checking || capabilities?.cpu?.available === true;
+  const cudaAvailable = checking || capabilities?.cuda?.available === true;
   const refinementAvailable = capabilities?.refinement?.available === true;
   const downloaded = new Set(capabilities?.models?.speech || []);
   const fetching = capabilities?.models?.speech_downloads || {};
   const alignment = capabilities?.models?.alignment;
   const downloading = alignment?.status === "running";
   // Available needs no explanation; the table shows size and state. Unavailable does.
-  const refinementHelp = refinementAvailable
-    ? "Runs on the CPU."
-    : capabilities?.refinement?.reason || "Availability could not be determined.";
-  const alignmentAction = alignmentAsset(alignment, refinementAvailable);
-  const deviceHelp = [
+  const refinementHelp = checking
+    ? "Checking hardware…"
+    : refinementAvailable
+      ? "Runs on the CPU."
+      : capabilities?.refinement?.reason || "Availability could not be determined.";
+  const alignmentAction = checking ? "" : alignmentAsset(alignment, refinementAvailable);
+  const deviceHelp = checking ? "Checking hardware…" : [
     !cpuAvailable ? capabilities?.cpu?.reason || "CPU runtime availability could not be determined." : "",
     cudaAvailable
       ? "An NVIDIA graphics card was found. Loading the model can still fail if its memory runs short."
@@ -772,7 +782,7 @@ function settingsPage() {
         ) +
         check(
           "refine_generated",
-          refinementAvailable ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
+          refinementAvailable || checking ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
           esc(refinementHelp),
           !refinementAvailable || !alignment?.present,
         ) +
@@ -1406,6 +1416,27 @@ async function copy(value) {
   if (!ok)
     throw new Error("Copy unavailable. Reveal the key and copy it manually.");
 }
+// Ask for the hardware report until the probe has settled, then redraw the settings
+// page. navigate() captures unsaved fields first, so a late answer never discards a draft.
+let capabilitiesLoad = null;
+function loadCapabilities() {
+  if (capabilitiesLoad) return;
+  capabilitiesLoad = (async () => {
+    try {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const state = await api("/capabilities");
+        settings.capabilities = state;
+        if (state.status !== "checking") break;
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    } catch {
+      return;
+    } finally {
+      capabilitiesLoad = null;
+    }
+    if (route === "settings" && !capabilitiesPending()) await navigate();
+  })();
+}
 let modelPoll = null;
 async function pollModels() {
   clearInterval(modelPoll);
@@ -1713,7 +1744,7 @@ document.addEventListener("change", async (event) => {
     }
     captureSettings();
     refreshSaveActions();
-    const help = settings.device === "cuda" && !settings.capabilities?.cuda?.available
+    const help = settings.device === "cuda" && settings.capabilities?.cuda?.available === false
       ? settings.cpu_fallback
         ? "Crowbarr is set to use a graphics card, but none is available. Processing runs on the CPU instead."
         : "Crowbarr is set to use a graphics card, but none is available. Turn on CPU fallback or choose CPU, or jobs will not run."

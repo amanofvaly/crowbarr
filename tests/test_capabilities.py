@@ -24,6 +24,7 @@ def report(cuda=False, refinement=False):
 @pytest.fixture(autouse=True)
 def clear_cache(monkeypatch):
     monkeypatch.setattr(capabilities, "_cached", None)
+    monkeypatch.setattr(capabilities, "_refreshing", None)
 
 
 def test_probe_is_bounded_cached_and_returns_independent_results(monkeypatch):
@@ -128,7 +129,7 @@ def test_web_process_does_not_import_torch():
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr("crowbarr.capabilities.runtime_capabilities", lambda: report())
+    monkeypatch.setattr("crowbarr.capabilities.runtime_capabilities", lambda block=True: report())
     with TestClient(create_app(tmp_path, background=False)) as client:
         client.headers["X-Api-Key"] = client.app.state.store.token
         yield client
@@ -146,7 +147,7 @@ def test_capabilities_are_authenticated_and_in_settings(client):
         "speech_downloads": {},
         "alignment": {"present": False, "bytes": 0, "status": "idle", "reason": ""},
     }
-    assert client.get("/api/settings").json()["capabilities"]["models"] == served["models"]
+    assert "capabilities" not in client.get("/api/settings").json()
     client.headers.clear()
     assert client.get("/api/capabilities").status_code == 401
 
@@ -174,7 +175,7 @@ def test_saved_unavailable_cuda_survives_unrelated_saves(client, full_payload):
 
 
 def test_available_cuda_can_be_selected_and_cpu_precision_is_validated(client, monkeypatch):
-    monkeypatch.setattr("crowbarr.capabilities.runtime_capabilities", lambda: report(cuda=True, refinement=True))
+    monkeypatch.setattr("crowbarr.capabilities.runtime_capabilities", lambda block=True: report(cuda=True, refinement=True))
     assert client.put("/api/settings", json={"device": "cuda", "compute_type": "float16"}).status_code == 200
     assert client.put("/api/settings", json={"device": "cpu"}).status_code == 422
     assert client.put("/api/settings", json={"device": "cpu", "compute_type": "int8"}).status_code == 200
@@ -371,3 +372,105 @@ assert.equal(elements.compute_type.options.find(option => option.value === "floa
         capture_output=True, text=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_a_running_probe_does_not_block_a_non_blocking_read(monkeypatch):
+    """The sign-in path must never wait on the hardware check."""
+    import threading
+    import time as _time
+
+    release = threading.Event()
+
+    def slow_probe():
+        release.wait(5)
+        return report(cuda=True)
+
+    monkeypatch.setattr(capabilities, "_run_probe", slow_probe)
+    started = _time.monotonic()
+    first = capabilities.runtime_capabilities(block=False)
+    assert _time.monotonic() - started < 0.5
+    assert first["status"] == "checking"
+    assert first["cuda"]["available"] is None
+    release.set()
+    deadline = _time.monotonic() + 5
+    while capabilities.runtime_capabilities(block=False)["status"] == "checking":
+        assert _time.monotonic() < deadline
+        _time.sleep(0.05)
+    assert capabilities.runtime_capabilities(block=False)["cuda"]["available"] is True
+    # The blocking form still answers with the probe result once it exists.
+    assert capabilities.runtime_capabilities()["cuda"]["available"] is True
+
+
+def test_settings_answer_without_waiting_for_the_hardware_probe(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
+    release = threading.Event()
+    monkeypatch.setattr(capabilities, "_run_probe", lambda: release.wait(5) or report())
+    with TestClient(create_app(tmp_path, background=False)) as client:
+        client.headers["X-Api-Key"] = client.app.state.store.token
+        started = _time.monotonic()
+        served = client.get("/api/settings").json()
+        assert _time.monotonic() - started < 0.5
+        assert "capabilities" not in served
+        from crowbarr.config import FINGERPRINT_FIELDS
+
+        assert served["recheck_fields"] == list(FINGERPRINT_FIELDS)
+        checking = client.get("/api/capabilities").json()
+        assert checking["status"] == "checking"
+        assert checking["models"]["speech"] == []
+        release.set()
+
+
+def test_saving_an_unrelated_setting_does_not_run_the_probe(tmp_path, monkeypatch):
+    calls = []
+
+    def run():
+        calls.append(True)
+        return report()
+
+    monkeypatch.setattr(capabilities, "_run_probe", run)
+    with TestClient(create_app(tmp_path, background=False)) as client:
+        client.headers["X-Api-Key"] = client.app.state.store.token
+        assert client.put("/api/settings", json={"cpu_threads": 3}).status_code == 200
+        assert calls == []
+        # Turning CUDA on is the change that needs the hardware answer.
+        assert client.put("/api/settings", json={"device": "cuda"}).status_code == 422
+        assert len(calls) == 1
+
+
+def test_settings_page_shows_checking_rather_than_unavailable_while_the_probe_runs():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is needed to render the settings form")
+    from crowbarr.config import Settings
+
+    settings = Settings().model_dump()
+    settings["capabilities"] = {
+        "status": "checking",
+        "cpu": {"available": None, "reason": "", "compute_types": []},
+        "cuda": {"available": None, "reason": "", "compute_types": []},
+        "refinement": {"available": None, "reason": ""},
+        "models": {"speech": [], "speech_downloads": {}, "alignment": {"present": False, "status": "idle"}},
+    }
+    script = r"""
+const fs = require("node:fs"), vm = require("node:vm");
+const source = fs.readFileSync("crowbarr/static/app.js", "utf8");
+const settings = JSON.parse(process.argv[1]);
+const context = vm.createContext({
+  settings, section: "processing", groups: [], heading: () => "", esc: v => String(v ?? ""),
+  $: () => ({}), status: {media_count: 1}, fmt: v => String(v), savedSettings: null,
+  button: (l, a) => `<button data-action="${a}">${l}</button>`,
+  document: {addEventListener: () => {}, documentElement: {dataset: {}}},
+  loadCapabilities: () => {},
+});
+vm.runInContext(source.slice(source.indexOf("const field ="), source.indexOf("function apiPage()")), context);
+console.log(vm.runInContext("settingsPage()", context));
+"""
+    result = subprocess.run(
+        [node, "-e", script, json.dumps(settings)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "(unavailable)" not in result.stdout
+    assert "Checking hardware" in result.stdout
