@@ -116,7 +116,7 @@ def manifests(version, output, source=Path(".")):
         (output / name).write_text(text)
     for name in (
         "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE", ".env.example",
-        "workflow.html", "docs/docker.md", "docs/nas.md", "docs/migration.md",
+        "workflow.html", "docs/docker.md", "docs/nas.md", "docs/unraid.md", "docs/migration.md",
         "docs/linux.md", "integrations/bazarr-notify.py",
     ):
         path = source / name
