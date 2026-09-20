@@ -85,6 +85,11 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+## 0.4.11
+
+- Fixed restart race condition where "database is locked" errors during upgrade (and in later
+    normal operation) caused worker instability and unnecessary retries.
+
 ### 0.4.10
 
 - Sign-in and page load no longer wait for hardware detection. The Settings page shows
