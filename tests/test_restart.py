@@ -406,3 +406,56 @@ def test_relative_app_data_path_is_fixed_before_working_directory_changes(tmp_pa
     assert ConfigStore(tmp_path / "state").get().paused
     identifier = app.state.db.enqueue("/media/movie.mkv", "one", None, 0)
     assert Database(tmp_path / "state" / "crowbarr.db").get(identifier)
+
+
+def test_worker_retries_on_database_locked(tmp_path, monkeypatch, caplog):
+    store = ConfigStore(tmp_path)
+    db = Database(tmp_path / "crowbarr.db")
+    daemon = service.Service(store, db)
+    attempts = iter([sqlite3.OperationalError("database is locked"), None])
+
+    def claim_mock(*args, **kwargs):
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        daemon.stop_event.set()
+        return None
+
+    monkeypatch.setattr(db, "claim", claim_mock)
+    with caplog.at_level(logging.WARNING, logger="crowbarr"):
+        daemon.worker()
+
+    assert any("Database is busy" in record.message for record in caplog.records)
+
+
+def test_claim_retries_on_database_locked(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    db = Database(tmp_path / "crowbarr.db")
+    db.enqueue("/media/test.mkv", "sig1", None, 0)
+    attempts = [0]
+    orig_connect = db.connect
+
+    class ConnectionProxy:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            if sql == "BEGIN IMMEDIATE" and attempts[0] < 2:
+                attempts[0] += 1
+                raise sqlite3.OperationalError("database is locked")
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    @contextmanager
+    def flakey_connect():
+        with orig_connect() as conn:
+            yield ConnectionProxy(conn)
+
+    monkeypatch.setattr(db, "connect", flakey_connect)
+    claimed = db.claim()
+    assert claimed is not None
+    assert attempts[0] == 2
+

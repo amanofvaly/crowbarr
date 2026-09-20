@@ -139,7 +139,7 @@ class Database:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=30)
+        db = sqlite3.connect(self.path, timeout=60)
         db.row_factory = sqlite3.Row
         try:
             with db:
@@ -518,32 +518,39 @@ class Database:
                 parameters.append(generation)
         if not background_allowed:
             scope += "AND origin IN ('manual','import') "
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            from .catalog import refresh_policy
+        for attempt in range(5):
+            try:
+                with self.connect() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    from .catalog import refresh_policy
 
-            refresh_policy(db)
-            if db.execute("SELECT 1 FROM jobs WHERE state='processing'").fetchone():
-                return None
-            row = db.execute(
-                "SELECT * FROM jobs WHERE state IN ('waiting','queued','retry') AND ready<=? "
-                + scope
-                # `ready` gates eligibility only. Ordering by it would let the Bazarr
-                # wait permanently demote media that arrived without a subtitle behind
-                # every file that already had one, so order by arrival instead.
-                + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,"
-                "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id LIMIT 1",
-                parameters,
-            ).fetchone()
-            if not row:
-                return None
-            db.execute(
-                "UPDATE jobs SET state='processing',stage='Preparing audio',attempts=attempts+1,"
-                "updated=?,started=?,progress_current=NULL,progress_total=NULL,cached=NULL,"
-                "generation=generation+1,error=NULL WHERE id=?",
-                (now, now, row["id"]),
-            )
-            return dict(db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
+                    refresh_policy(db)
+                    if db.execute("SELECT 1 FROM jobs WHERE state='processing'").fetchone():
+                        return None
+                    row = db.execute(
+                        "SELECT * FROM jobs WHERE state IN ('waiting','queued','retry') AND ready<=? "
+                        + scope
+                        # `ready` gates eligibility only. Ordering by it would let the Bazarr
+                        # wait permanently demote media that arrived without a subtitle behind
+                        # every file that already had one, so order by arrival instead.
+                        + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,"
+                        "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id LIMIT 1",
+                        parameters,
+                    ).fetchone()
+                    if not row:
+                        return None
+                    db.execute(
+                        "UPDATE jobs SET state='processing',stage='Preparing audio',attempts=attempts+1,"
+                        "updated=?,started=?,progress_current=NULL,progress_total=NULL,cached=NULL,"
+                        "generation=generation+1,error=NULL WHERE id=?",
+                        (now, now, row["id"]),
+                    )
+                    return dict(db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
+            except sqlite3.OperationalError as error:
+                if ("locked" in str(error).lower() or "busy" in str(error).lower()) and attempt < 4:
+                    time.sleep(0.1 * (2 ** attempt))
+                    continue
+                raise
 
     def register_artifact(self, media: str, path: str, digest: str, job_id: int) -> None:
         with self.connect() as db:
@@ -587,64 +594,72 @@ class Database:
             values.update(progress_current=None, progress_total=None)
         values["updated"] = time.time()
         stale_candidates: list[Path] = []
-        with self.connect() as db:
-            result = db.execute(
-                "UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?"
-                + (" AND generation=?" if expected_generation is not None else ""),
-                (*values.values(), job_id, *((expected_generation,) if expected_generation is not None else ())),
-            )
-            if not result.rowcount:
-                return False
-            if values.get("state") in ("completed", "unchanged", "review", "failed"):
-                row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-                if row:
-                    db.execute(
-                        "INSERT INTO history(job_id,media,state,error,output,finished)"
-                        " VALUES (?,?,?,?,?,?)",
-                        (job_id, row["media"], row["state"], row["error"], row["output"], values["updated"]),
+        for attempt in range(5):
+            try:
+                with self.connect() as db:
+                    result = db.execute(
+                        "UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?"
+                        + (" AND generation=?" if expected_generation is not None else ""),
+                        (*values.values(), job_id, *((expected_generation,) if expected_generation is not None else ())),
                     )
-                    if row["state"] in ("completed", "unchanged", "review"):
-                        output_sha256 = None
-                        if row["state"] == "completed" and row["output"]:
-                            try:
-                                report = json.loads(row["report"] or "{}")
-                                content = Path(row["output"]).read_bytes()
-                                digest = hashlib.sha256(content).hexdigest()
-                                if digest == report.get("output_sha256"):
-                                    output_sha256 = digest
-                            except (OSError, ValueError, TypeError):
-                                pass
-                        db.execute(
-                            "INSERT OR REPLACE INTO results"
-                            "(media,signature,state,stage,error,report,output,output_sha256,"
-                            "finished) VALUES (?,?,?,?,?,?,?,?,?)",
-                            (row["media"], row["signature"], row["state"], row["stage"],
-                             row["error"], row["report"], row["output"], output_sha256,
-                             values["updated"]),
-                        )
-                        pruned = db.execute(
-                            "SELECT signature,report FROM results WHERE media=? ORDER BY finished DESC "
-                            "LIMIT -1 OFFSET 5",
-                            (row["media"],),
-                        ).fetchall()
-                        candidate_directory = self.path.parent / "candidates"
-                        for old in pruned:
-                            try:
-                                candidate = Path(json.loads(old["report"] or "{}").get("candidate", ""))
-                                expected = candidate_directory / f"{job_id}-{old['signature']}.srt"
-                                if candidate == expected:
-                                    stale_candidates.append(candidate)
-                            except (TypeError, ValueError):
-                                pass
-                        db.execute(
-                            "DELETE FROM results WHERE media=? AND signature NOT IN "
-                            "(SELECT signature FROM results WHERE media=? ORDER BY finished DESC LIMIT 5)",
-                            (row["media"], row["media"]),
-                        )
-                    db.execute(
-                        "DELETE FROM history WHERE id NOT IN "
-                        "(SELECT id FROM history ORDER BY finished DESC LIMIT 5000)"
-                    )
+                    if not result.rowcount:
+                        return False
+                    if values.get("state") in ("completed", "unchanged", "review", "failed"):
+                        row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+                        if row:
+                            db.execute(
+                                "INSERT INTO history(job_id,media,state,error,output,finished)"
+                                " VALUES (?,?,?,?,?,?)",
+                                (job_id, row["media"], row["state"], row["error"], row["output"], values["updated"]),
+                            )
+                            if row["state"] in ("completed", "unchanged", "review"):
+                                output_sha256 = None
+                                if row["state"] == "completed" and row["output"]:
+                                    try:
+                                        report = json.loads(row["report"] or "{}")
+                                        content = Path(row["output"]).read_bytes()
+                                        digest = hashlib.sha256(content).hexdigest()
+                                        if digest == report.get("output_sha256"):
+                                            output_sha256 = digest
+                                    except (OSError, ValueError, TypeError):
+                                        pass
+                                db.execute(
+                                    "INSERT OR REPLACE INTO results"
+                                    "(media,signature,state,stage,error,report,output,output_sha256,"
+                                    "finished) VALUES (?,?,?,?,?,?,?,?,?)",
+                                    (row["media"], row["signature"], row["state"], row["stage"],
+                                     row["error"], row["report"], row["output"], output_sha256,
+                                     values["updated"]),
+                                )
+                                pruned = db.execute(
+                                    "SELECT signature,report FROM results WHERE media=? ORDER BY finished DESC "
+                                    "LIMIT -1 OFFSET 5",
+                                    (row["media"],),
+                                ).fetchall()
+                                candidate_directory = self.path.parent / "candidates"
+                                for old in pruned:
+                                    try:
+                                        candidate = Path(json.loads(old["report"] or "{}").get("candidate", ""))
+                                        expected = candidate_directory / f"{job_id}-{old['signature']}.srt"
+                                        if candidate == expected:
+                                            stale_candidates.append(candidate)
+                                    except (TypeError, ValueError):
+                                        pass
+                                db.execute(
+                                    "DELETE FROM results WHERE media=? AND signature NOT IN "
+                                    "(SELECT signature FROM results WHERE media=? ORDER BY finished DESC LIMIT 5)",
+                                    (row["media"], row["media"]),
+                                )
+                            db.execute(
+                                "DELETE FROM history WHERE id NOT IN "
+                                "(SELECT id FROM history ORDER BY finished DESC LIMIT 5000)"
+                            )
+                break
+            except sqlite3.OperationalError as error:
+                if ("locked" in str(error).lower() or "busy" in str(error).lower()) and attempt < 4:
+                    time.sleep(0.1 * (2 ** attempt))
+                    continue
+                raise
         for candidate in stale_candidates:
             try:
                 candidate.unlink(missing_ok=True)
