@@ -679,3 +679,64 @@ def test_one_unreadable_file_does_not_leave_keep_results_pending(tmp_path, monke
 
     assert library.scan(settings, db) == 0
     assert db.carried_fingerprint(settings.fingerprint()) == ("", "")
+
+
+def test_idle_claims_do_not_rewrite_library_policy_every_poll(tmp_path, monkeypatch):
+    import crowbarr.catalog as catalog
+    import crowbarr.db as dbmodule
+
+    calls = 0
+    original = catalog.refresh_policy
+
+    def counting(connection):
+        nonlocal calls
+        calls += 1
+        original(connection)
+
+    monkeypatch.setattr(catalog, "refresh_policy", counting)
+    db = Database(tmp_path / "crowbarr.db")
+    for _ in range(5):
+        assert db.claim() is None
+    assert calls == 1
+
+    clock = [time.monotonic()]
+    monkeypatch.setattr(dbmodule.time, "monotonic", lambda: clock[0])
+    clock[0] += dbmodule.POLICY_REFRESH_SECONDS + 1
+    db.claim()
+    assert calls == 2
+
+
+def test_claim_skips_policy_pass_while_a_job_is_processing(tmp_path, monkeypatch):
+    import crowbarr.catalog as catalog
+
+    db = Database(tmp_path / "crowbarr.db")
+    db.enqueue("/media/one.mkv", "a", None, 0)
+    db.enqueue("/media/two.mkv", "b", None, 0)
+    assert db.claim()["media"] == "/media/one.mkv"
+
+    db.policy_refreshed = float("-inf")
+    calls = 0
+
+    def counting(connection):
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(catalog, "refresh_policy", counting)
+    assert db.claim() is None
+    assert calls == 0
+
+
+def test_explicit_policy_refresh_resets_the_claim_interval(tmp_path, monkeypatch):
+    import crowbarr.catalog as catalog
+
+    db = Database(tmp_path / "crowbarr.db")
+    db.refresh_library_policy()
+    calls = 0
+
+    def counting(connection):
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(catalog, "refresh_policy", counting)
+    db.claim()
+    assert calls == 0

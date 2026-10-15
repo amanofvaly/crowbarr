@@ -208,7 +208,12 @@ class Service:
                 # can contain media paths or upstream details. Server logs retain the
                 # traceback and concrete SQLite reason needed to diagnose a repeat.
                 log.exception("Library scan failed; Crowbarr will retry")
-                self.db.notice("scan", f"Library scan failed ({type(error).__name__}); Crowbarr will retry.")
+                try:
+                    self.db.notice("scan", f"Library scan failed ({type(error).__name__}); Crowbarr will retry.")
+                except Exception:
+                    # Recording the notice can hit the same lock that failed the scan.
+                    # Losing the notice is acceptable; losing the scanner thread is not.
+                    log.warning("Could not record the scan failure notice; Crowbarr will retry")
             finally:
                 self.scan_in_progress = False
             self.scan_event.wait(self.store.get().scan_seconds)

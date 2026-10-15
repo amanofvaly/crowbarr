@@ -7,6 +7,13 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+# A full library-policy pass rewrites every job row and takes about a second on a
+# 20k-file library. Running it inside every claim (once per second while idle) kept
+# the SQLite write lock held almost continuously, starving the scanner until its
+# 60 second busy timeout expired. Scans and preference changes refresh explicitly,
+# so claims only need a periodic safety pass.
+POLICY_REFRESH_SECONDS = 60
+
 
 class StaleJob(RuntimeError):
     """The worker's request has been replaced since it was claimed."""
@@ -18,6 +25,7 @@ class Database:
     def __init__(self, path: Path):
         self.path = path.resolve()
         self.worker_job = None
+        self.policy_refreshed = float("-inf")
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
@@ -436,6 +444,7 @@ class Database:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             refresh_policy(connection)
+        self.policy_refreshed = time.monotonic()
 
     def cache_audio(self, media: str, metadata: dict) -> dict:
         from .catalog import decision, identity, language_codes, preferences
@@ -522,11 +531,13 @@ class Database:
             try:
                 with self.connect() as db:
                     db.execute("BEGIN IMMEDIATE")
-                    from .catalog import refresh_policy
-
-                    refresh_policy(db)
                     if db.execute("SELECT 1 FROM jobs WHERE state='processing'").fetchone():
                         return None
+                    if time.monotonic() - self.policy_refreshed >= POLICY_REFRESH_SECONDS:
+                        from .catalog import refresh_policy
+
+                        refresh_policy(db)
+                        self.policy_refreshed = time.monotonic()
                     row = db.execute(
                         "SELECT * FROM jobs WHERE state IN ('waiting','queued','retry') AND ready<=? "
                         + scope
