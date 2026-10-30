@@ -85,6 +85,20 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.12
+
+- Changing the Bazarr wait now applies to files already waiting. They are released or held
+  at their new deadline on the next scan, instead of keeping the wait they were queued with.
+- Run next releases a waiting file at once. It no longer sits behind the Bazarr wait.
+- The Activity queue lists the running file first, then files ready to run, then files still
+  waiting, each in the order they will be picked.
+- Fixed clicking a show in the Library failing with "Cannot set properties of null". The show
+  row now has its "Seasons & episodes" label back.
+- Fixed the Library, Activity and Dashboard lists sometimes showing the previous row's title
+  after a search or refresh. A movie could appear under another movie's name.
+- Saving a setting no longer waits for the whole queue to be scanned for short videos. The
+  scan now runs only when the minimum video length changes, and after the save completes.
+
 ### 0.4.11
 
 - Fixed restart race condition where "database is locked" errors during upgrade (and in later
