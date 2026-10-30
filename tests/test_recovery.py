@@ -141,3 +141,104 @@ def test_language_probe_counts_japanese_speech_without_spaces(monkeypatch, tmp_p
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
     with pytest.raises(ReviewRequired, match="Audio language is ja"):
         inference.verify_audio_language(audio, Settings(), tmp_path)
+
+
+def test_more_probes_follow_only_while_fewer_than_two_are_confident():
+    quiet, speech = sample(words=0, probability=0.34), sample()
+    film, length = 7200, 60
+
+    assert [inference.next_probe([], film, length)] == [1 / 6]
+    assert inference.next_probe([speech, speech], film, length) == 5 / 6
+    assert inference.next_probe([speech, speech, speech], film, length) is None
+    assert inference.next_probe([speech, quiet, speech], film, length) is None
+    assert inference.next_probe([speech, quiet, quiet], film, length) == 1 / 3
+    assert inference.next_probe([quiet] * 4, film, length) == 2 / 3
+    assert inference.next_probe([quiet] * 9, film, length) is None
+    # A short recording has no room for probes that do not overlap.
+    assert inference.next_probe([speech, quiet, quiet], 180, 60) is None
+
+
+def scripted_probe(monkeypatch, tmp_path, answers, seconds=7200):
+    """Run the real probe loop against a detector that answers from `answers`, in order."""
+    audio = tmp_path / "audio.wav"
+    with wave.open(str(audio), "wb") as stream:
+        stream.setparams((1, 2, 100, 0, "NONE", "not compressed"))
+        stream.writeframes(b"\0\0" * (100 * seconds))
+    heard = []
+
+    class Samples:
+        def astype(self, *args): return self
+        def __truediv__(self, value): return self
+
+    class Model:
+        def __init__(self, *args, **kwargs):
+            self.hf_tokenizer = SimpleNamespace(
+                encode=lambda text, **kw: SimpleNamespace(ids=list(range(int(text))))
+            )
+
+        def transcribe(self, *args, **kwargs):
+            language, probability, tokens = answers[len(heard)]
+            heard.append(language)
+            return iter([SimpleNamespace(text=str(tokens))]), SimpleNamespace(
+                language=language, language_probability=probability,
+            )
+
+    monkeypatch.setitem(sys.modules, "numpy", SimpleNamespace(
+        frombuffer=lambda *a, **kw: Samples(), int16="int16", float32="float32",
+    ))
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
+    return audio, heard
+
+
+def test_a_quiet_probe_no_longer_sends_an_english_film_to_review(monkeypatch, tmp_path):
+    answers = [("en", 0.34, 0), ("en", 0.99, 30), ("en", 0.34, 0), ("en", 0.98, 30)]
+    audio, heard = scripted_probe(monkeypatch, tmp_path, answers)
+
+    verdict = inference.verify_audio_language(audio, Settings(), tmp_path)
+
+    assert verdict["language"] == "en"
+    assert len(heard) == 4
+
+
+def test_clear_speech_in_the_first_three_probes_needs_no_more(monkeypatch, tmp_path):
+    audio, heard = scripted_probe(monkeypatch, tmp_path, [("en", 0.95, 30)] * 3)
+
+    inference.verify_audio_language(audio, Settings(), tmp_path)
+
+    assert len(heard) == 3
+
+
+def test_a_foreign_film_is_still_stopped_after_extra_probes(monkeypatch, tmp_path):
+    answers = [("fr", 0.34, 0), ("fr", 0.95, 30), ("fr", 0.34, 0), ("fr", 0.96, 30)]
+    audio, heard = scripted_probe(monkeypatch, tmp_path, answers)
+
+    with pytest.raises(ReviewRequired, match="Audio language is fr"):
+        inference.verify_audio_language(audio, Settings(), tmp_path)
+
+    assert len(heard) == 4
+
+
+def test_a_film_with_no_usable_speech_is_still_uncertain_after_every_probe(monkeypatch, tmp_path):
+    audio, heard = scripted_probe(monkeypatch, tmp_path, [("en", 0.34, 0)] * 9)
+
+    with pytest.raises(ReviewRequired, match="uncertain or mixed"):
+        inference.verify_audio_language(audio, Settings(), tmp_path)
+
+    assert len(heard) == 9
+
+
+def test_mixed_languages_stay_uncertain(monkeypatch, tmp_path):
+    answers = [("en", 0.95, 30), ("fr", 0.95, 30), ("en", 0.34, 0)]
+    audio, heard = scripted_probe(monkeypatch, tmp_path, answers + [("en", 0.34, 0)] * 6)
+
+    with pytest.raises(ReviewRequired, match="uncertain or mixed"):
+        inference.verify_audio_language(audio, Settings(), tmp_path)
+
+
+def test_a_short_recording_is_not_probed_more_than_three_times(monkeypatch, tmp_path):
+    audio, heard = scripted_probe(monkeypatch, tmp_path, [("en", 0.34, 0)] * 3, seconds=180)
+
+    with pytest.raises(ReviewRequired, match="uncertain or mixed"):
+        inference.verify_audio_language(audio, Settings(), tmp_path)
+
+    assert len(heard) == 3

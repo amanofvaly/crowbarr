@@ -23,7 +23,7 @@ crowbarr = "crowbarr.__main__:main"
 include = ["crowbarr*"]
 
 [tool.setuptools.package-data]
-crowbarr = ["static/*", "static/vendor/*"]
+crowbarr = ["static/*", "refinement.lock"]
 
 [tool.setuptools.dynamic]
 version = {attr = "crowbarr.version.APPLICATION_VERSION"}

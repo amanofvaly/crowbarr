@@ -1,12 +1,12 @@
 from pathlib import Path
 
 
-def test_bootstrap_is_bundled_with_its_license():
+def test_the_dashboard_loads_no_third_party_styles():
     import crowbarr
 
-    static = Path(crowbarr.__file__).parent / "static"
-    assert (static / "vendor" / "bootstrap.min.css").stat().st_size > 100000
-    assert "MIT" in (static / "vendor" / "BOOTSTRAP-LICENSE").read_text()
+    page = (Path(crowbarr.__file__).parent / "static" / "index.html").read_text()
+    assert "vendor" not in page
+    assert not (Path(crowbarr.__file__).parent / "static" / "vendor").exists()
 
 
 def test_docker_context_is_allowlisted():

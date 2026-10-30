@@ -142,6 +142,9 @@ def test_capabilities_are_authenticated_and_in_settings(client):
     from crowbarr.config import FINGERPRINT_FIELDS
 
     assert served["recheck_fields"] == list(FINGERPRINT_FIELDS)
+    software = served["models"].pop("software")
+    assert set(software) == {"present", "status", "reason", "installable", "unsupported_reason"}
+    assert software["present"] is False and software["status"] == "idle"
     assert served["models"] == {
         "speech": [],
         "speech_downloads": {},
@@ -321,6 +324,7 @@ const context = vm.createContext({
       models: {speech: ["small"], alignment: {present: true, bytes: 377487360, status: "ready", reason: ""}}}},
   section: "processing", groups: [], heading: () => "", esc: value => String(value ?? ""),
   status: {media_count: 2218}, fmt: value => String(value), savedSettings: null,
+  pollSoftware: () => {},
   button: (label, action, style, attrs) => `<button data-action="${action}" ${attrs || ""}>${label}</button>`,
   $: id => nodes[id], dirty: false, draftDirty: false,
   captureSettings: () => {context.settings.device = elements.device.value;},
@@ -346,7 +350,7 @@ html = vm.runInContext("settingsPage()", context);
 assert.doesNotMatch(html, /value="cuda" selected disabled/);
 assert.doesNotMatch(html, /name="refine_generated"[^>]*disabled/);
 // Downloadable assets all report the same way: name, size, state.
-assert.match(html, /WhisperX alignment<\/td><td class="asset-size">360 MB<\/td>/);
+assert.match(html, /Alignment model<\/td><td class="asset-size">360 MB<\/td>/);
 assert.match(html, />Ready</);
 // Without the model, refinement cannot be turned on and the download is offered instead.
 context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "idle", reason: ""};
@@ -355,6 +359,26 @@ assert.match(missing, /name="refine_generated"[^>]*disabled/);
 assert.match(missing, /data-action="fetch-alignment"/);
 context.settings.capabilities.models.alignment = {present: false, bytes: 0, status: "running", reason: ""};
 assert.match(vm.runInContext("settingsPage()", context), />Downloading</);
+// Without the software, refinement offers two downloads in order, and says why one cannot start.
+context.settings.capabilities.refinement.available = false;
+context.settings.capabilities.models.software = {present: false, status: "idle", reason: "", installable: true, unsupported_reason: ""};
+const offered = vm.runInContext("settingsPage()", context);
+assert.match(offered, /data-action="fetch-software"/);
+assert.match(offered, /After software/);
+assert.match(offered, /Needs the two downloads below/);
+assert.doesNotMatch(offered, /\(unavailable\)/);
+context.settings.capabilities.models.software.status = "running";
+assert.match(vm.runInContext("settingsPage()", context), />Installing</);
+context.settings.capabilities.models.software = {present: false, status: "failed", reason: "The install failed: no network", installable: true, unsupported_reason: ""};
+const failedInstall = vm.runInContext("settingsPage()", context);
+assert.match(failedInstall, /The install failed: no network/);
+assert.match(failedInstall, />Retry</);
+// Where it cannot install, no download is offered and the reason is shown.
+context.settings.capabilities.models.software = {present: false, status: "idle", reason: "", installable: false, unsupported_reason: "Linux x86_64 only."};
+const unsupported = vm.runInContext("settingsPage()", context);
+assert.doesNotMatch(unsupported, /fetch-software/);
+assert.match(unsupported, /Linux x86_64 only/);
+context.settings.capabilities.refinement.available = true;
 vm.runInContext(source.slice(source.indexOf('document.addEventListener("change"'),
   source.indexOf('document.addEventListener("submit"')), context);
 elements.device.value = "cpu";

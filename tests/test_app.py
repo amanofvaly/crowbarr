@@ -26,7 +26,7 @@ def test_dashboard_and_health_public_but_data_private(client):
     assert status.status_code == 200
     assert status.json()["version"] == APPLICATION_VERSION
     assert status.json()["audit_policy_version"] == AUDIT_POLICY_VERSION
-    assert client.get("/static/vendor/bootstrap.min.css").status_code == 200
+    assert client.get("/static/app.css").status_code == 200
 
 
 def test_settings_explain_model_change_and_library_reconciliation(client):

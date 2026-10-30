@@ -248,7 +248,7 @@ def test_shutdown_uses_one_deadline_and_keeps_lock_for_live_threads(tmp_path):
     assert instance.lock_file.closed
 
 
-def test_main_initializes_frozen_workers_before_argument_parsing(monkeypatch):
+def test_main_initializes_frozen_workers_before_argument_parsing(monkeypatch, tmp_path):
     import sys
 
     import uvicorn
@@ -258,11 +258,17 @@ def test_main_initializes_frozen_workers_before_argument_parsing(monkeypatch):
     events = []
     monkeypatch.setattr(__main__.multiprocessing, "freeze_support", lambda: events.append("freeze"))
     monkeypatch.setattr(sys, "argv", ["crowbarr", "--port", "8450"])
-    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: events.append(kwargs))
+    monkeypatch.setenv("CROWBARR_DATA", str(tmp_path))
+
+    def run(self, *args, **kwargs):
+        events.append(self.config)
+        self.started = True
+
+    monkeypatch.setattr(uvicorn.Server, "run", run)
     __main__.main()
     assert events[0] == "freeze"
-    assert events[1]["port"] == 8450
-    assert events[1]["timeout_graceful_shutdown"] == 5
+    assert events[1].port == 8450
+    assert events[1].timeout_graceful_shutdown == 5
 
 
 @pytest.mark.parametrize("interruption", ["stop", "settings", "replacement", "cancel"])
@@ -493,3 +499,11 @@ def test_scanner_survives_when_failure_notice_hits_the_same_lock(tmp_path, monke
     # The thread kept retrying instead of dying on the first failed notice.
     assert scans == 3
     assert "Could not record the scan failure notice" in caplog.text
+
+
+def test_plex_deferral_says_when_plex_cannot_be_reached(tmp_path):
+    daemon = service.Service(ConfigStore(tmp_path), Database(tmp_path / "crowbarr.db"))
+
+    assert daemon.plex_reason() == "Plex is playing; background work deferred"
+    daemon.plex_unreachable = True
+    assert daemon.plex_reason() == "Cannot reach Plex; background work deferred"

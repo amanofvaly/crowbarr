@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -131,3 +132,73 @@ def test_packaging_model_download_retries_transient_failures(tmp_path):
     assert packaging_smoke.load_smoke_model(model, tmp_path, delays.append) == "loaded"
     assert delays == [3, 10]
     assert len(attempts) == 3
+
+
+def update_wheel(directory, version="1.2.3", extra=None, declared=None):
+    wheel = directory / f"crowbarr-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("crowbarr/version.py", declared or f'APPLICATION_VERSION = "{version}"\n')
+        archive.writestr(f"crowbarr-{version}.dist-info/METADATA", "Name: crowbarr\n")
+        for name in extra or []:
+            archive.writestr(name, "x")
+    return wheel
+
+
+def test_update_files_carry_the_wheel_hash_and_the_runtime_it_needs(tmp_path):
+    assets(tmp_path)
+    wheel = update_wheel(tmp_path)
+
+    release_tools.update_manifest("1.2.3", wheel, tmp_path, ROOT)
+
+    release_tools.verify_assets(tmp_path)
+    manifest = json.loads((tmp_path / "crowbarr-update.json").read_text())
+    assert manifest["sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()
+    assert manifest["wheel"] == wheel.name and manifest["python"] == "3.12"
+    assert any(pin.startswith("faster-whisper==") for pin in manifest["runtime"]["cpu"])
+    assert any(pin.startswith("nvidia-cublas") for pin in manifest["runtime"]["cuda"])
+    assert not any(pin.startswith("nvidia-cublas") for pin in manifest["runtime"]["cpu"])
+    assert not any(pin.split("==")[0] in {"torch", "whisperx"} for pin in manifest["runtime"]["cpu"])
+
+
+def test_a_changed_update_wheel_fails_verification(tmp_path):
+    assets(tmp_path)
+    wheel = update_wheel(tmp_path)
+    release_tools.update_manifest("1.2.3", wheel, tmp_path, ROOT)
+
+    update_wheel(tmp_path, extra=["crowbarr/changed.py"])
+
+    with pytest.raises(ValueError, match="checksum"):
+        release_tools.verify_assets(tmp_path)
+
+
+def test_an_update_wheel_may_only_hold_crowbarrs_own_package(tmp_path):
+    assets(tmp_path)
+    wheel = update_wheel(tmp_path, extra=["other_package/__init__.py"])
+    release_tools.update_manifest("1.2.3", wheel, tmp_path, ROOT)
+
+    with pytest.raises(ValueError, match="Unexpected file"):
+        release_tools.verify_assets(tmp_path)
+
+
+def test_an_update_wheel_must_carry_the_version_it_claims(tmp_path):
+    assets(tmp_path)
+    wheel = update_wheel(tmp_path, declared='APPLICATION_VERSION = "9.9.9"\n')
+    release_tools.update_manifest("1.2.3", wheel, tmp_path, ROOT)
+
+    with pytest.raises(ValueError, match="version"):
+        release_tools.verify_assets(tmp_path)
+
+
+def test_a_wheel_without_its_manifest_is_not_a_release_asset(tmp_path):
+    assets(tmp_path)
+    update_wheel(tmp_path)
+
+    with pytest.raises(ValueError, match="one wheel and its manifest"):
+        release_tools.verify_assets(tmp_path)
+
+
+def test_the_update_manifest_needs_the_matching_wheel_name(tmp_path):
+    wheel = update_wheel(tmp_path, version="1.2.3")
+
+    with pytest.raises(ValueError, match="Expected"):
+        release_tools.update_manifest("1.2.4", wheel, tmp_path, ROOT)

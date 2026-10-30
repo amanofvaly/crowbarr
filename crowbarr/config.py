@@ -138,6 +138,8 @@ class Settings(BaseModel):
     quiet_hour_start: int = Field(default=0, ge=0, le=23)
     quiet_hour_end: int = Field(default=0, ge=0, le=23)
     defer_during_plex: bool = True
+    update_check: bool = True
+    auto_update: bool = False
     cpu_fallback: bool = True
     refine_generated: bool = False
     sampled_audit: bool = True

@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgomp1
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /config && chown 1000:1000 /config
 COPY --from=dependencies /opt/venv /opt/venv
+# The refinement add-on installs from this wheel, which PyPI does not host.
+COPY --from=dependencies /wheels /opt/crowbarr/wheels
 # Bind the wheel from the builder so neither sources nor wheel archives ship.
 RUN --mount=type=bind,from=application,source=/app-wheel,target=/app-wheel \
     pip install --no-cache-dir --no-compile --no-deps /app-wheel/*.whl && pip check

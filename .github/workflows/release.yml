@@ -282,6 +282,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the in-app update files
+        env:
+          VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          python -m pip wheel --no-deps --wheel-dir release-assets .
+          python packaging/release_tools.py update-manifest "$VERSION" \
+            "release-assets/crowbarr-$VERSION-py3-none-any.whl" release-assets
       - name: Verify all assets and reject stale runs before promotion
         env:
           VERSION: ${{ needs.release-version.outputs.version }}

@@ -7,7 +7,6 @@
     <meta name="theme-color" content="#454950" />
     <title>Crowbarr — Subtitle workspace</title>
     <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/static/vendor/bootstrap.min.css" />
     <link rel="stylesheet" href="/static/app.css" />
     <script src="/static/app.js" defer></script>
   </head>
@@ -59,27 +58,20 @@
         >
         <nav id="navigation" aria-label="Main navigation"></nav>
         <div class="sidebar-bottom">
+          <a id="update-button" class="update-button" href="#settings/updates" hidden></a>
           <div class="worker-status" role="status" aria-live="polite">
             <span class="status-dot" id="worker-dot"></span>
-            <span
-              ><small>Worker</small
-              ><strong id="worker-state">Connecting</strong></span
-            >
+            <strong id="worker-state">Connecting</strong>
           </div>
-          <div class="release-meta" aria-label="Installed versions">
-            <span><small>Application</small><strong id="version">—</strong></span>
-            <span
-              ><small>Audit policy</small
-              ><strong id="audit-policy-version">—</strong></span
-            >
-          </div>
+          <dl class="release-meta" aria-label="Installed versions">
+            <div><dt>Application</dt><dd id="version">—</dd></div>
+            <div><dt>Audit policy</dt><dd id="audit-policy-version">—</dd></div>
+          </dl>
           <div class="sidebar-actions">
             <button type="button" id="theme-button">
-              <strong id="theme-choice">Use light theme</strong>
+              <span id="theme-choice">Use light theme</span>
             </button>
-            <button type="button" id="sign-out" class="sign-out">
-              Sign out
-            </button>
+            <button type="button" id="sign-out" class="sign-out">Sign out</button>
           </div>
         </div>
       </aside>

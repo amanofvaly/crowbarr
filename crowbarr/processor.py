@@ -789,8 +789,8 @@ def process(
                     # Minimal source installs can omit optional refinement dependencies.
                     # Keep usable Whisper timings and report the missing capability.
                     warnings.append(
-                        "WhisperX refinement is not installed in this image; "
-                        "used Whisper word timestamps instead"
+                        "WhisperX refinement is not installed; used Whisper word timestamps instead. "
+                        "Download the refinement software in Settings, Speech processing"
                     )
                     report["alignment_runtime"] = {
                         "requested_backend": settings.device,

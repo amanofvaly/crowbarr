@@ -78,6 +78,10 @@ can take up to a day to notice. Restarting the Apps service checks immediately.
 
 Updating replaces the image only. Your YAML, storage, port and settings are untouched.
 
+You do not have to wait for TrueNAS. Crowbarr shows an **Update** button in its sidebar
+when a release exists, and Settings, Updates installs it. See
+[Updating from inside Crowbarr](docker.md#updating-from-inside-crowbarr).
+
 Keep a moving tag. Pin a version instead of `latest` and no update is ever reported.
 
 For updates that install themselves with nobody clicking, use Portainer below.

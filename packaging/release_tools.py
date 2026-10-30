@@ -7,7 +7,11 @@ import os
 import re
 import subprocess
 import tarfile
+import zipfile
 from pathlib import Path, PurePosixPath
+
+UPDATE_MANIFEST = "crowbarr-update.json"
+UPDATE_WHEEL = re.compile(r"crowbarr-[0-9]+\.[0-9]+\.[0-9]+-py3-none-any\.whl")
 
 
 def version_tuple(value):
@@ -47,8 +51,13 @@ def verify_assets(directory):
     directory = Path(directory)
     name = "crowbarr-linux-x86_64.tar.gz"
     expected = {name, name + ".sha256", "install-crowbarr.sh"}
-    if {p.name for p in directory.iterdir()} != expected:
+    names = {p.name for p in directory.iterdir()}
+    # The in-app update files are added once the archive has been checked, so they are optional.
+    update = {n for n in names if n == UPDATE_MANIFEST or UPDATE_WHEEL.fullmatch(n)}
+    if names - update != expected:
         raise ValueError("Unexpected or missing release assets")
+    if update:
+        verify_update_files(directory, update)
     checksum = (directory / (name + ".sha256")).read_text().split()
     with (directory / name).open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -103,6 +112,56 @@ def version_image(tag, *digest_files):
     subprocess.run(["docker", "buildx", "imagetools", "create", "-t", tag, *refs], check=True)
 
 
+def lock_pins(path):
+    """`name==version` for every pinned entry of an image lock. Direct URLs are not pins."""
+    return sorted(
+        f"{name}=={version}"
+        for name, version in re.findall(r"(?m)^([A-Za-z0-9_.\-]+)==([^\s\\;]+)", Path(path).read_text())
+    )
+
+
+def update_manifest(version, wheel, output, source=Path(".")):
+    """Describe the in-app update: which wheel, its hash, and the runtime it was built for."""
+    version_tuple(version)
+    wheel, output = Path(wheel), Path(output)
+    if wheel.name != f"crowbarr-{version}-py3-none-any.whl":
+        raise ValueError(f"Expected crowbarr-{version}-py3-none-any.whl, found {wheel.name}")
+    locks = Path(source) / "packaging" / "inference"
+    manifest = {
+        "version": version,
+        "wheel": wheel.name,
+        "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+        "python": "3.12",
+        "runtime": {variant: lock_pins(locks / f"{variant}.lock") for variant in ("cpu", "cuda")},
+    }
+    (output / UPDATE_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def verify_update_files(directory, names):
+    directory = Path(directory)
+    wheels = sorted(n for n in names if n != UPDATE_MANIFEST)
+    if UPDATE_MANIFEST not in names or len(wheels) != 1:
+        raise ValueError("The update files must be one wheel and its manifest")
+    manifest = json.loads((directory / UPDATE_MANIFEST).read_text())
+    wheel = directory / wheels[0]
+    version = manifest.get("version", "")
+    version_tuple(version)
+    if manifest.get("wheel") != wheel.name or wheel.name != f"crowbarr-{version}-py3-none-any.whl":
+        raise ValueError("The update manifest names a different wheel")
+    if manifest.get("sha256") != hashlib.sha256(wheel.read_bytes()).hexdigest():
+        raise ValueError("The update manifest checksum does not match its wheel")
+    if not all(manifest.get("runtime", {}).get(variant) for variant in ("cpu", "cuda")):
+        raise ValueError("The update manifest lists no runtime packages")
+    allowed = ("crowbarr/", f"crowbarr-{version}.dist-info/")
+    with zipfile.ZipFile(wheel) as archive:
+        for member in archive.namelist():
+            if member.startswith("/") or ".." in PurePosixPath(member).parts or not member.startswith(allowed):
+                raise ValueError(f"Unexpected file in the update wheel: {member}")
+        declared = archive.read("crowbarr/version.py").decode()
+    if f'APPLICATION_VERSION = "{version}"' not in declared:
+        raise ValueError("The update wheel does not carry the manifest's version")
+
+
 def manifests(version, output, source=Path(".")):
     version_tuple(version)
     output = Path(output)
@@ -133,11 +192,15 @@ def manifests(version, output, source=Path(".")):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["guard", "verify-assets", "verify-digests", "manifests", "version-image"])
+    parser.add_argument(
+        "action",
+        choices=["guard", "verify-assets", "verify-digests", "manifests", "version-image", "update-manifest"],
+    )
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
     {"guard": guard, "verify-assets": verify_assets, "verify-digests": verify_digests,
-     "manifests": manifests, "version-image": version_image}[args.action](*args.arguments)
+     "manifests": manifests, "version-image": version_image,
+     "update-manifest": update_manifest}[args.action](*args.arguments)
 
 
 if __name__ == "__main__":

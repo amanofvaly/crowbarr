@@ -42,6 +42,11 @@ except Exception:
         reason = "This is the CPU image. Install the CUDA image and expose a compatible NVIDIA GPU to enable CUDA."
     result["cuda"] = {"available": False, "reason": reason, "compute_types": []}
 try:
+    from crowbarr.addons import activate
+    activate()
+except Exception:
+    pass
+try:
     import whisperx
     from whisperx.alignment import align, load_align_model
     result["refinement"] = {"available": True, "reason": "WhisperX is installed. Alignment models are loaded when needed; initialization can still fail."}
@@ -59,6 +64,9 @@ _downloads: dict[str, dict] = {}
 
 
 def _alignment_worker(target, language):
+    from .addons import activate
+
+    activate()
     from whisperx.alignment import load_align_model
 
     load_align_model(language_code=language, device="cpu", model_dir=target)
@@ -71,6 +79,38 @@ def _speech_worker(target, name):
     if name != "small":
         # Every recognition model uses the same multilingual language preflight.
         download_model("small", cache_dir=target)
+
+
+def start_software_install(directory) -> bool:
+    """Install the optional refinement packages in the background.
+
+    Returns False when an install is already running, so a second click is ignored.
+    """
+    from . import addons
+
+    with _download_lock:
+        if _downloads.get("software", {}).get("status") == "running":
+            return False
+        _downloads["software"] = {"status": "running", "reason": ""}
+
+    def run():
+        global _cached, _expires
+        status, reason = "ready", ""
+        try:
+            addons.install(directory)
+        except addons.InstallError as error:
+            status, reason = "failed", str(error)
+        except Exception as error:
+            status, reason = "failed", f"The install failed ({type(error).__name__})."
+        # The hardware probe must look again, or refinement stays "missing" for five minutes.
+        # Reset it before reporting the result, so a page that sees "ready" never reads a stale answer.
+        with _lock:
+            _cached, _expires = None, 0.0
+        with _download_lock:
+            _downloads["software"] = {"status": status, "reason": reason}
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
 
 
 def download_state(name: str = "alignment") -> dict:
@@ -177,10 +217,22 @@ def model_inventory(directory) -> dict:
             name, marker = entry.name, "faster-whisper-"
             if entry.is_dir() and marker in name:
                 speech[name.split(marker, 1)[1]] = True
+    from . import addons
+
     alignment = models / ALIGNMENT_MODEL
     present = alignment.is_file()
     state = download_state()
+    software_ready = addons.installed(directory)
+    software_state = download_state("software")
+    can_install, why_not = addons.supported()
     return {
+        "software": {
+            "present": software_ready,
+            "status": "ready" if software_ready else software_state["status"],
+            "reason": "" if software_ready else software_state["reason"],
+            "installable": can_install,
+            "unsupported_reason": why_not,
+        },
         "speech": sorted(speech),
         "speech_downloads": {
             name: download_state(name)

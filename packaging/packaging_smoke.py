@@ -1,8 +1,9 @@
 """Exercise packaged inference and real job processing in a spawned child.
 
 Release checks download the tiny speech model and decode generated audio on CPU.
-This validates packaging, not recognition accuracy or GPU execution. Missing
-alignment imports fail instead of becoming an optional-refinement warning.
+This validates packaging, not recognition accuracy or GPU execution. A build that
+bundles WhisperX must import it. A build that does not must install the refinement
+add-on the way a user would and then import it, so a broken lock fails the release.
 """
 
 import multiprocessing
@@ -13,17 +14,50 @@ import time
 from pathlib import Path
 
 
-def check_imports():
+def check_imports(refinement=True):
     import ctranslate2
     import faster_whisper
+
+    assert all((ctranslate2, faster_whisper))
+    if not refinement:
+        return
     import torch
     import torchaudio
     from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
     from whisperx.alignment import align, load_align_model
 
-    assert all((ctranslate2, faster_whisper, torchaudio, Wav2Vec2ForCTC, Wav2Vec2Processor))
+    assert all((torchaudio, Wav2Vec2ForCTC, Wav2Vec2Processor))
     assert callable(align) and callable(load_align_model)
     assert torch.ones(2).sum().item() == 2
+
+
+def bundles_refinement():
+    try:
+        import whisperx  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def check_addon_install(directory):
+    """Install the refinement add-on through the same path as the Download button."""
+    from crowbarr import addons, capabilities
+
+    os.environ["CROWBARR_ADDONS"] = str(Path(directory) / "addons")
+    supported, reason = addons.supported()
+    assert supported, reason
+    assert capabilities.start_software_install(directory)
+    deadline = time.monotonic() + 1800
+    while capabilities.download_state("software")["status"] == "running":
+        assert time.monotonic() < deadline, "Add-on install timed out"
+        time.sleep(2)
+    state = capabilities.download_state("software")
+    assert state["status"] == "ready", state
+    assert addons.installed(directory)
+    addons.activate()
+    check_imports(True)
+    runtime = capabilities.runtime_capabilities()
+    assert runtime["refinement"]["available"], runtime["refinement"]["reason"]
 
 
 def load_smoke_model(model_class, root, sleep=time.sleep):
@@ -49,7 +83,7 @@ def load_smoke_model(model_class, root, sleep=time.sleep):
 
 def process_fixture(directory, check_inference=True):
     if check_inference:
-        check_imports()
+        check_imports(bundles_refinement())
     from crowbarr.config import Settings
     from crowbarr.db import Database
     from crowbarr.library import scan
@@ -92,15 +126,16 @@ def process_fixture(directory, check_inference=True):
 
 
 def smoke(check_inference=True):
+    bundled = bundles_refinement()
     if check_inference:
         # Import directly first. The capability probe reports a category, so a packaging
         # gap must raise its own traceback before that category can hide it.
-        check_imports()
+        check_imports(bundled)
         from crowbarr.capabilities import runtime_capabilities
 
         runtime = runtime_capabilities()
         assert runtime["cpu"]["available"], runtime["cpu"]["reason"]
-        assert runtime["refinement"]["available"], runtime["refinement"]["reason"]
+        assert runtime["refinement"]["available"] == bundled, runtime["refinement"]
     with tempfile.TemporaryDirectory(prefix="crowbarr-package-") as directory:
         child = multiprocessing.get_context("spawn").Process(
             target=process_fixture, args=(directory, check_inference)
@@ -113,6 +148,10 @@ def smoke(check_inference=True):
             raise RuntimeError("Packaging child timed out")
         assert child.exitcode == 0, f"Packaging child exited {child.exitcode}"
         child.close()
+    if check_inference and not bundled:
+        with tempfile.TemporaryDirectory(prefix="crowbarr-addon-") as directory:
+            check_addon_install(directory)
+        print("Refinement add-on install and import passed", flush=True)
     print("Packaging imports and spawned job processing passed", flush=True)
 
 

@@ -20,9 +20,34 @@ _resident_key = None
 _resident_runtime = {}
 
 
+BASE_PROBES = (1 / 6, 1 / 2, 5 / 6)
+# Listened to one at a time, and only while the evidence is short.
+EXTRA_PROBES = (1 / 3, 2 / 3, 1 / 12, 11 / 12, 1 / 4, 3 / 4)
+
+
+def is_confident(sample: dict) -> bool:
+    return sample["probability"] >= 0.8 and sample["speech_tokens"] >= 8
+
+
+def next_probe(samples: list[dict], duration: float, length: float) -> float | None:
+    """Where to listen next: the three fixed probes, then more while fewer than two are confident.
+
+    A probe in a quiet stretch says nothing about the language, so it must not decide the
+    verdict. Short recordings have no room for more probes that do not overlap.
+    """
+    if len(samples) < len(BASE_PROBES):
+        return BASE_PROBES[len(samples)]
+    index = len(samples) - len(BASE_PROBES)
+    if duration < 12 * length or index >= len(EXTRA_PROBES):
+        return None
+    if sum(is_confident(s) for s in samples) >= 2:
+        return None
+    return EXTRA_PROBES[index]
+
+
 def language_verdict(samples: list[dict], expected: str) -> dict:
     """Require repeated speech evidence, never a vote from a silent opening."""
-    confident = [s for s in samples if s["probability"] >= 0.8 and s["speech_tokens"] >= 8]
+    confident = [s for s in samples if is_confident(s)]
     languages = {s["language"] for s in confident}
     if len(confident) >= 2 and languages == {expected}:
         return {"language": expected, "samples": samples, "model": "small"}
@@ -55,9 +80,9 @@ def verify_audio_language(audio: Path, settings: Settings, cache: Path) -> dict:
         with wave.open(str(audio), "rb") as stream:
             rate = stream.getframerate()
             duration = stream.getnframes() / rate
-            # Disjoint thirds for short recordings, three distributed 60s probes for films.
+            # Disjoint thirds for short recordings, distributed 60s probes for films.
             length = min(60, duration / 3)
-            for fraction in (1 / 6, 1 / 2, 5 / 6):
+            while (fraction := next_probe(samples, duration, length)) is not None:
                 start = max(0, duration * fraction - length / 2)
                 stream.setpos(int(start * rate))
                 clip = np.frombuffer(stream.readframes(int(length * rate)), dtype=np.int16)
@@ -168,6 +193,9 @@ def align(
         "fallback_reason": None,
         "status": "pending",
     }
+    from .addons import activate
+
+    activate()
     import numpy as np
     import torch
     import whisperx

@@ -99,6 +99,7 @@ class Service:
         self.last_background_end = 0
         self.last_resource_check = 0
         self.plex_busy = False
+        self.plex_unreachable = False
         self.child_pid = None
 
     def start(self):
@@ -218,6 +219,11 @@ class Service:
                 self.scan_in_progress = False
             self.scan_event.wait(self.store.get().scan_seconds)
 
+    def plex_reason(self) -> str:
+        if self.plex_unreachable:
+            return "Cannot reach Plex; background work deferred"
+        return "Plex is playing; background work deferred"
+
     def worker(self):
         context = multiprocessing.get_context("spawn")
         while not self.stop_event.wait(1):
@@ -228,13 +234,16 @@ class Service:
                     self.last_resource_check = time.monotonic()
                     try:
                         self.plex_busy = bool(plex_activity(settings.plex)) if settings.plex.url else False
+                        self.plex_unreachable = False
                     except Exception:
+                        # Unknown is treated as busy, so a Plex outage never slows playback.
                         self.plex_busy = settings.defer_during_plex
+                        self.plex_unreachable = True
                 self.wait_reason = "Paused by user" if settings.paused else gate(settings, self.resources)
                 if self.wait_reason:
                     continue
                 background_reason = (
-                    "Plex is playing; background work deferred"
+                    self.plex_reason()
                     if settings.defer_during_plex and self.plex_busy
                     else "Quiet hours"
                     if quiet(settings)

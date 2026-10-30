@@ -4,6 +4,7 @@ import base64
 import hmac
 import os
 import shutil
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,8 +15,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from . import __version__
-from .capabilities import SPEECH_MODELS, capabilities_for, model_inventory, start_download, warm_up
+from . import __version__, updates
+from .capabilities import (
+    SPEECH_MODELS,
+    capabilities_for,
+    model_inventory,
+    start_download,
+    start_software_install,
+    warm_up,
+)
 from .config import ConfigStore, Settings
 from .db import Database
 from .integrations import check_connection
@@ -58,17 +66,26 @@ class BodyLimitMiddleware:
 
 def create_app(directory: Path | None = None, background: bool = True) -> FastAPI:
     store = ConfigStore((directory or Path(os.environ.get("CROWBARR_DATA", "data"))).resolve())
+    # Processes this one starts inherit it, and look for installed add-ons there.
+    os.environ["CROWBARR_ADDONS"] = str(store.directory / "addons")
     db = Database(store.directory / "crowbarr.db")
     service = Service(store, db)
+
+    stop_updates = threading.Event()
 
     @asynccontextmanager
     async def lifespan(app):
         if background:
             service.start()
             warm_up()
+            updates.confirm_boot(store.directory)
+            threading.Thread(
+                target=updates.watch, args=(store.directory, store, db, stop_updates), daemon=True
+            ).start()
         try:
             yield
         finally:
+            stop_updates.set()
             if background:
                 service.close()
 
@@ -339,6 +356,36 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
     def capabilities():
         # Answers at once with the cached probe, or with status "checking" while the
         # first probe runs; the settings page asks again until it settles.
+        return capabilities_for(store.directory, block=False)
+
+    @app.get("/api/update", dependencies=[Depends(authenticate)])
+    def update_status():
+        return updates.status(store.directory, store.get())
+
+    @app.post("/api/update/check", dependencies=[Depends(authenticate)])
+    def update_check():
+        updates.check(store.directory, force=True)
+        return updates.status(store.directory, store.get())
+
+    @app.post("/api/update/install", dependencies=[Depends(authenticate)], status_code=202)
+    def update_install():
+        state = updates.status(store.directory, store.get())
+        if not state["can_install"]:
+            raise HTTPException(409, state["reason"] or "No update is available to install.")
+        updates.start_install(store.directory)
+        return updates.status(store.directory, store.get())
+
+    @app.post("/api/capabilities/software", dependencies=[Depends(authenticate)], status_code=202)
+    def install_refinement_software():
+        from . import addons
+
+        runtime = capabilities_for(store.directory, block=False)
+        if runtime["models"]["software"]["present"]:
+            return runtime
+        ok, reason = addons.supported()
+        if not ok:
+            raise HTTPException(409, reason)
+        start_software_install(store.directory)
         return capabilities_for(store.directory, block=False)
 
     @app.post("/api/capabilities/alignment", dependencies=[Depends(authenticate)], status_code=202)

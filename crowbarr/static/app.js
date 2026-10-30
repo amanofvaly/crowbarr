@@ -37,28 +37,28 @@ const paths = {
 const icon = (name) =>
   `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.activity}</svg>`;
 const button = (label, action, style = "", attrs = "") =>
-  `<button type="button" class="btn button ${style.includes("primary") ? "btn-primary" : "btn-outline-secondary"} ${style}" data-action="${action}" ${attrs}>${label}</button>`;
+  `<button type="button" class="button ${style}" data-action="${action}" ${attrs}>${label}</button>`;
 const link = (label, route, style = "") =>
-  `<a class="btn button ${style.includes("primary") ? "btn-primary" : "btn-outline-secondary"} ${style}" href="#${route}">${label}</a>`;
+  `<a class="button ${style}" href="#${route}">${label}</a>`;
 const labels = {
   processing: "Processing",
   queued: "Queued",
-  waiting: "Waiting for subtitle",
+  waiting: "Waiting for Bazarr",
   retry: "Retry scheduled",
   completed: "Subtitle written",
-  unchanged: "Original retained",
+  unchanged: "Existing subtitle kept",
   review: "Review needed",
   failed: "Failed",
-  skipped: "Set aside",
-  superseded: "Superseded",
+  skipped: "Skipped",
+  superseded: "Replaced",
   cancelled: "Cancelled",
 };
 const origins = {
   manual: "Manual request",
   import: "New import",
-  bazarr: "Bazarr subtitle",
+  bazarr: "New Bazarr subtitle",
   retry: "Retry",
-  backlog: "Library sweep",
+  backlog: "Library scan",
 };
 const badge = (state) =>
   `<span class="badge ${esc(state)}">${state === "processing" ? '<span class="status-dot"></span>' : ""}${esc(labels[state] || state)}</span>`;
@@ -67,13 +67,25 @@ const duration = (value) =>
   value == null
     ? "Unavailable"
     : `${Math.floor(Math.max(0, value) / 60)}m ${Math.floor(Math.max(0, value) % 60)}s`;
+const elapsed = (count, unit) => `${count} ${unit}${count === 1 ? "" : "s"} ago`;
 const ago = (value) => {
   if (!value) return "Not yet";
   const seconds = Math.max(0, Date.now() / 1000 - value);
   if (seconds < 60) return "Just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
-  return `${Math.floor(seconds / 86400)} days ago`;
+  if (seconds < 3600) return elapsed(Math.floor(seconds / 60), "minute");
+  if (seconds < 86400) return elapsed(Math.floor(seconds / 3600), "hour");
+  return elapsed(Math.floor(seconds / 86400), "day");
+};
+// A time of day for today, and the date as well for any other day.
+const startsAt = (seconds) => {
+  const date = new Date(seconds * 1000);
+  const today = date.toDateString() === new Date().toDateString();
+  return date.toLocaleString(
+    [],
+    today
+      ? { hour: "numeric", minute: "2-digit" }
+      : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" },
+  );
 };
 const title = (job) =>
   job.title || job.media?.split("/").pop() || "Untitled media";
@@ -280,8 +292,8 @@ function activeJob() {
   if (!job && status?.scan_in_progress)
     return `<div class="worker-band idle">${icon("refresh")}<div class="idle-body"><strong>Syncing libraries</strong><span>Crowbarr is checking which files need work. Queue totals can change until this finishes.</span></div></div>`;
   if (!job)
-    return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Worker idle"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${status?.wait_reason === "Hourly background budget reached" ? budgetMarkup() : cooldownMarkup()}</div></div>`;
-  return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library sweep")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
+    return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Nothing running"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${status?.wait_reason === "Hourly background budget reached" ? budgetMarkup() : cooldownMarkup()}</div></div>`;
+  return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library scan")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
 }
 
 function rows(items, compact = false) {
@@ -289,57 +301,65 @@ function rows(items, compact = false) {
   const timeHeading = items.every((job) => FINISHED.includes(job.state))
     ? "Finished"
     : "Requested";
-  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${timeHeading}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library sweep")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Eligible ${esc(new Date(j.ready * 1000).toLocaleString())}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${timeHeading}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library scan")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Starts ${esc(startsAt(j.ready))}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
 }
 function dashboardJobList(items, finished = false) {
   items.forEach((job) => jobs.set(job.id, job));
   return `<div class="dashboard-job-list">${items
     .map(
       (job) =>
-        `<div class="dashboard-job"><div><button class="title-link" data-action="details" data-id="${job.id}">${esc(title(job))}</button><small>${esc(finished ? `${labels[job.state] || job.state} · ${ago(job.updated)}` : origins[job.origin] || "Library sweep")}</small></div><div>${badge(job.state)}${button("Details", "details", "small", `data-id="${job.id}"`)}</div></div>`,
+        `<div class="dashboard-job"><div><button class="title-link" data-action="details" data-id="${job.id}">${esc(title(job))}</button><small>${esc(finished ? `${labels[job.state] || job.state} · ${ago(job.updated)}` : origins[job.origin] || "Library scan")}</small></div><div>${badge(job.state)}${button("Details", "details", "small", `data-id="${job.id}"`)}</div></div>`,
     )
     .join("")}</div>`;
 }
-function systemStrip() {
+function statCards() {
+  const counts = status?.counts || {};
+  const waiting = ["queued", "waiting", "retry"].reduce((sum, key) => sum + (counts[key] || 0), 0);
+  const review = (counts.review || 0) + (counts.failed || 0);
+  const card = (value, label, href = "", tone = "") =>
+    `<${href ? "a" : "div"} class="stat ${tone}" ${href ? `href="${href}"` : ""}><strong>${fmt(value)}</strong><span>${label}</span></${href ? "a" : "div"}>`;
+  return `<div class="stat-grid">${card(status?.media_count, "Files in library")}${card(waiting, "Waiting", "#activity")}${card(counts.completed, "Subtitles written", "#history")}${card(counts.unchanged, "Already correct", "#history")}${card(review, "Need review", "#review", review ? "attention" : "")}</div><p class="last-sync">Library synced: ${esc(ago(status?.last_scan))}</p>`;
+}
+function systemPanel() {
   const r = status?.resources || {};
-  const resources = [
-    ["GPU", r.gpu || "Not detected"],
-    [
-      "GPU memory",
-      r.vram_free_mb == null
-        ? "Unavailable"
-        : `${fmt(r.vram_free_mb)} / ${fmt(r.vram_total_mb)} MB free`,
-    ],
-    [
-      "RAM available",
-      r.ram_available_mb == null ? "Unavailable" : `${fmt(r.ram_available_mb)} MB`,
-    ],
-    ["Speech model", savedSettings?.model || "Unavailable"],
+  const size = (value) =>
+    value == null ? "Unavailable" : value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${fmt(value)} MB`;
+  const model =
+    SPEECH_MODELS.find(([id]) => id === savedSettings?.model)?.[1] ||
+    LEGACY_MODELS[savedSettings?.model]?.[0] ||
+    savedSettings?.model ||
+    "Unavailable";
+  const facts = [
+    ["Speech model", model],
+    ["Processor", r.gpu || "No GPU detected"],
+    ["Free memory", size(r.ram_available_mb)],
   ];
-  return `<div class="system-strip" aria-label="System status">${resources
-    .map(
-      ([label, value]) =>
-        `<span class="system-value"><span>${label}:</span> ${esc(value)}</span>`,
-    )
-    .join("")}${[
-    "sonarr",
-    "radarr",
-    "bazarr",
-    "plex",
-  ]
+  if (r.gpu && r.vram_total_mb) facts.push(["Free GPU memory", `${size(r.vram_free_mb)} of ${size(r.vram_total_mb)}`]);
+  const budget = status?.background_budget;
+  const used = budget ? Math.min(budget.used_seconds, budget.limit_seconds) / 60 : 0;
+  const limit = budget ? budget.limit_seconds / 60 : 0;
+  const services = ["sonarr", "radarr", "bazarr", "plex"]
     .map((name) => {
       const sync = status?.integrations?.find((item) => item.provider === name);
       const connected = Boolean(savedSettings?.[name]?.url);
       const state = !connected
-        ? "Not configured"
+        ? "Not set up"
         : sync?.healthy
-          ? `${fmt(sync.file_count)} files`
+          ? ["sonarr", "radarr"].includes(name)
+            ? `Connected · ${fmt(sync.file_count)} files`
+            : "Connected"
           : sync
-            ? "Sync unavailable"
-            : "Configured";
-      return `<a class="system-service" href="#settings/connections" title="${esc(state)}"><span class="status-dot ${!connected ? "neutral" : !sync?.healthy ? "warning" : ""}" aria-hidden="true"></span>${name[0].toUpperCase() + name.slice(1)}<span class="sr-only">: ${esc(state)}</span></a>`;
+            ? "Cannot sync"
+            : "Set up";
+      const tone = !connected ? "neutral" : sync && !sync.healthy ? "warning" : "";
+      return `<li><a href="#settings/connections"><span class="status-dot ${tone}" aria-hidden="true"></span><strong>${name[0].toUpperCase() + name.slice(1)}</strong><span>${esc(state)}</span></a></li>`;
     })
-    .join("")}<span class="system-value"><span>Background budget:</span> ${esc(budgetText(false))}</span><a href="#settings/resources">Resources</a></div>${status?.wait_reason ? `<p class="system-wait">${esc(status.wait_reason)}</p>` : ""}`;
+    .join("");
+  return panel(
+    "System",
+    `<div class="system-body"><dl class="system-grid">${facts.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>${budget ? `<div class="system-budget"><span>Background budget this hour</span><progress max="${limit}" value="${used}" aria-label="Background budget used"></progress><strong>${used.toFixed(used < 10 ? 1 : 0)} of ${limit} min</strong></div>` : ""}<ul class="service-list" aria-label="Connections">${services}</ul></div>`,
+    '<a href="#settings/resources">Resources</a>',
+  );
 }
 function dashboard() {
   const counts = status?.counts || {};
@@ -369,9 +389,8 @@ function dashboard() {
     (!status?.configured
       ? `<div class="callout"><div><strong>No libraries configured</strong><p>Connect a media manager or add your media folders to begin.</p></div>${link("Configure libraries", "settings/connections", "primary")}</div>`
       : "") +
-    `<div class="overview-line"><span><strong>${fmt(status?.media_count)}</strong> media files</span><span><strong>${fmt(waiting)}</strong> pending</span><span><strong>${fmt(counts.completed)}</strong> subtitles written</span><span><strong>${fmt(counts.unchanged)}</strong> subtitles unchanged</span><a href="#review"><strong>${fmt((counts.review || 0) + (counts.failed || 0))}</strong> need review</a><span class="last-sync">Library sync: ${esc(ago(status?.last_scan))}</span></div>` +
+    statCards() +
     activeJob() +
-    systemStrip() +
     `<div class="dashboard-split">${panel(
       "Recent outcomes",
       recent.length
@@ -384,7 +403,8 @@ function dashboard() {
         ? dashboardJobList(pending)
         : empty("Queue is empty", "Imported media will be queued automatically."),
       `<a href="#activity">View all ${fmt(waiting)} pending jobs</a>`,
-    )}</div>`
+    )}</div>` +
+    systemPanel()
   );
 }
 
@@ -428,7 +448,7 @@ function libraryShell() {
     ) +
     `<div class="library-tabs" aria-label="Library type">${["shows", "movies"].map(kind => button(`${kind === "shows" ? "Shows" : "Movies"} <span id="count-${kind}"></span>`, "library-kind", kind === libraryKind ? "active" : "", `data-kind="${kind}" aria-pressed="${kind === libraryKind}"`)).join("")}</div>
     <div class="library-toolbar"><div class="library-search">${icon("search")}<label class="sr-only" for="library-query">Search library</label><input id="library-query" type="search" placeholder="Search titles or S01E02…" value="${esc(listQuery)}" autocomplete="off"></div><label class="library-filter">Show<select id="library-filter">${[["all", "All titles"], ["eligible", "With eligible files"], ["skipped", "With skipped files"]].map(([value, name]) => `<option value="${value}" ${value === libraryStatus ? "selected" : ""}>${name}</option>`).join("")}</select></label></div>
-    <div class="library-policy"><label><input type="checkbox" id="audio-policy" disabled> Skip known non-English audio</label><span class="hint">Global processing rule. Can be overridden at the show, season, and episode level.</span></div>
+    <div class="library-policy"><label><input type="checkbox" id="audio-policy" disabled> Skip known non-English audio</label><span class="hint">Automatic skips a title only when all its audio is tagged as another language. Use the menu on a show, season or episode to override it.</span></div>
     <div id="list-content" aria-live="polite"><div class="loading">Loading your subtitle library…</div></div>
     <p class="hint library-queue-note">Background work follows title → season → episode within the same priority and age. Ready files run first; manual requests and new imports can take precedence.</p>`
   );
@@ -438,7 +458,7 @@ const openShows = new Set();
 const openSeasons = new Set();
 const languageNames = new Intl.DisplayNames(["en"], { type: "language" });
 function preferenceSelect(scope, target, value, label) {
-  return `<select class="library-preference" data-scope="${scope}" data-target="${esc(target)}" aria-label="${esc(label)}">${[["auto", scope === "file" ? "Use season / title rule" : scope === "season" ? "Use title / audio rule" : "Use audio rule"], ["include", "Always include"], ["skip", "Skip"]].map(([key, text]) => `<option value="${key}" ${value === key ? "selected" : ""}>${text}</option>`).join("")}</select>`;
+  return `<select class="library-preference" data-scope="${scope}" data-target="${esc(target)}" aria-label="${esc(label)}">${[["auto", scope === "file" ? "Same as season" : scope === "season" ? "Same as show" : "Automatic"], ["include", "Always process"], ["skip", "Never process"]].map(([key, text]) => `<option value="${key}" ${value === key ? "selected" : ""}>${text}</option>`).join("")}</select>`;
 }
 function libraryFileRow(file, show) {
   const index = media.push(file) - 1;
@@ -469,6 +489,21 @@ function libraryGroup(group) {
     const files = group.files.filter(f => f.season === season);
     return `<section class="library-season ${seasonOpen ? "expanded" : ""}" data-season-key="${esc(seasonKey)}"><div class="season-heading"><button type="button" class="season-toggle" data-action="season-toggle" aria-expanded="${seasonOpen}"><span>${seasonName}</span><small>${files.length} episode ${files.length === 1 ? "file" : "files"}</small></button>${season !== null ? preferenceSelect("season", `${group.key}:${season}`, group.season_preferences[String(season)], `${group.title}, season ${season} processing`) : ""}</div><div class="season-content" ${seasonOpen ? "" : "hidden"}>${libraryTable(files, true)}</div></section>`;
   }).join("")}</div></section>`;
+}
+function libraryEmptyText() {
+  if (listQuery)
+    return ["No matching media", "Try a shorter title, episode number, or switch between Shows and Movies."];
+  const provider = libraryKind === "shows" ? "sonarr" : "radarr";
+  const name = provider === "sonarr" ? "Sonarr" : "Radarr";
+  const sync = status?.integrations?.find((item) => item.provider === provider);
+  if (sync?.healthy && !sync.file_count)
+    return savedSettings?.[provider]?.monitored_only
+      ? [
+          `${name} reported no files`,
+          `Only monitored items are included, and ${name} has none with files. Turn off "Only monitored" in Settings → Connections, or monitor the items in ${name}.`,
+        ]
+      : [`${name} reported no files`, `${name} is connected but has no imported ${libraryKind} yet.`];
+  return ["Your library is waiting", "Connect your media managers or folders, then sync your library."];
 }
 async function loadList(silent = false) {
   const revision = ++listRevision,
@@ -505,14 +540,10 @@ async function loadList(silent = false) {
       if ($("audio-policy")) { $("audio-policy").checked = result.skip_other_audio; $("audio-policy").disabled = false; }
       const libraryMarkup = result.results.length
         ? (libraryKind === "shows" ? result.results.map(libraryGroup).join("") : `<section class="panel">${libraryTable(result.results.flatMap(group => group.files.map(file => ({...file, title_preference: group.preference, poster: group.poster, year: group.year}))), false)}</section>`) + pager()
-        : empty(
-            listQuery ? "No matching media" : "Your library is waiting",
-            listQuery
-              ? "Try a shorter title, episode number, or switch between Shows and Movies."
-              : "Connect your media managers or folders, then sync your library.",
-            link("Manage libraries", "settings/connections"),
-            "search",
-          );
+        : (() => {
+            const [heading, text] = libraryEmptyText();
+            return empty(heading, text, link("Manage libraries", "settings/connections"), "search");
+          })();
       paint("list-content", libraryMarkup);
       // Attribute reconciliation alone does not reset a select's dirty live value.
       // The server's selected option is authoritative, including after a failed save.
@@ -560,6 +591,7 @@ const groups = [
   ["processing", "Speech processing"],
   ["resources", "Resources & schedule"],
   ["quality", "Quality & retries"],
+  ["updates", "Updates"],
   ["appearance", "Appearance"],
 ];
 const field = (name, label, help = "", type = "text", extra = "") =>
@@ -581,6 +613,112 @@ const select = (name, label, options, help = "") =>
       return `<option value="${esc(id)}" ${settings[name] === id ? "selected" : ""} ${disabled ? "disabled" : ""}>${esc(text)}</option>`;
     })
     .join("")}</select><small id="${name}-hint">${help}</small></label>`;
+const advanced = (fields) =>
+  `<details class="advanced wide"><summary>Advanced</summary><div class="field-grid">${fields}</div></details>`;
+// Quiet hours is on when the two times differ, which is how the server stores it.
+function quietHours() {
+  const hours = Array.from({ length: 24 }, (_, hour) => [hour, `${String(hour).padStart(2, "0")}:00`]);
+  const on = settings.quiet_hour_start !== settings.quiet_hour_end;
+  return `<label class="check-field wide"><input type="checkbox" id="quiet-enabled" ${on ? "checked" : ""}><span>Pause background work at set hours<small>Uses the server’s timezone. A range such as 22:00 to 07:00 ends the next day.</small></span></label><div class="quiet-range wide" ${on ? "" : "hidden"}>${select("quiet_hour_start", "From", hours)}${select("quiet_hour_end", "Until", hours)}</div>`;
+}
+let updateInfo = null;
+let updatePoll = null;
+const UPDATE_STAGES = {
+  downloading: "Downloading the update…",
+  installing: "Installing the update…",
+  restarting: "Restarting. This page reloads when Crowbarr is back.",
+};
+async function loadUpdate() {
+  try {
+    updateInfo = await api("/update");
+  } catch {
+    return;
+  }
+  drawUpdateButton();
+}
+// The sidebar button appears only when a newer release exists.
+function drawUpdateButton() {
+  const button = $("update-button");
+  if (!button) return;
+  const working = Object.keys(UPDATE_STAGES).includes(updateInfo?.job?.status);
+  button.hidden = !updateInfo?.available;
+  button.textContent = working ? "Updating…" : `Update to ${updateInfo?.latest || ""}`;
+}
+function pollUpdate(startVersion) {
+  clearInterval(updatePoll);
+  const started = Date.now();
+  let wentDown = false;
+  updatePoll = setInterval(async () => {
+    try {
+      updateInfo = await api("/update");
+    } catch {
+      // The server is restarting. Keep asking until it answers or three minutes pass.
+      wentDown = true;
+      if (Date.now() - started > 180000) {
+        clearInterval(updatePoll);
+        toast("Crowbarr did not come back. Check the container.", true);
+      }
+      return;
+    }
+    drawUpdateButton();
+    if (updateInfo.current !== startVersion) {
+      clearInterval(updatePoll);
+      location.reload();
+    } else if (updateInfo.job.status === "failed" || (wentDown && updateInfo.job.status === "idle")) {
+      clearInterval(updatePoll);
+      toast(updateInfo.failed?.reason || updateInfo.job.reason || "The update did not start.", true);
+      await navigate();
+    }
+  }, 2000);
+}
+function updatesPanel() {
+  const info = updateInfo;
+  const working = Object.keys(UPDATE_STAGES).includes(info?.job?.status);
+  const parts = [];
+  parts.push(
+    !info
+      ? `<p class="wide">Checking…</p>`
+      : info.available
+        ? `<p class="wide"><strong>Version ${esc(info.latest)} is available.</strong> You are running ${esc(info.current)}.</p>`
+        : `<p class="wide"><strong>You are up to date.</strong> You are running ${esc(info.current)}.</p>`,
+  );
+  if (info?.error) parts.push(`<p class="wide error-text">${esc(info.error)}</p>`);
+  if (info?.failed) parts.push(`<div class="wide notice">${esc(info.failed.reason)}</div>`);
+  if (info?.job?.status === "failed") parts.push(`<div class="wide notice">${esc(info.job.reason)}</div>`);
+  if (working) parts.push(`<p class="wide hint">${UPDATE_STAGES[info.job.status]}</p>`);
+  parts.push(
+    `<div class="wide actions">${button("Check for updates", "update-check", "", working ? "disabled" : "")}${
+      info?.can_install ? button(`Update to ${esc(info.latest)}`, "update-install", "primary", working ? "disabled" : "") : ""
+    }<span class="hint">Last checked: ${esc(info?.checked_at ? ago(info.checked_at) : "not yet")}</span></div>`,
+  );
+  if (info?.available && !info.can_install) {
+    parts.push(
+      `<div class="wide"><p>${esc(info.reason)}</p><ul>${info.instructions.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>${
+        info.image_tag ? `<p>Image: <code>${esc(info.image_tag)}</code></p>` : ""
+      }</div>`,
+    );
+  }
+  if (info?.available && info.notes) {
+    parts.push(`<details class="wide"><summary>What is new in ${esc(info.latest)}</summary><pre class="release-notes">${esc(info.notes)}</pre></details>`);
+  }
+  if (info?.running_update) {
+    parts.push(`<p class="wide hint">This is running an update installed from inside Crowbarr, not the version in the image.</p>`);
+  }
+  parts.push(
+    check(
+      "update_check",
+      "Check for updates automatically",
+      "Crowbarr asks GitHub for the newest release every few hours. The request carries only its version number.",
+    ),
+    check(
+      "auto_update",
+      "Install updates automatically",
+      "Installs a new version when this image can run it and no job is processing. Crowbarr restarts for a few seconds.",
+      !settings.update_check,
+    ),
+  );
+  return settingPanel("Updates", "Check for a newer version and install it without leaving Crowbarr.", parts.join(""));
+}
 function settingPanel(name, description, fields) {
   return `<section class="panel"><div class="panel-header"><div><h2>${name}</h2><p>${description}</p></div></div><div class="field-grid">${fields}</div></section>`;
 }
@@ -592,11 +730,11 @@ function connectionSettings() {
       return settingPanel(
         name[0].toUpperCase() + name.slice(1),
         arr
-          ? "Library membership, imported media, and monitoring preferences."
+          ? "Which series or movies Crowbarr looks after, and where their files are."
           : name === "bazarr"
-            ? "Authored subtitle discovery and alternative providers."
-            : "Playback awareness and subtitle discovery.",
-        `<label>Service URL<input type="url" name="${name}.url" value="${esc(c.url)}" placeholder="http://${name}:${{ sonarr: 8989, radarr: 7878, bazarr: 6767, plex: 32400 }[name]}" autocomplete="off"><small>Address reachable from the Crowbarr server.</small></label><label>${name === "plex" ? "Plex token" : "API key"}<input type="password" name="${name}.api_key" value="${esc(c.api_key || "")}" placeholder="${c.has_api_key ? "Saved · leave blank to keep" : "Enter service key"}" autocomplete="new-password"><small>Save changes before testing this connection.</small></label>${arr || name === "plex" ? `<label class="wide">Path mappings<textarea name="${name}.mappings" rows="2" placeholder="/remote/path => /local/path">${esc((arr ? c.mappings : settings.plex_mappings).map((m) => `${m.remote} => ${m.local}`).join("\n"))}</textarea><small>${name === "plex" ? "Crowbarr path => Plex path." : "Media manager path => Crowbarr path."} One mapping per line; leave blank when paths match.</small></label>` : ""}${arr ? `<label class="check-field wide"><input type="checkbox" name="${name}.monitored_only" ${c.monitored_only ? "checked" : ""}><span>Only monitored ${name === "sonarr" ? "series and episodes" : "movies"}</span></label>` : ""}<div class="wide actions">${button("Test saved connection", "test", "", `data-name="${name}" ${!c.url ? "disabled" : ""}`)}<span class="hint">${c.url ? "Clear the URL and save to disconnect." : "Not configured"}</span></div>`,
+            ? "Where Crowbarr waits for subtitles, and where it looks for alternatives."
+            : "Lets Crowbarr see when someone is watching, and refresh Plex after writing a subtitle.",
+        `<label>Service URL<input type="url" name="${name}.url" value="${esc(c.url)}" placeholder="http://${name}:${{ sonarr: 8989, radarr: 7878, bazarr: 6767, plex: 32400 }[name]}" autocomplete="off"><small>Address reachable from the Crowbarr server.</small></label><label>${name === "plex" ? "Plex token" : "API key"}<input type="password" name="${name}.api_key" value="${esc(c.api_key || "")}" placeholder="${c.has_api_key ? "Saved · leave blank to keep" : "Enter service key"}" autocomplete="new-password"><small>Save changes before testing this connection.</small></label>${arr || name === "plex" ? `<label class="wide">Path mappings<textarea name="${name}.mappings" rows="2" placeholder="/remote/path => /local/path">${esc((arr ? c.mappings : settings.plex_mappings).map((m) => `${m.remote} => ${m.local}`).join("\n"))}</textarea><small>${name === "plex" ? "Crowbarr path => Plex path." : "Media manager path => Crowbarr path."} One mapping per line; leave blank when paths match.</small></label>` : ""}${arr ? `<label class="check-field wide"><input type="checkbox" name="${name}.monitored_only" ${c.monitored_only ? "checked" : ""}><span>Only monitored ${name === "sonarr" ? "series and episodes" : "movies"}<small>Turn off to include every file ${name[0].toUpperCase() + name.slice(1)} has, monitored or not.</small></span></label>` : ""}${name === "bazarr" ? numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "How long to wait for Bazarr to find a subtitle. After that, Crowbarr checks the video\u2019s own subtitles, then writes its own.") : ""}<div class="wide actions">${button("Test saved connection", "test", "", `data-name="${name}" ${!c.url ? "disabled" : ""}`)}<span class="hint">${c.url ? "Clear the URL and save to disconnect." : "Not configured"}</span></div>`,
       );
     })
     .join("");
@@ -670,16 +808,40 @@ function modelChooser(chosen, downloaded, fetching) {
   });
   return assetTable("Speech model", rows, "Larger is more accurate and slower.");
 }
-function alignmentAsset(alignment, available) {
-  if (!available) return "";
+// Refinement needs two downloads, so they share one table under the setting they enable.
+function refinementDownloads(software, alignment, available) {
+  const needSoftware = !available && software?.installable;
+  if (!available && !needSoftware) return "";
+  const rows = [];
+  if (needSoftware) {
+    const failed = software.status === "failed";
+    rows.push([
+      "1. Software (PyTorch and WhisperX)",
+      "About 240 MB",
+      software.status === "running"
+        ? button("Installing", "", "muted", "disabled")
+        : button(failed ? "Retry" : "Download", "fetch-software", failed ? "danger" : ""),
+    ]);
+  }
   const ready = alignment?.present === true;
   const size = ready ? `${Math.round((alignment.bytes || 0) / 1048576)} MB` : "360 MB";
-  const action = ready
-    ? button("Ready", "", "primary", "disabled")
-    : alignment?.status === "running"
-      ? button("Downloading", "", "muted", "disabled")
-      : button(alignment?.status === "failed" ? "Retry" : "Download", "fetch-alignment", "");
-  return assetTable("Refinement model", [["WhisperX alignment", size, action]]);
+  rows.push([
+    needSoftware ? "2. Alignment model" : "Alignment model",
+    size,
+    needSoftware
+      ? button("After software", "", "muted", "disabled")
+      : ready
+        ? button("Ready", "", "primary", "disabled")
+        : alignment?.status === "running"
+          ? button("Downloading", "", "muted", "disabled")
+          : button(alignment?.status === "failed" ? "Retry" : "Download", "fetch-alignment", ""),
+  ]);
+  const note = software?.status === "failed" && needSoftware
+    ? software.reason
+    : needSoftware
+      ? "The software goes into Crowbarr's data folder and needs about 900 MB of disk space."
+      : "";
+  return assetTable("Downloads for refinement", rows, note);
 }
 function refreshSaveActions() {
   const bar = document.querySelector(".save-bar");
@@ -708,14 +870,17 @@ function settingsPage() {
   const downloaded = new Set(capabilities?.models?.speech || []);
   const fetching = capabilities?.models?.speech_downloads || {};
   const alignment = capabilities?.models?.alignment;
-  const downloading = alignment?.status === "running";
+  const software = capabilities?.models?.software;
+  if (software?.status === "running") pollSoftware();
   // Available needs no explanation; the table shows size and state. Unavailable does.
   const refinementHelp = checking
     ? "Checking hardware…"
     : refinementAvailable
       ? "Runs on the CPU."
-      : capabilities?.refinement?.reason || "Availability could not be determined.";
-  const alignmentAction = checking ? "" : alignmentAsset(alignment, refinementAvailable);
+      : software?.installable
+        ? "Needs the two downloads below. Turns on when both are done."
+        : software?.unsupported_reason || capabilities?.refinement?.reason || "Availability could not be determined.";
+  const downloadsAction = checking ? "" : refinementDownloads(software, alignment, refinementAvailable);
   const deviceHelp = checking ? "Checking hardware…" : [
     !cpuAvailable ? capabilities?.cpu?.reason || "CPU runtime availability could not be determined." : "",
     cudaAvailable
@@ -735,13 +900,7 @@ function settingsPage() {
       status?.discovery_mode === "arr"
         ? "Your library comes from Sonarr/Radarr. These folders tell Crowbarr where it can access the videos and write subtitles. Plex does not supply the library."
         : "No media manager is connected, so Crowbarr scans these folders for media itself.",
-      `<label class="wide">Media folders<textarea name="roots" rows="4" placeholder="/media/tv&#10;/media/movies">${esc(settings.roots.join("\n"))}</textarea><small>Enter one folder path per line, or use Find my media folders. You can edit the paths before saving.</small></label><div class="wide actions">${button("Find my media folders", "suggest-folders")}${button("Test folders", "test-folders")}</div><div class="wide" id="folder-results" role="status" aria-live="polite"></div><details class="wide folder-help"><summary>Where do I find this path?</summary><p>Use the folder path as Crowbarr sees it. This box selects a folder; it does not share a folder with the app.</p><ul><li><strong>Docker Compose:</strong> Open Crowbarr’s compose file and look under <code>volumes</code>. For <code>/mnt/pool/TV:/tv</code>, enter <code>/tv</code>. If your library is missing, add its folder there and recreate the Crowbarr container.</li><li><strong>TrueNAS:</strong> Open Apps, select Crowbarr, then Edit. Under Storage, find your media folder and copy its Mount Path. If it is missing, add storage for that folder, choose a Mount Path such as <code>/tv</code>, allow writes, and save the app.</li><li><strong>Native install:</strong> Copy the full path of your media folder on the computer running Crowbarr, such as <code>/srv/media/tv</code>.</li></ul><p>Find uses saved Sonarr/Radarr connections and shows the paths they report. You can also find those paths in Sonarr/Radarr → Settings → Media Management → Root Folders.</p><p>If a manager uses a different path for the same folder, open <a href="#settings/connections">Settings → Connections</a>. In that manager’s Path mappings box, enter its path on the left and Crowbarr’s path on the right, for example <code>/data/tv => /tv</code>. Save, then find and test again.</p></details>${numeric("scan_seconds", "Sync interval (seconds)", 10, 86400, "How often Crowbarr looks for new or changed media files.")}${numeric("settle_seconds", "Wait after a file changes (seconds)", 0, 86400, "Gives a copy or download time to finish before Crowbarr reads the file.")}${numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "How long to wait for Bazarr to supply a subtitle. After that, Crowbarr checks subtitles inside the video file, then writes its own.")}`,
-    );
-  if (section === "connections")
-    content = content.replace(
-      numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "How long to wait for Bazarr to supply a subtitle. After that, Crowbarr checks subtitles inside the video file, then writes its own."),
-      numeric("min_duration_minutes", "Skip videos shorter than (minutes)", 0, 600, "Videos shorter than this are not processed. Set to 0 to disable.") +
-        numeric("subtitle_wait_minutes", "Wait for Bazarr (minutes)", 0, 10080, "How long to wait for Bazarr to supply a subtitle. After that, Crowbarr checks subtitles inside the video file, then writes its own."),
+      `<label class="wide">Media folders<textarea name="roots" rows="4" placeholder="/media/tv&#10;/media/movies">${esc(settings.roots.join("\n"))}</textarea><small>Enter one folder path per line, or use Find my media folders. You can edit the paths before saving.</small></label><div class="wide actions">${button("Find my media folders", "suggest-folders")}${button("Test folders", "test-folders")}</div><div class="wide" id="folder-results" role="status" aria-live="polite"></div><details class="wide folder-help"><summary>Where do I find this path?</summary><p>Use the folder path as Crowbarr sees it. This box selects a folder; it does not share a folder with the app.</p><ul><li><strong>Docker Compose:</strong> Open Crowbarr’s compose file and look under <code>volumes</code>. For <code>/mnt/pool/TV:/tv</code>, enter <code>/tv</code>. If your library is missing, add its folder there and recreate the Crowbarr container.</li><li><strong>TrueNAS:</strong> Open Apps, select Crowbarr, then Edit. Under Storage, find your media folder and copy its Mount Path. If it is missing, add storage for that folder, choose a Mount Path such as <code>/tv</code>, allow writes, and save the app.</li><li><strong>Native install:</strong> Copy the full path of your media folder on the computer running Crowbarr, such as <code>/srv/media/tv</code>.</li></ul><p>Find uses saved Sonarr/Radarr connections and shows the paths they report. You can also find those paths in Sonarr/Radarr → Settings → Media Management → Root Folders.</p><p>If a manager uses a different path for the same folder, open <a href="#settings/connections">Settings → Connections</a>. In that manager’s Path mappings box, enter its path on the left and Crowbarr’s path on the right, for example <code>/data/tv => /tv</code>. Save, then find and test again.</p></details>${numeric("min_duration_minutes", "Skip videos shorter than (minutes)", 0, 600, "Trailers and clips shorter than this are not processed. Set to 0 to process everything.")}${advanced(numeric("scan_seconds", "Sync interval (seconds)", 10, 86400, "How often Crowbarr looks for new or changed media files.") + numeric("settle_seconds", "Wait after a file changes (seconds)", 0, 86400, "Gives a copy or download time to finish before Crowbarr reads the file."))}`,
     );
   if (section === "processing")
     content = settingPanel(
@@ -752,7 +911,26 @@ function settingsPage() {
           ["cpu", cpuAvailable ? "CPU" : "CPU (unavailable)", !cpuAvailable],
           ["cuda", cudaAvailable ? "NVIDIA GPU · CUDA" : "NVIDIA GPU · CUDA (unavailable)", !cudaAvailable],
         ], `<span id="device-help" aria-live="polite">${esc(deviceHelp)}</span>`) +
-        select(
+        "" +
+        "" +
+        check(
+          "cpu_fallback",
+          "Fall back to CPU",
+          "Process on the CPU when the graphics card cannot be used. Jobs may take longer.",
+        ) +
+        check(
+          "generate_over_mismatch",
+          "Replace a subtitle that cannot be repaired",
+          "When the audio proves a subtitle is for other content, or for a shorter cut of this episode, write a fresh one instead of asking you to look. The rejected file is left on disk.",
+        ) +
+        check(
+          "refine_generated",
+          refinementAvailable || checking || software?.installable ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
+          esc(refinementHelp),
+          !refinementAvailable || !alignment?.present,
+        ) +
+        downloadsAction +
+        "" + advanced(select(
           "compute_type",
           "Compute precision",
           ["int8", "float32", "int8_float16", "float16"].map((type) => [
@@ -766,100 +944,63 @@ function settingsPage() {
             settings.device === "cpu" && type.includes("float16"),
           ]),
           '<span id="precision-help" aria-live="polite">Lower precision uses less memory and runs faster, with a small loss of accuracy. The CPU supports INT8 and FP32 only.</span>',
-        ) +
-        numeric(
+        ) + numeric(
           "cpu_threads",
           "CPU threads",
           1,
           64,
           "Used for CPU processing and for refinement. Ignored while recognition runs on the GPU. Setting it above the machine's core count makes jobs slower.",
-        ) +
+        )));
+  if (section === "resources")
+    content = settingPanel(
+      "Background schedule",
+      "Applies to background work only. Jobs you start yourself, and jobs from a new import, ignore it.",
+      numeric(
+        "background_budget_minutes",
+        "Processing budget per hour (minutes)",
+        1,
+        60,
+        "Background work stops for the rest of the hour once it has used this many minutes.",
+      ) +
+        quietHours() +
         check(
-          "cpu_fallback",
-          "Fall back to CPU",
-          "Process on the CPU when the graphics card cannot be used. Jobs may take longer.",
+          "defer_during_plex",
+          "Defer background processing during Plex playback",
+          "Pauses background work while anyone is watching on Plex, so playback is not slowed down. Jobs you start yourself still run.",
         ) +
-        check(
-          "generate_over_mismatch",
-          "Replace a subtitle that cannot be repaired",
-          "When the audio proves a subtitle is for other content, or for a shorter cut of this episode, write a fresh one instead of asking you to look. The rejected file is left on disk.",
-        ) +
-        check(
-          "refine_generated",
-          refinementAvailable || checking ? "Refine generated timings with WhisperX" : "Refine generated timings with WhisperX (unavailable)",
-          esc(refinementHelp),
-          !refinementAvailable || !alignment?.present,
-        ) +
-        alignmentAction +
-        check(
-          "allow_untagged_subtitles",
-          "Also check subtitles with no language label",
-          "Crowbarr checks English subtitles. Files named Episode.srt, and tracks inside the video with no language tag, are skipped unless you turn this on. A subtitle that turns out to be another language will be checked against English audio and reported as not matching.",
+        advanced(
+          numeric(
+            "backlog_cooldown_seconds",
+            "Cooldown between jobs (seconds)",
+            0,
+            86400,
+            "Wait this long after a background job before starting the next one.",
+          ) +
+            numeric(
+              "min_free_ram_mb",
+              "Minimum RAM headroom (MB)",
+              128,
+              262144,
+              "Hold a job when the machine has less free memory than this.",
+            ) +
+            numeric(
+              "min_free_vram_mb",
+              "Minimum free GPU memory (MB)",
+              128,
+              262144,
+              "Hold a job when the graphics card has less free memory than this. Ignored when processing on the CPU.",
+            ) +
+            numeric(
+              "max_cpu_load",
+              "Maximum background CPU load per core",
+              0.1,
+              4,
+              "Hold background jobs when the machine is busier than this. 1 means every CPU core already has work.",
+              // A step of 0.1 rejects the shipped 0.75 default and blocks the whole panel.
+              "any",
+            ),
         ),
     );
-  if (section === "resources")
-    content =
-      settingPanel(
-        "Resource limits",
-        "Crowbarr processes one job at a time. These limits decide when a job may start.",
-        numeric(
-          "min_free_ram_mb",
-          "Minimum RAM headroom (MB)",
-          128,
-          262144,
-          "Hold a job when the machine has less free memory than this.",
-        ) +
-          numeric(
-            "min_free_vram_mb",
-            "Minimum free GPU memory (MB)",
-            128,
-            262144,
-            "Hold a job when the graphics card has less free memory than this. Ignored when processing on the CPU.",
-          ) +
-          numeric(
-            "max_cpu_load",
-            "Maximum background CPU load per core",
-            0.1,
-            4,
-            "Hold background jobs when the machine is busier than this. 1 means every CPU core already has work.",
-            // A step of 0.1 rejects the shipped 0.75 default and blocks the whole panel.
-            "any",
-          ),
-      ) +
-      settingPanel(
-        "Background schedule",
-        "These limits apply to background work only. Jobs you start yourself, and jobs from a new import, ignore them.",
-        numeric(
-          "backlog_cooldown_seconds",
-          "Cooldown between jobs (seconds)",
-          0,
-          86400,
-          "Wait this long after a background job before starting the next one.",
-        ) +
-          numeric(
-            "background_budget_minutes",
-            "Processing budget per hour (minutes)",
-            1,
-            60,
-            "Minutes in each hour that background jobs may run.",
-          ) +
-          select(
-            "quiet_hour_start",
-            "Quiet hours start",
-            Array.from({ length: 24 }, (_, hour) => [hour, `${String(hour).padStart(2, "0")}:00`]),
-            "24-hour time in the server’s timezone. Background work pauses during quiet hours.",
-          ) +
-          select(
-            "quiet_hour_end",
-            "Quiet hours end",
-            Array.from({ length: 24 }, (_, hour) => [hour, `${String(hour).padStart(2, "0")}:00`]),
-            "May end the following day (e.g. 22:00–07:00). Set both times equal to disable quiet hours.",
-          ) +
-          check(
-            "defer_during_plex",
-            "Defer background processing during Plex playback",
-          ),
-      );
   if (section === "quality")
     content = settingPanel(
       "Audit & recovery",
@@ -871,8 +1012,12 @@ function settingsPage() {
       ) +
         check(
           "allow_untagged_audio",
-          "Process audio without a language tag",
+          "Process audio tracks with no language tag",
           "Verify the spoken language before processing an untagged track. Leave off to require a language tag.",
+        ) + check(
+          "allow_untagged_subtitles",
+          "Process subtitles with no language tag",
+          "Crowbarr checks English subtitles. Files named Episode.srt, and tracks inside the video with no language tag, are skipped unless you turn this on. A subtitle that turns out to be another language will be checked against English audio and reported as not matching.",
         ) +
         check(
           "bazarr_download_alternatives",
@@ -886,45 +1031,45 @@ function settingsPage() {
           10,
           "How many subtitles Crowbarr downloads from Bazarr for one file before giving up.",
         ) +
-        numeric(
+        "" +
+        "" +
+        "" +
+        "" +
+        "" + advanced(numeric(
           "max_attempts",
           "Maximum job attempts",
           1,
           10,
           "How many times a job is retried before it is marked failed.",
-        ) +
-        numeric(
+        ) + numeric(
           "job_timeout_minutes",
           "Job timeout (minutes)",
           1,
           1440,
           "Stop a job that has been running longer than this.",
-        ) +
-        numeric(
+        ) + numeric(
           "min_match_ratio",
           "Minimum subtitle match",
           0.5,
           1,
           "Minimum text match for placing each authored line. Also protects repairs whose final audit is inconclusive; it does not by itself establish a content mismatch.",
           0.01,
-        ) +
-        numeric(
+        ) + numeric(
           "min_alignment_score",
           "Minimum timing confidence",
           0,
           1,
           "How sure the word timing must be. Below this, Crowbarr keeps Whisper's own timings instead.",
           0.01,
-        ) +
-        numeric(
+        ) + numeric(
           "max_generated_ratio",
           "Maximum unmatched dialogue",
           0,
           1,
           "How much spoken dialogue may fall outside an authored subtitle's lines before Crowbarr warns that some timings were estimated.",
           0.01,
-        ),
-    );
+        )));
+  if (section === "updates") content = updatesPanel();
   if (section === "appearance")
     content = settingPanel(
       "Appearance",
@@ -972,7 +1117,7 @@ function apiPage() {
     [
       "POST",
       "/api/jobs/{id}/skip",
-      "Set aside an unresolved result; policy upgrades will not reopen it.",
+      "Skip an unresolved result; policy upgrades will not reopen it.",
     ],
     ["GET", "/api/jobs/{id}/candidate", "Download a private review subtitle."],
     [
@@ -1141,7 +1286,7 @@ const verdicts = {
   unchanged: "Already correct",
   review: "Needs attention",
   failed: "Failed",
-  skipped: "Set aside",
+  skipped: "Skipped",
 };
 let announced = null;
 function verdictToast(job) {
@@ -1457,6 +1602,21 @@ async function pollModels() {
     }
   }, 5000);
 }
+let softwarePoll = null;
+async function pollSoftware() {
+  clearInterval(softwarePoll);
+  softwarePoll = setInterval(async () => {
+    const state = await api("/capabilities");
+    settings.capabilities = state;
+    const software = state.models?.software;
+    if (software?.status !== "running") {
+      clearInterval(softwarePoll);
+      softwarePoll = null;
+      toast(software?.present ? "Refinement software is installed." : software?.reason || "The install did not finish.");
+      await navigate();
+    }
+  }, 5000);
+}
 let alignmentPoll = null;
 async function pollAlignment() {
   clearInterval(alignmentPoll);
@@ -1576,6 +1736,24 @@ async function perform(target) {
       toast(`Downloading ${name}.`);
       await navigate();
       pollModels();
+    } else if (action === "update-check") {
+      updateInfo = await api("/update/check", "POST");
+      drawUpdateButton();
+      toast(
+        updateInfo.error || (updateInfo.available ? `Version ${updateInfo.latest} is available.` : "You are up to date."),
+        Boolean(updateInfo.error),
+      );
+      await navigate();
+    } else if (action === "update-install") {
+      updateInfo = await api("/update/install", "POST");
+      drawUpdateButton();
+      await navigate();
+      pollUpdate(updateInfo.current);
+    } else if (action === "fetch-software") {
+      settings.capabilities = await api("/capabilities/software", "POST");
+      toast("Installing the refinement software. This can take several minutes.");
+      await navigate();
+      pollSoftware();
     } else if (action === "fetch-alignment") {
       const response = await api("/capabilities/alignment", "POST");
       settings.capabilities = response;
@@ -1678,6 +1856,9 @@ async function enter() {
   $("workspace").hidden = false;
   await refresh();
   await navigate();
+  loadUpdate();
+  clearInterval(window.updateTimer);
+  window.updateTimer = setInterval(loadUpdate, 600000);
   listen();          // from here the server pushes; nothing polls
 }
 $("login-form").addEventListener("submit", async (event) => {
@@ -1723,6 +1904,20 @@ document.addEventListener("error", event => {
   if (event.target.matches?.(".library-poster")) event.target.hidden = true;
 }, true);
 document.addEventListener("change", async (event) => {
+  if (event.target.id === "quiet-enabled") {
+    const range = document.querySelector(".quiet-range");
+    const [from, until] = range.querySelectorAll("select");
+    range.hidden = !event.target.checked;
+    // The server treats equal times as "no quiet hours".
+    if (event.target.checked && from.value === until.value) {
+      from.value = "22";
+      until.value = "7";
+    } else if (!event.target.checked) {
+      from.value = until.value = "0";
+    }
+    from.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
   if (event.target.matches?.(".library-preference, #audio-policy")) {
     const target = event.target;
     target.disabled = true;
