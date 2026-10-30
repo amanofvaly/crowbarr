@@ -89,6 +89,10 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.14
+
+- The dashboard no longer shows Bazarr and Plex as "Set up" when their addresses are saved; it says "Configured".
+
 ### 0.4.13
 
 - Files whose audio has no language tag are no longer sent to review because of quiet stretches. Audit policy 0.3.8 reopens review and failed jobs.
