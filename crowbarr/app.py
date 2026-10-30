@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -264,7 +264,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             args.append("%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
         condition = " AND ".join(where) or "1"
         order = (
-            "CASE WHEN state='processing' THEN 0 ELSE 1 END, "
+            f"CASE WHEN state='processing' THEN 0 WHEN ready<={time.time()} THEN 1 ELSE 2 END, "
             f"(priority + MIN(120, CAST(({time.time()}-created)/3600 AS INTEGER))) DESC,"
             "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id"
             if state == "queue"
@@ -363,7 +363,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         return capabilities_for(store.directory, block=False)
 
     @app.put("/api/settings", dependencies=[Depends(authenticate)])
-    def save_settings(payload: dict):
+    def save_settings(payload: dict, tasks: BackgroundTasks):
         previous = store.get()
         for name in ("sonarr", "radarr", "bazarr", "plex"):
             if name in payload and isinstance(payload[name], dict):
@@ -398,9 +398,12 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             else:
                 db.cancel_carry_forward()
         store.save(settings)
-        from .library import skip_short_pending
+        # Probing every pending video is slow on a large queue, and only a new minimum
+        # can change its result. Run it after the reply so no save waits on it.
+        if settings.min_duration_minutes != previous.min_duration_minutes:
+            from .library import skip_short_pending
 
-        skip_short_pending(settings, db)
+            tasks.add_task(skip_short_pending, settings, db)
         service.scan_event.set()
         return settings_payload()
 

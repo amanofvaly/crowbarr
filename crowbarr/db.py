@@ -227,6 +227,15 @@ class Database:
                         "UPDATE jobs SET priority=?,origin=?,updated=? WHERE id=?",
                         (priority, origin, now, row["id"]),
                     )
+                if row["state"] == "waiting" and row["ready"] != ready:
+                    # The wait is derived from settings, so a changed setting applies to
+                    # work already waiting. A request someone released by hand never goes
+                    # back to waiting.
+                    due = min(row["ready"], ready) if row["origin"] == "manual" else ready
+                    db.execute(
+                        "UPDATE jobs SET ready=?,state=?,updated=? WHERE id=? AND state='waiting'",
+                        (due, "waiting" if due > now else "queued", now, row["id"]),
+                    )
                 return row["id"]
 
             # The media or its subtitles changed, so the previous verdict no longer
@@ -773,8 +782,10 @@ class Database:
         with self.connect() as db:
             return bool(
                 db.execute(
-                    "UPDATE jobs SET priority=100,origin='manual',updated=? WHERE id=? AND state IN ('waiting','queued','retry')",
-                    (time.time(), job_id),
+                    "UPDATE jobs SET priority=100,origin='manual',updated=?,"
+                    "state=CASE WHEN state='waiting' THEN 'queued' ELSE state END,"
+                    "ready=MIN(ready,?) WHERE id=? AND state IN ('waiting','queued','retry')",
+                    (time.time(), time.time(), job_id),
                 ).rowcount
             )
 

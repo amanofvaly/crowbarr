@@ -679,3 +679,40 @@ def test_one_unreadable_file_does_not_leave_keep_results_pending(tmp_path, monke
 
     assert library.scan(settings, db) == 0
     assert db.carried_fingerprint(settings.fingerprint()) == ("", "")
+
+
+def test_lowering_the_bazarr_wait_releases_waiting_jobs(tmp_path):
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"video")
+    db = Database(tmp_path / "state" / "queue.db")
+    long_wait = Settings(roots=[str(tmp_path)], settle_seconds=0, subtitle_wait_minutes=30)
+    scan(long_wait, db)
+    assert db.snapshot()["jobs"][0]["state"] == "waiting"
+    assert db.claim() is None
+
+    scan(long_wait.model_copy(update={"subtitle_wait_minutes": 0}), db)
+
+    job = db.snapshot()["jobs"][0]
+    assert job["state"] == "queued"
+    assert db.claim()["id"] == job["id"]
+
+
+def test_run_next_releases_the_bazarr_wait(tmp_path):
+    db = Database(tmp_path / "queue.db")
+    job = db.enqueue("movie.mkv", "one", None, time.time() + 999)
+    assert db.claim() is None
+
+    assert db.promote(job)
+
+    assert db.get(job)["state"] == "queued"
+    assert db.claim()["id"] == job
+
+
+def test_a_manual_job_stays_released_when_the_wait_is_raised(tmp_path):
+    db = Database(tmp_path / "queue.db")
+    job = db.enqueue("movie.mkv", "one", None, time.time() + 999)
+    db.promote(job)
+
+    db.enqueue("movie.mkv", "one", None, time.time() + 5000)
+
+    assert db.claim()["id"] == job

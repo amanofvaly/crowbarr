@@ -108,15 +108,19 @@ function merge(current, draft) {
   // Walk both trees and touch only the elements that actually differ. An element whose
   // markup is unchanged is never replaced, so a selection, a focused control or a
   // scrolled container survives while the rest of the page updates around it.
-  const wanted = [...draft.children];
-  const existing = [...current.children];
+  // Text nodes are compared too. A heading with text and a child element, such as a movie
+  // title followed by its year, otherwise keeps the previous row's title.
+  const wanted = [...draft.childNodes];
+  const existing = [...current.childNodes];
   for (let i = 0; i < wanted.length; i++) {
     const next = wanted[i];
     const node = existing[i];
     if (!node) {
       current.append(next);
-    } else if (node.tagName !== next.tagName) {
+    } else if (node.nodeType !== next.nodeType || node.nodeName !== next.nodeName) {
       node.replaceWith(next);
+    } else if (node.nodeType !== Node.ELEMENT_NODE) {
+      if (node.data !== next.data) node.data = next.data;
     } else if (node.outerHTML !== next.outerHTML) {
       if (node.children.length && next.children.length) {
         syncAttributes(node, next);
@@ -125,8 +129,8 @@ function merge(current, draft) {
       else node.replaceWith(next);
     }
   }
-  for (let i = current.children.length - 1; i >= wanted.length; i--) {
-    current.children[i].remove();
+  for (let i = current.childNodes.length - 1; i >= wanted.length; i--) {
+    current.childNodes[i].remove();
   }
 }
 function paint(id, markup) {
@@ -458,7 +462,7 @@ function libraryGroup(group) {
   const seasons = [...new Set(group.files.map(f => f.season))];
   const searchOpen = listQuery.length > 1 && (group.title.toLowerCase().includes(listQuery.toLowerCase()) || /s\d+e\d+/i.test(listQuery));
   const expanded = openShows.has(group.key) || searchOpen;
-  return `<section class="library-title show-group ${expanded ? "expanded" : ""}" data-key="${esc(group.key)}"><div class="show-heading"><button type="button" class="show-toggle" data-action="show-toggle" aria-expanded="${expanded}">${identity}</span></button><label class="show-rule">${preferenceSelect("title", group.key, group.preference, `${group.title}: whole show processing`)}</label></div><div class="show-content" ${expanded ? "" : "hidden"}>${seasons.map(season => {
+  return `<section class="library-title show-group ${expanded ? "expanded" : ""}" data-key="${esc(group.key)}"><div class="show-heading"><button type="button" class="show-toggle" data-action="show-toggle" aria-expanded="${expanded}">${identity}<span class="show-expand">${expanded ? "Hide episodes" : "Seasons & episodes"}</span></button><label class="show-rule">${preferenceSelect("title", group.key, group.preference, `${group.title}: whole show processing`)}</label></div><div class="show-content" ${expanded ? "" : "hidden"}>${seasons.map(season => {
     const seasonKey = `${group.key}:${season ?? "none"}`;
     const seasonOpen = openSeasons.has(seasonKey) || searchOpen;
     const seasonName = season === null ? "Unnumbered episodes" : season === 0 ? "Specials" : `Season ${season}`;
