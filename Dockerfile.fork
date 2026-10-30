@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# Fork overlay image for the CUDA variant.
+#
+# Reuses the upstream CUDA runtime (FFmpeg, PyTorch, faster-whisper, WhisperX) exactly
+# as published, and replaces only the pure-Python crowbarr package with this checkout.
+# Pin BASE to the upstream digest whose runtime matches this source tree; bump it when
+# rebasing the fork onto a newer upstream release.
+#
+#   docker build -f Dockerfile.fork -t crowbarr-fork:latest-cuda .
+ARG BASE=ghcr.io/amanofvaly/crowbarr:latest-cuda@sha256:84b9d98f6ff71c3c4042b571f089835b136873bcce01a60205bed4996fa6bfe1
+
+FROM python:3.12-slim-bookworm AS application
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE ./
+COPY crowbarr ./crowbarr
+RUN pip wheel --no-deps --wheel-dir /app-wheel .
+
+FROM ${BASE}
+USER root
+RUN --mount=type=bind,from=application,source=/app-wheel,target=/app-wheel \
+    pip install --no-cache-dir --no-compile --no-deps --force-reinstall /app-wheel/*.whl && pip check
+LABEL org.opencontainers.image.source="https://github.com/rgabrielson11/crowbarr"
+USER 1000:1000

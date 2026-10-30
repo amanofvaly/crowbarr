@@ -459,3 +459,37 @@ def test_claim_retries_on_database_locked(tmp_path, monkeypatch):
     assert claimed is not None
     assert attempts[0] == 2
 
+
+
+def test_scanner_survives_when_failure_notice_hits_the_same_lock(tmp_path, monkeypatch, caplog):
+    store = ConfigStore(tmp_path)
+    db = Database(tmp_path / "crowbarr.db")
+    daemon = service.Service(store, db)
+    scans = 0
+
+    def locked_scan(*args):
+        nonlocal scans
+        scans += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    def locked_notice(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    waits = 0
+
+    def wait(_timeout):
+        nonlocal waits
+        waits += 1
+        if waits == 3:
+            daemon.stop_event.set()
+        return False
+
+    monkeypatch.setattr(service, "scan", locked_scan)
+    monkeypatch.setattr(db, "notice", locked_notice)
+    monkeypatch.setattr(daemon.scan_event, "wait", wait)
+    with caplog.at_level(logging.WARNING, logger="crowbarr"):
+        daemon.scanner()
+
+    # The thread kept retrying instead of dying on the first failed notice.
+    assert scans == 3
+    assert "Could not record the scan failure notice" in caplog.text
