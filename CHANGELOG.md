@@ -13,6 +13,10 @@ results a person deliberately set aside.
 Read this section before upgrading: a bump means recognition work, and it can publish
 subtitles that the previous policy declined to.
 
+### 0.3.8
+
+- Spoken-language checks listen to more of the file when fewer than two samples are confident, so quiet stretches no longer send English films to review. Reopens `review` and `failed` jobs.
+
 ### 0.3.7
 
 - Verify spoken language using distributed multilingual speech samples before recognition
@@ -85,19 +89,33 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### 0.4.13
+
+- Files whose audio has no language tag are no longer sent to review because of quiet stretches. Audit policy 0.3.8 reopens review and failed jobs.
+- Settings, Updates checks GitHub for new releases and installs one in place when the image can run it. The sidebar shows Update to X.
+- Crowbarr asks GitHub every six hours and sends only its version number. Turn this off under Settings, Updates.
+- Automatic installs are off by default.
+- The Docker images no longer include PyTorch and WhisperX. Download them under Settings, Speech processing before turning on refinement.
+- If refinement is on, download the software once after updating. Jobs use Whisper's word timings until then.
+- Tuning options sit under Advanced on each Settings page.
+- Wait for Bazarr moved to Connections, under Bazarr.
+- Skip videos shorter than (minutes) now has a control on the Library page. It always used 10 before.
+- Quiet hours has an on/off switch.
+- Both "no language tag" options are on the Quality page.
+- Library menus read Automatic, Same as show, Same as season, Always process and Never process.
+- Library says when Only monitored hides every Sonarr or Radarr file.
+- Activity and Dashboard use plainer status names, show when waiting files start, and read "1 minute ago".
+- The dashboard shows five number cards, the running job, recent and queued jobs, and a System panel.
+- Plex deferral says "Cannot reach Plex" when Plex does not answer.
+
 ### 0.4.12
 
-- Changing the Bazarr wait now applies to files already waiting. They are released or held
-  at their new deadline on the next scan, instead of keeping the wait they were queued with.
-- Run next releases a waiting file at once. It no longer sits behind the Bazarr wait.
-- The Activity queue lists the running file first, then files ready to run, then files still
-  waiting, each in the order they will be picked.
-- Fixed clicking a show in the Library failing with "Cannot set properties of null". The show
-  row now has its "Seasons & episodes" label back.
-- Fixed the Library, Activity and Dashboard lists sometimes showing the previous row's title
-  after a search or refresh. A movie could appear under another movie's name.
-- Saving a setting no longer waits for the whole queue to be scanned for short videos. The
-  scan now runs only when the minimum video length changes, and after the save completes.
+- Changing the Bazarr wait applies to files already waiting.
+- Run next releases a waiting file at once.
+- Activity lists the running file, then files ready to run, then files still waiting.
+- Fixed clicking a show in Library failing with "Cannot set properties of null".
+- Fixed Library, Activity and Dashboard rows showing the previous row's title after a search or refresh.
+- Saving a setting no longer waits for a scan of short videos.
 
 ### 0.4.11
 
