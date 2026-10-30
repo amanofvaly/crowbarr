@@ -194,10 +194,18 @@ def test_private_files_are_never_left_exposed_when_chmod_is_refused(tmp_path, mo
         raise PermissionError(1, "Operation not permitted")
 
     class Exposed:
+        """A real stat result that reports group and world access."""
+
         st_mode = 0o100770
 
+        def __init__(self, real):
+            self.real = real
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
     monkeypatch.setattr(_os, "fchmod", refuse)
-    monkeypatch.setattr(_os, "fstat", lambda fd: Exposed() if fd else real_fstat(fd))
+    monkeypatch.setattr(_os, "fstat", lambda fd: Exposed(real_fstat(fd)))
     with pytest.raises(PermissionError):
         atomic_write(tmp_path / "settings.json", "{}", mode=0o600)
 
