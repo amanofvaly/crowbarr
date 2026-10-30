@@ -320,6 +320,13 @@ function statCards() {
     `<${href ? "a" : "div"} class="stat ${tone}" ${href ? `href="${href}"` : ""}><strong>${fmt(value)}</strong><span>${label}</span></${href ? "a" : "div"}>`;
   return `<div class="stat-grid">${card(status?.media_count, "Files in library")}${card(waiting, "Waiting", "#activity")}${card(counts.completed, "Subtitles written", "#history")}${card(counts.unchanged, "Already correct", "#history")}${card(review, "Need review", "#review", review ? "attention" : "")}</div><p class="last-sync">Library synced: ${esc(ago(status?.last_scan))}</p>`;
 }
+// Only Sonarr and Radarr are synced, so Bazarr and Plex have no health record to report.
+function serviceState(name, connected, sync) {
+  if (!connected) return "Not set up";
+  if (sync?.healthy) return ["sonarr", "radarr"].includes(name) ? `Connected · ${fmt(sync.file_count)} files` : "Connected";
+  return sync ? "Cannot sync" : "Configured";
+}
+
 function systemPanel() {
   const r = status?.resources || {};
   const size = (value) =>
@@ -342,15 +349,7 @@ function systemPanel() {
     .map((name) => {
       const sync = status?.integrations?.find((item) => item.provider === name);
       const connected = Boolean(savedSettings?.[name]?.url);
-      const state = !connected
-        ? "Not set up"
-        : sync?.healthy
-          ? ["sonarr", "radarr"].includes(name)
-            ? `Connected · ${fmt(sync.file_count)} files`
-            : "Connected"
-          : sync
-            ? "Cannot sync"
-            : "Set up";
+      const state = serviceState(name, connected, sync);
       const tone = !connected ? "neutral" : sync && !sync.healthy ? "warning" : "";
       return `<li><a href="#settings/connections"><span class="status-dot ${tone}" aria-hidden="true"></span><strong>${name[0].toUpperCase() + name.slice(1)}</strong><span>${esc(state)}</span></a></li>`;
     })

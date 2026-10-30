@@ -59,6 +59,18 @@ console.log(JSON.stringify(libraryEmptyText()));
     assert run_node(program)[0] == "Your library is waiting"
 
 
+@needs_node
+def test_services_without_a_sync_record_are_not_shown_as_needing_setup():
+    program = 'const fmt = (n) => n;\n' + excerpt("function serviceState", "function systemPanel") + """
+const healthy = { healthy: 1, file_count: 4 };
+console.log(JSON.stringify([
+  serviceState("bazarr", true, undefined), serviceState("plex", false, undefined),
+  serviceState("sonarr", true, healthy), serviceState("radarr", true, { healthy: 0 }),
+]));
+"""
+    assert run_node(program) == ["Configured", "Not set up", "Connected · 4 files", "Cannot sync"]
+
+
 def test_every_setting_has_a_control_in_the_page_code():
     """A setting added without any control cannot be changed, so its default applies silently.
 
