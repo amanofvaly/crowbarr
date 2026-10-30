@@ -4,9 +4,13 @@ name: Release
 # Starting only when version.py changes meant one failed run (a flaky test, a registry
 # outage) left the release undone until someone started it by hand. Every push and a
 # periodic schedule now try again, and the check job ends the run at once when the
-# version is already published.
+# version is already published. A push to main is released only after the Tests workflow
+# has passed on that exact commit, so the tests run once. The schedule and manual runs
+# have no Tests run to wait for, so they run the tests themselves.
 on:
-  push:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
     branches: [main]
   schedule:
     - cron: "17 */6 * * *"
@@ -40,10 +44,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFY_ONLY: ${{ inputs.verify_only }}
+          EVENT: ${{ github.event_name }}
+          TESTED_RESULT: ${{ github.event.workflow_run.conclusion }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           if [[ "$VERIFY_ONLY" == true ]]; then
             echo "pending=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [[ "$EVENT" == workflow_run ]]; then
+            if [[ "$TESTED_RESULT" != success ]]; then
+              echo "The tests did not pass, so nothing is released."
+              echo "pending=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # This run sees the newest commit on main. Release only the commit that was tested.
+            if [[ "$TESTED_SHA" != "$GITHUB_SHA" ]]; then
+              echo "main has moved on from the tested commit; the newer push is released after its own tests."
+              echo "pending=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           version="$(sed -n 's/^APPLICATION_VERSION = "\(.*\)"/\1/p' crowbarr/version.py)"
           test -n "$version"
@@ -59,7 +79,7 @@ jobs:
 
   tests:
     needs: check
-    if: needs.check.outputs.pending == 'true'
+    if: needs.check.outputs.pending == 'true' && github.event_name != 'workflow_run'
     uses: ./.github/workflows/test.yml
     permissions:
       contents: read
@@ -67,7 +87,11 @@ jobs:
   release-version:
     name: Read release version
     needs: [check, tests]
-    if: needs.check.outputs.pending == 'true' && (github.ref == 'refs/heads/main' || inputs.verify_only == true)
+    # `tests` is skipped when the Tests workflow already passed on this commit.
+    if: >-
+      ${{ !cancelled() && needs.check.outputs.pending == 'true'
+      && (needs.tests.result == 'success' || needs.tests.result == 'skipped')
+      && (github.ref == 'refs/heads/main' || inputs.verify_only == true) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
