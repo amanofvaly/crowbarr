@@ -1,10 +1,15 @@
 name: Release
 
+# A release is wanted whenever main selects a version that has no published release.
+# Starting only when version.py changes meant one failed run (a flaky test, a registry
+# outage) left the release undone until someone started it by hand. Every push and a
+# periodic schedule now try again, and the check job ends the run at once when the
+# version is already published.
 on:
   push:
     branches: [main]
-    paths:
-      - crowbarr/version.py
+  schedule:
+    - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
       verify_only:
@@ -22,15 +27,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check:
+    name: Check for an unpublished version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pending: ${{ steps.check.outputs.pending }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+        run: |
+          if [[ "$VERIFY_ONLY" == true ]]; then
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="$(sed -n 's/^APPLICATION_VERSION = "\(.*\)"/\1/p' crowbarr/version.py)"
+          test -n "$version"
+          # A draft is an interrupted publish, so it still counts as pending.
+          draft="$(gh release view "v$version" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
+          if [[ "$draft" == false ]]; then
+            echo "Release v$version is already published."
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release v$version is not published yet."
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          fi
+
   tests:
+    needs: check
+    if: needs.check.outputs.pending == 'true'
     uses: ./.github/workflows/test.yml
     permissions:
       contents: read
 
   release-version:
     name: Read release version
-    needs: tests
-    if: github.ref == 'refs/heads/main' || inputs.verify_only == true
+    needs: [check, tests]
+    if: needs.check.outputs.pending == 'true' && (github.ref == 'refs/heads/main' || inputs.verify_only == true)
     runs-on: ubuntu-latest
     permissions:
       contents: write
