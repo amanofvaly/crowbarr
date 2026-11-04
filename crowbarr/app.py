@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -137,6 +137,18 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         )
         response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api") else "no-cache"
         return response
+
+    # Added last so it runs first: everything after it sees the path without the base.
+    @app.middleware("http")
+    async def url_base(request: Request, call_next):
+        # Like Radarr's URL Base, for a reverse proxy that passes /base/... through.
+        # Paths without the base still answer, so /health, webhooks and LAN access work.
+        base = store.get().url_base
+        if base and request.scope["path"] == base:
+            return RedirectResponse(base + "/")
+        if base and request.scope["path"].startswith(base + "/"):
+            request.scope["path"] = request.scope["path"][len(base):]
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error):

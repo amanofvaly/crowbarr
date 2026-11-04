@@ -81,7 +81,7 @@ def test_every_setting_has_a_control_in_the_page_code():
 
     # Set elsewhere: the model table, the pause button, the connection forms, a fixed value.
     elsewhere = {"language", "model", "paused", "sonarr", "radarr", "bazarr", "plex", "plex_mappings"}
-    controls = re.compile(r'(?:numeric|check|select)\(\s*"(\w+)"|name="(\w+)"')
+    controls = re.compile(r'(?:numeric|check|select|field)\(\s*"(\w+)"|name="(\w+)"')
     present = {a or b for a, b in controls.findall(SCRIPT)}
     missing = set(Settings.model_fields) - elsewhere - present
     assert not missing, f"no control for: {sorted(missing)}"

@@ -173,14 +173,14 @@ def library(connection, kind: str, query: str, offset: int, limit: int, status: 
         record.update(decision(record, rules, auto))
         downloadable = record.get("output") or (record.get("state") == "unchanged" and
                        (record.get("audited_subtitle") or record.get("selected_source_kind") in {"external", "embedded"}))
-        record["download"] = f"/api/jobs/{record['job_id']}/subtitle" if downloadable else None
-        record["candidate_download"] = (f"/api/jobs/{record['job_id']}/candidate"
+        record["download"] = f"api/jobs/{record['job_id']}/subtitle" if downloadable else None
+        record["candidate_download"] = (f"api/jobs/{record['job_id']}/candidate"
                                         if record.get("state") == "review" and record.get("has_candidate") else None)
         record.pop("audited_subtitle", None)
         group = groups.setdefault(record["key"], {
             "key": record["key"], "title": record["title"], "kind": record["kind"],
             "provider": record["provider"], "item_id": record.get("item_id"), "year": record.get("year"),
-            "poster": f"/api/library/artwork/{record['provider']}/{record['item_id']}" if record.get("poster") else None,
+            "poster": f"api/library/artwork/{record['provider']}/{record['item_id']}" if record.get("poster") else None,
             "preference": rules.get(("title", record["key"]), "auto"), "files": [],
         })
         group["files"].append(record)

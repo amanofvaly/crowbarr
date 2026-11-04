@@ -182,7 +182,7 @@ function toast(text, error = false, heading = error ? "Action failed" : "Done") 
   notification(heading, text, error ? "error" : "success");
 }
 async function api(path, method = "GET", body) {
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`api${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -892,7 +892,14 @@ function settingsPage() {
       : "",
   ].filter(Boolean).join(" ");
   let content = "";
-  if (section === "connections") content = connectionSettings();
+  if (section === "connections")
+    content =
+      connectionSettings() +
+      settingPanel(
+        "Reverse proxy",
+        "Serve the dashboard from a subfolder of another site, like Sonarr and Radarr can.",
+        field("url_base", "URL Base", "For reverse proxies, e.g. /crowbarr. Leave empty to serve at the root.", "text", 'placeholder="/crowbarr" autocomplete="off"'),
+      );
   if (section === "library")
     content = settingPanel(
       "Media & discovery",
@@ -1137,15 +1144,15 @@ function apiPage() {
     heading(
       "API & Webhooks",
       "Connect your apps to Crowbarr with an authenticated HTTP API.",
-      '<a class="button" href="/api/openapi.json" download="crowbarr-openapi.json">Download OpenAPI schema</a>',
+      '<a class="button" href="api/openapi.json" download="crowbarr-openapi.json">Download OpenAPI schema</a>',
     ) +
     `<div class="api-grid"><div>${panel(
       "API access",
-      `<div class="panel-body"><p class="muted">Use <code>X-Api-Key</code> or <code>Authorization: Bearer</code>. This key grants administrative access, including settings and publication.</p><div class="api-key"><label class="sr-only" for="api-key">Crowbarr API key</label><input id="api-key" readonly type="password" value="${esc(settings.api_key)}" autocomplete="off">${button("Show", "reveal")}${button(icon("copy") + "Copy", "copy-key")}</div><p class="hint mt-12">Keep this key in your app’s secret storage. Dashboard sessions use a separate login.</p><h3 class="mt-24">Base URL</h3><pre>${esc(location.origin)}/api</pre><h3>Request an audit</h3><pre>curl -X POST '${esc(location.origin)}/api/process' \
+      `<div class="panel-body"><p class="muted">Use <code>X-Api-Key</code> or <code>Authorization: Bearer</code>. This key grants administrative access, including settings and publication.</p><div class="api-key"><label class="sr-only" for="api-key">Crowbarr API key</label><input id="api-key" readonly type="password" value="${esc(settings.api_key)}" autocomplete="off">${button("Show", "reveal")}${button(icon("copy") + "Copy", "copy-key")}</div><p class="hint mt-12">Keep this key in your app’s secret storage. Dashboard sessions use a separate login.</p><h3 class="mt-24">Base URL</h3><pre>${esc(new URL("api", location.href).href)}</pre><h3>Request an audit</h3><pre>curl -X POST '${esc(new URL("api", location.href).href)}/process' \
   -H 'X-Api-Key: YOUR_API_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"media":"/media/movies/example.mkv"}'</pre><p class="hint">Use an actual path returned by the library endpoint. Add <code>"directive":"generate"</code> to request fresh generation. A 202 response includes the job ID; poll its details for progress.</p></div>`,
-    )}${panel("Sonarr & Radarr webhooks", `<div class="panel-body"><p class="muted">Add a Webhook connection in each media manager for imports, upgrades, renames, and deletions.</p>${["sonarr", "radarr"].map((name) => `<h3 class="mt-20">${name[0].toUpperCase() + name.slice(1)}</h3><pre>${esc(location.origin)}/api/hooks/${name}</pre>`).join("")}<div class="system-row"><span>Basic auth username</span><strong>crowbarr</strong></div><div class="system-row"><span>Basic auth password</span><strong>Your Crowbarr API key</strong></div><p class="hint mt-16">Replace the host above with an address reachable from your media manager. Scheduled reconciliation covers missed events.</p></div>`)}</div><div>${panel("Endpoint reference", endpoints.map(([method, path, description]) => `<div class="endpoint"><span class="method ${method.toLowerCase()}">${method}</span><code>${esc(path)}</code><p>${description}</p></div>`).join(""))}</div></div>`
+    )}${panel("Sonarr & Radarr webhooks", `<div class="panel-body"><p class="muted">Add a Webhook connection in each media manager for imports, upgrades, renames, and deletions.</p>${["sonarr", "radarr"].map((name) => `<h3 class="mt-20">${name[0].toUpperCase() + name.slice(1)}</h3><pre>${esc(new URL("api", location.href).href)}/hooks/${name}</pre>`).join("")}<div class="system-row"><span>Basic auth username</span><strong>crowbarr</strong></div><div class="system-row"><span>Basic auth password</span><strong>Your Crowbarr API key</strong></div><p class="hint mt-16">Replace the host above with an address reachable from your media manager. Scheduled reconciliation covers missed events.</p></div>`)}</div><div>${panel("Endpoint reference", endpoints.map(([method, path, description]) => `<div class="endpoint"><span class="method ${method.toLowerCase()}">${method}</span><code>${esc(path)}</code><p>${description}</p></div>`).join(""))}</div></div>`
   );
 }
 async function navigate() {
@@ -1537,7 +1544,7 @@ async function detail(id) {
       })()
     : "";
   $("detail-content").innerHTML =
-    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}${auditExplanation}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="/api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<details class="recognition-notes"><summary><span>Recognition regions excluded from the verdict</span><span class="recognition-count">${warnings.length}</span></summary><div class="recognition-notes-body"><p>Crowbarr ignored these weak regions when forming timing evidence. Expand this section to inspect what the recognizer encountered.</p><ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul></div></details>` : ""}<div class="actions detail-actions">${["review", "failed"].includes(job.state) ? `${button("Generate a fresh subtitle", "regenerate", "primary", `data-id="${id}"`)}${button("Set aside", "skip", "", `data-id="${id}"`)}` : ""}${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
+    `${badge(job.state)}<p>${esc(job.media)}</p>${job.state === "processing" ? progressMarkup(job) : ""}${job.error ? `<div class="notice">${esc(job.error)}</div>` : ""}${auditExplanation}<dl class="detail-list">${facts.map(([name, value]) => `<dt>${name}</dt><dd>${esc(value)}</dd>`).join("")}</dl>${report.candidate ? `<div class="review-box"><h3>Review subtitle candidate</h3><p>Download this private candidate and check it against the video before publishing.</p><a class="button" href="api/jobs/${id}/candidate" download>Download candidate</a>${job.state === "review" ? `<label class="check-field mt-18"><input type="checkbox" id="review-confirm"><span>I checked this candidate against the video.</span></label>${button("Publish reviewed candidate", "approve", "primary", `data-id="${id}" id="publish-candidate" disabled`)}` : ""}</div>` : ""}${(report.issues || []).length ? `<h3 class="mt-20">Quality findings</h3><ul>${report.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<details class="recognition-notes"><summary><span>Recognition regions excluded from the verdict</span><span class="recognition-count">${warnings.length}</span></summary><div class="recognition-notes-body"><p>Crowbarr ignored these weak regions when forming timing evidence. Expand this section to inspect what the recognizer encountered.</p><ul>${warnings.map((warning) => `<li>${esc(warning)}</li>`).join("")}</ul></div></details>` : ""}<div class="actions detail-actions">${["review", "failed"].includes(job.state) ? `${button("Generate a fresh subtitle", "regenerate", "primary", `data-id="${id}"`)}${button("Set aside", "skip", "", `data-id="${id}"`)}` : ""}${button("Download audit report", "download-report", "", `data-id="${id}"`)}${settings.bazarr.url ? button("Inspect Bazarr alternatives", "providers", "", `data-id="${id}"`) : ""}</div><div id="provider-results"></div>`;
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
 }
 function download(data, name) {
@@ -1980,8 +1987,11 @@ document.addEventListener("submit", async (event) => {
     const body =
       submit.dataset.keep === "true" ? { ...settings, carry_forward: true } : settings;
     settings = await api("/settings", "PUT", body);
+    const moved = savedSettings && settings.url_base !== savedSettings.url_base;
     savedSettings = structuredClone(settings);
     dirty = draftDirty = false;
+    // Relative links follow the page, so move it to where the dashboard now lives.
+    if (moved) return location.assign(`${settings.url_base}/${location.hash}`);
     toast(
       submit.dataset.keep === "true"
         ? "Settings saved. Finished results will be kept; pending and changed files use the new settings."
@@ -2068,7 +2078,7 @@ enter().catch((error) => {
 let stream = null;
 function listen() {
   if (stream) stream.close();
-  stream = new EventSource("/api/events");
+  stream = new EventSource("api/events");
   stream.addEventListener("status", (event) => {
     try {
       apply(JSON.parse(event.data));
