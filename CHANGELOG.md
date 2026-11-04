@@ -89,6 +89,10 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
+### Unreleased
+
+- Set `URL_BASE`, such as `/crowbarr`, to serve the dashboard from a reverse proxy subfolder.
+
 ### 0.4.14
 
 - The dashboard no longer shows Bazarr and Plex as "Set up" when their addresses are saved; it says "Configured".

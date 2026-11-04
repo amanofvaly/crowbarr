@@ -132,6 +132,30 @@ def test_security_headers_and_request_size(client):
     assert client.post("/api/hooks/bazarr", content="x" * 70000, headers=auth(client)).status_code == 413
 
 
+def test_url_base_serves_the_dashboard_under_a_subfolder_and_at_the_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("URL_BASE", "crowbarr/")
+    with TestClient(create_app(tmp_path, background=False)) as client:
+        redirect = client.get("/crowbarr", follow_redirects=False)
+        assert redirect.status_code == 307 and redirect.headers["location"] == "/crowbarr/"
+        page = client.get("/crowbarr/")
+        assert page.status_code == 200 and 'src="static/app.js"' in page.text
+        for prefix in ("/crowbarr", ""):
+            assert client.get(f"{prefix}/static/app.js").status_code == 200
+            assert client.get(f"{prefix}/health").json()["status"] == "ok"
+            status = client.get(f"{prefix}/api/status", headers=auth(client))
+            assert status.status_code == 200 and status.headers["Cache-Control"] == "no-store"
+            hook = client.post(f"{prefix}/api/hooks/sonarr", json={"eventType": "Test"}, headers=auth(client))
+            assert hook.status_code == 202
+        assert client.get("/crowbarrx/health").status_code == 404
+
+
+@pytest.mark.parametrize("value", ["api", "/health", "static/x"])
+def test_url_base_cannot_hide_the_paths_docker_and_webhooks_use(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("URL_BASE", value)
+    with pytest.raises(ValueError):
+        create_app(tmp_path, background=False)
+
+
 def test_cpu_half_precision_is_rejected(client):
     response = client.put(
         "/api/settings", headers=auth(client), json={"device": "cpu", "compute_type": "float16"}

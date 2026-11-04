@@ -201,3 +201,8 @@ If a migrated install asks you to create an account, stop and check what is moun
 at `/config`. Do not reset the data.
 
 Keep the dashboard on a trusted network, or behind a reverse proxy with TLS.
+
+To serve it from a subfolder such as `https://example.com/crowbarr/`, set the
+environment variable `URL_BASE=/crowbarr` on the container and pass the path
+through unchanged (nginx: `location /crowbarr { proxy_pass http://crowbarr:8449; }`).
+`/health`, the webhooks and direct access on port 8449 keep working at the root.
