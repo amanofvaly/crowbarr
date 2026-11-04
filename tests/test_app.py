@@ -133,7 +133,7 @@ def test_security_headers_and_request_size(client):
 
 
 def test_url_base_serves_the_dashboard_under_a_subfolder_and_at_the_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("CROWBARR_URL_BASE", "crowbarr/")
+    monkeypatch.setenv("URL_BASE", "crowbarr/")
     with TestClient(create_app(tmp_path, background=False)) as client:
         redirect = client.get("/crowbarr", follow_redirects=False)
         assert redirect.status_code == 307 and redirect.headers["location"] == "/crowbarr/"
@@ -151,7 +151,7 @@ def test_url_base_serves_the_dashboard_under_a_subfolder_and_at_the_root(tmp_pat
 
 @pytest.mark.parametrize("value", ["api", "/health", "static/x"])
 def test_url_base_cannot_hide_the_paths_docker_and_webhooks_use(tmp_path, monkeypatch, value):
-    monkeypatch.setenv("CROWBARR_URL_BASE", value)
+    monkeypatch.setenv("URL_BASE", value)
     with pytest.raises(ValueError):
         create_app(tmp_path, background=False)
 

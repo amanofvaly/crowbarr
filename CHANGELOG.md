@@ -91,7 +91,7 @@ re-audits anything.
 
 ### Unreleased
 
-- Set `CROWBARR_URL_BASE`, such as `/crowbarr`, to serve the dashboard from a reverse proxy subfolder.
+- Set `URL_BASE`, such as `/crowbarr`, to serve the dashboard from a reverse proxy subfolder.
 
 ### 0.4.14
 
