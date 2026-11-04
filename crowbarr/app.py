@@ -138,17 +138,23 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api") else "no-cache"
         return response
 
-    # Added last so it runs first: everything after it sees the path without the base.
-    @app.middleware("http")
-    async def url_base(request: Request, call_next):
-        # Like Radarr's URL Base, for a reverse proxy that passes /base/... through.
-        # Paths without the base still answer, so /health, webhooks and LAN access work.
-        base = store.get().url_base
-        if base and request.scope["path"] == base:
-            return RedirectResponse(base + "/")
-        if base and request.scope["path"].startswith(base + "/"):
-            request.scope["path"] = request.scope["path"][len(base):]
-        return await call_next(request)
+    # The subfolder a reverse proxy serves the dashboard under, with /base/... passed through.
+    # Paths without the base still answer, so /health, webhooks and LAN access work.
+    base = os.environ.get("CROWBARR_URL_BASE", "").strip(" /")
+    if base:
+        # Docker's health check and the media managers' webhooks rely on these.
+        if base.split("/")[0] in {"api", "static", "health"}:
+            raise ValueError("CROWBARR_URL_BASE cannot start with /api, /static or /health")
+        base = f"/{base}"
+
+        # Added last so it runs first: everything after it sees the path without the base.
+        @app.middleware("http")
+        async def url_base(request: Request, call_next):
+            if request.scope["path"] == base:
+                return RedirectResponse(base + "/")
+            if request.scope["path"].startswith(base + "/"):
+                request.scope["path"] = request.scope["path"][len(base):]
+            return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error):

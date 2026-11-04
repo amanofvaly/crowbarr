@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 import tempfile
 from pathlib import Path, PureWindowsPath
@@ -162,8 +161,6 @@ class Settings(BaseModel):
     bazarr: Connection = Field(default_factory=Connection)
     plex: Connection = Field(default_factory=Connection)
     plex_mappings: list[PathMapping] = Field(default_factory=list, max_length=32)
-    # The subfolder a reverse proxy serves the dashboard under, such as /crowbarr.
-    url_base: str = ""
 
     def providers(self) -> list[str]:
         return [name for name in ("sonarr", "radarr") if getattr(self, name).url]
@@ -223,18 +220,6 @@ class Settings(BaseModel):
         }:
             raise ValueError("Choose a supported Whisper model")
         return value
-
-    @field_validator("url_base")
-    @classmethod
-    def valid_url_base(cls, value: str) -> str:
-        # Stored as Radarr stores it: empty, or a leading slash and no trailing one.
-        value = value.strip(" /")
-        if value and not re.fullmatch(r"[\w~-][\w.~-]*(/[\w~-][\w.~-]*)*", value, re.ASCII):
-            raise ValueError("Use a subfolder such as /crowbarr")
-        # Those paths are served at the root whatever the base is, for Docker and webhooks.
-        if value.split("/")[0] in {"api", "static", "health"}:
-            raise ValueError("That subfolder is already used by Crowbarr")
-        return f"/{value}" if value else ""
 
     @field_validator("compute_type")
     @classmethod

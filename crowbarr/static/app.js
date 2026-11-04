@@ -892,14 +892,7 @@ function settingsPage() {
       : "",
   ].filter(Boolean).join(" ");
   let content = "";
-  if (section === "connections")
-    content =
-      connectionSettings() +
-      settingPanel(
-        "Reverse proxy",
-        "Serve the dashboard from a subfolder of another site, like Sonarr and Radarr can.",
-        field("url_base", "URL Base", "For reverse proxies, e.g. /crowbarr. Leave empty to serve at the root.", "text", 'placeholder="/crowbarr" autocomplete="off"'),
-      );
+  if (section === "connections") content = connectionSettings();
   if (section === "library")
     content = settingPanel(
       "Media & discovery",
@@ -1987,11 +1980,8 @@ document.addEventListener("submit", async (event) => {
     const body =
       submit.dataset.keep === "true" ? { ...settings, carry_forward: true } : settings;
     settings = await api("/settings", "PUT", body);
-    const moved = savedSettings && settings.url_base !== savedSettings.url_base;
     savedSettings = structuredClone(settings);
     dirty = draftDirty = false;
-    // Relative links follow the page, so move it to where the dashboard now lives.
-    if (moved) return location.assign(`${settings.url_base}/${location.hash}`);
     toast(
       submit.dataset.keep === "true"
         ? "Settings saved. Finished results will be kept; pending and changed files use the new settings."

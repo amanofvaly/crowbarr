@@ -91,7 +91,7 @@ re-audits anything.
 
 ### Unreleased
 
-- Settings, Connections has a URL Base, so a reverse proxy can serve the dashboard from a subfolder such as /crowbarr.
+- Set `CROWBARR_URL_BASE`, such as `/crowbarr`, to serve the dashboard from a reverse proxy subfolder.
 
 ### 0.4.14
 
