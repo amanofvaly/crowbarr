@@ -96,8 +96,9 @@ release with split versioning requeues nothing.
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
 
-### 0.4.16
+### 0.4.15
 
+- Updates try a dropped connection to GitHub three times before reporting an error.
 - Adds High Accuracy at the top of Speech processing. It turns the voice filter off during full audits, which take about twice as long, and holds retimed subtitles for review. Off by default. Turning it on offers to re-check the library.
 - The refinement download now reads "PyTorch and WhisperX".
 

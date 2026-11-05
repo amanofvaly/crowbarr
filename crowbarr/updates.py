@@ -113,6 +113,20 @@ def write_state(directory: Path | str, state: dict) -> None:
 
 # ---------------------------------------------------------------- finding a release
 
+# A home network drops a connection now and then, so a failed connection is tried again.
+# A reply that says no (a missing release, a rate limit) is not retried.
+RETRY_DELAYS = (1.0, 4.0)
+
+
+def _retrying(action):
+    for delay in (*RETRY_DELAYS, None):
+        try:
+            return action()
+        except httpx.TransportError:
+            if delay is None:
+                raise
+            time.sleep(delay)
+
 
 def _get_json(client: httpx.Client, url: str, limit: int) -> dict:
     with client.stream("GET", url, headers={"Accept": "application/json"}) as response:
@@ -139,7 +153,7 @@ def _client() -> httpx.Client:
 
 def fetch_latest() -> dict:
     """The newest published release, with its manifest when it has one."""
-    try:
+    def read():
         with _client() as client:
             release = _get_json(client, f"{api_base()}/repos/{REPO}/releases/latest", 1024 * 1024)
             version = str(release["tag_name"]).lstrip("v")
@@ -148,6 +162,10 @@ def fetch_latest() -> dict:
             manifest = None
             if MANIFEST in assets:
                 manifest = _get_json(client, assets[MANIFEST], MAX_MANIFEST_BYTES)
+            return release, version, assets, manifest
+
+    try:
+        release, version, assets, manifest = _retrying(read)
     except (httpx.HTTPError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise UpdateError(f"Could not read the latest release ({type(error).__name__}).") from None
     return {
@@ -261,9 +279,9 @@ def download_and_unpack(directory: Path | str, release: dict) -> str:
     final = folder / version
     shutil.rmtree(staging, ignore_errors=True)
     try:
-        digest = hashlib.sha256()
-        size = 0
-        try:
+        def fetch() -> str:
+            digest = hashlib.sha256()
+            size = 0
             with _client() as client, client.stream("GET", url) as response:
                 response.raise_for_status()
                 with temporary.open("wb") as out:
@@ -273,9 +291,13 @@ def download_and_unpack(directory: Path | str, release: dict) -> str:
                             raise UpdateError("The update was larger than expected.")
                         digest.update(chunk)
                         out.write(chunk)
+            return digest.hexdigest()
+
+        try:
+            digest = _retrying(fetch)
         except httpx.HTTPError as error:
             raise UpdateError(f"The download failed ({type(error).__name__}).") from None
-        if digest.hexdigest() != str(manifest.get("sha256", "")).lower():
+        if digest != str(manifest.get("sha256", "")).lower():
             raise UpdateError("The download did not match its checksum, so it was discarded.")
         _set_job("installing")
         staging.mkdir()

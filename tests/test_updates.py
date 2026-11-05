@@ -458,3 +458,43 @@ def test_the_background_check_installs_only_when_asked_to_and_the_worker_is_idle
     started.clear()
     run(Store(update_check=False, auto_update=True), busy=False)
     assert started == []
+
+
+def flaky(monkeypatch, routes, failures):
+    """Answer from `routes`, but refuse the first `failures` connections."""
+    seen = {"n": 0}
+
+    def handler(request):
+        seen["n"] += 1
+        if seen["n"] <= failures:
+            raise httpx.ConnectError("connection refused", request=request)
+        body = routes.get(request.url.path)
+        return httpx.Response(404) if body is None else httpx.Response(200, content=body)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(updates, "_client", lambda: httpx.Client(transport=transport, follow_redirects=True))
+    monkeypatch.setattr(updates, "RETRY_DELAYS", (0, 0))
+    return seen
+
+
+def test_a_dropped_connection_is_tried_again_when_reading_the_release(monkeypatch):
+    seen = flaky(monkeypatch, release_routes(wheel=b"w"), failures=2)
+
+    assert updates.fetch_latest()["version"] == "9.9.9"
+    assert seen["n"] > 2
+
+
+def test_reading_the_release_gives_up_after_three_failed_connections(monkeypatch):
+    seen = flaky(monkeypatch, release_routes(wheel=b"w"), failures=99)
+
+    with pytest.raises(updates.UpdateError, match="ConnectError"):
+        updates.fetch_latest()
+    assert seen["n"] == 3
+
+
+def test_an_answer_that_says_no_is_not_retried(monkeypatch):
+    seen = flaky(monkeypatch, {}, failures=0)
+
+    with pytest.raises(updates.UpdateError, match="HTTPStatusError"):
+        updates.fetch_latest()
+    assert seen["n"] == 1
