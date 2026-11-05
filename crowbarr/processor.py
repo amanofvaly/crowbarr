@@ -7,7 +7,15 @@ import textwrap
 from bisect import bisect_left
 from pathlib import Path
 
-from .audit import audit, blocking_structural_issues, section_coverage, with_section
+from .audit import (
+    SECTION_RUN_MINUTES,
+    SECTION_RUN_SHARE,
+    audit,
+    blocking_structural_issues,
+    sample_missing_speech,
+    section_coverage,
+    with_section,
+)
 from .config import Settings, atomic_write
 from .db import Database
 from .library import allowed, signature, source_subtitle, subtitle_sources
@@ -224,6 +232,37 @@ def _sample_windows(cues: list[Cue], duration: float) -> list[tuple[float, float
         else:
             windows.append((start, end))
     return windows
+
+
+SPACED_SAMPLE_SECONDS = 120
+
+
+def _spaced_windows(duration: float) -> list[tuple[float, float]]:
+    """Samples close enough that a bad section long enough to flag must contain one.
+
+    Positions ignore where the subtitle has lines, because a section with no lines is
+    what these samples look for. Returns nothing when the samples would overlap, and the
+    recording is then heard whole.
+    """
+    limit = min(SECTION_RUN_MINUTES * 60, SECTION_RUN_SHARE * duration)
+    spacing = limit - SPACED_SAMPLE_SECONDS
+    if spacing <= SPACED_SAMPLE_SECONDS:
+        return []
+    windows = []
+    start = spacing / 2
+    while start + SPACED_SAMPLE_SECONDS <= duration:
+        windows.append((start, start + SPACED_SAMPLE_SECONDS))
+        start += spacing
+    return windows
+
+
+def _samples_found_a_hole(candidates) -> bool:
+    """Every subtitle that passed its samples has a sample with clear speech and no lines."""
+    return all(
+        any(check["bad"] for check in candidate["audit"].get("sample_speech", []))
+        for candidate in candidates
+        if candidate["audit"]["decision"] == "pass"
+    )
 
 
 # Verdicts that leave nothing for a repair to correct, and that the full transcript
@@ -513,11 +552,13 @@ def process(
                 raise ReviewRequired(
                     "Bazarr has authored alternatives. Enable provider upgrades or choose one in Bazarr before generation."
                 )
-        windows = (
-            _sample_windows(max(candidates, key=lambda c: len(c["cues"]))["cues"], duration)
-            if candidates and settings.sampled_audit and cache_transcript and duration > 600
-            else []
-        )
+        windows = []
+        if candidates and settings.sampled_audit and cache_transcript and duration > 600:
+            windows = (
+                _spaced_windows(duration)
+                if settings.high_accuracy
+                else _sample_windows(max(candidates, key=lambda c: len(c["cues"]))["cues"], duration)
+            )
         initial_sampling_windows = list(windows)
         full_audit_escalation = False
         if windows:
@@ -546,6 +587,8 @@ def process(
         arbitration = []
         for candidate in candidates:
             candidate_audit = _audit_source(candidate["cues"], timeline_words, duration, windows)
+            if windows and settings.high_accuracy:
+                candidate_audit["sample_speech"] = sample_missing_speech(candidate["cues"], timeline_words, windows)
             candidate["audit"] = candidate_audit
             arbitration.append(
                 {
@@ -574,7 +617,9 @@ def process(
                 candidate_audit["dialogue_coverage"],
             )
 
-        if windows and _needs_full_audio(candidates):
+        if windows and (
+            _needs_full_audio(candidates) or (settings.high_accuracy and _samples_found_a_hole(candidates))
+        ):
             full_audit_escalation = True
             recognition_stage[0] = "Sample cannot settle a change; auditing against full dialogue"
             db.update(job["id"], stage=recognition_stage[0])

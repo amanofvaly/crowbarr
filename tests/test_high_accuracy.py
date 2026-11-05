@@ -9,12 +9,18 @@ from test_processor import alignment_stub, queued
 from test_section_coverage import film, without
 
 from crowbarr import inference
-from crowbarr.audit import section_coverage, with_section
+from crowbarr.audit import (
+    SECTION_RUN_MINUTES,
+    SECTION_RUN_SHARE,
+    sample_missing_speech,
+    section_coverage,
+    with_section,
+)
 from crowbarr.config import FINGERPRINT_FIELDS, Settings
 from crowbarr.db import Database
 from crowbarr.library import scan
-from crowbarr.processor import _recognized_words, process
-from crowbarr.subtitles import Cue, render_srt
+from crowbarr.processor import _recognized_words, _spaced_windows, process
+from crowbarr.subtitles import Cue, Word, render_srt
 
 MINUTES = 40
 
@@ -165,3 +171,97 @@ def test_with_it_on_a_retimed_subtitle_waits_for_review(feature, tmp_path):
     assert result["state"] == "review"
     assert any("held for review" in issue for issue in json.loads(result["report"])["issues"])
     assert not feature.with_suffix(".crowbarr.en.srt").exists()
+
+
+def covered_by_a_sample(windows, first, last):
+    return any(first <= start and end <= last for start, end in windows)
+
+
+@pytest.mark.parametrize("minutes", [45, 60, 90, 120, 180])
+def test_a_long_bad_section_cannot_fit_between_samples(minutes):
+    duration = minutes * 60.0
+    windows = _spaced_windows(duration)
+    limit = min(SECTION_RUN_MINUTES * 60, SECTION_RUN_SHARE * duration)
+    for first in range(0, int(duration - limit), 30):
+        assert covered_by_a_sample(windows, first, first + limit), f"{limit}s bad run at {first}s was missed"
+
+
+def test_samples_listen_to_much_less_than_the_film():
+    assert len(_spaced_windows(90 * 60.0)) == 8
+    assert len(_spaced_windows(120 * 60.0)) == 9
+    assert len(_spaced_windows(45 * 60.0)) <= 10
+
+
+def test_a_recording_too_short_to_sample_safely_is_heard_whole():
+    assert _spaced_windows(15 * 60.0) == []
+
+
+def test_a_sample_with_clear_speech_and_no_subtitle_lines_is_bad():
+    cues, words = film(60)
+    checks = sample_missing_speech(without(cues, 60, 0.4, 0.6), words, [(300, 420), (1800, 1920)])
+    assert [check["bad"] for check in checks] == [False, True]
+
+
+def test_a_sample_of_music_or_silence_is_not_bad():
+    cues, words = film(60)
+    spoken_elsewhere = [word for word in words if not 1800 <= word.start < 1920]
+    checks = sample_missing_speech(without(cues, 60, 0.4, 0.6), spoken_elsewhere, [(1800, 1920)])
+    assert checks[0]["bad"] is False
+
+
+def test_a_sample_of_unclear_speech_is_not_bad():
+    cues, words = film(60)
+    unsure = [Word(w.start, w.end, w.text, 0.3) for w in words]
+    assert sample_missing_speech(without(cues, 60, 0.4, 0.6), unsure, [(1800, 1920)])[0]["bad"] is False
+
+
+def sampled_hearing(monkeypatch, words):
+    """Real sampling path: samples hear only their windows, a full hearing hears everything."""
+    sampled, whole = [], []
+
+    def windowed(audio, windows, settings, cache):
+        sampled.append(list(windows))
+        return [w for w in words if any(a <= w.start < b for a, b in windows)], []
+
+    def bounded(audio, settings, cache, checkpoint, speech_filter=True):
+        whole.append(speech_filter)
+        return words, []
+
+    monkeypatch.setattr(inference, "verify_audio_language", lambda *args: {"language": "en"})
+    monkeypatch.setattr(inference, "transcribe_windows", windowed)
+    monkeypatch.setattr(inference, "transcribe_bounded", bounded)
+    return sampled, whole
+
+
+def test_with_it_on_samples_find_a_hole_and_the_subtitle_is_replaced(feature, tmp_path, monkeypatch):
+    """Shrek passed three samples with 22 minutes deleted, so nothing was replaced."""
+    words = damaged_subtitle(feature)
+    sampled, whole = sampled_hearing(monkeypatch, words)
+    settings, db, job = queued_on(feature, tmp_path)
+    result = process(job, settings, db.path.parent, db, aligner=alignment_stub)
+    report = json.loads(result["report"])
+    assert len(sampled[0]) > 3
+    assert whole[0] is False
+    assert report["full_audit_escalation"] is True
+    assert report["audit"]["before"]["decision"] == "damaged"
+    assert result["state"] == "completed"
+    assert report["mode"] == "generated"
+
+
+def test_with_it_on_a_complete_subtitle_is_settled_by_samples(feature, tmp_path, monkeypatch):
+    cues, words = film(MINUTES)
+    feature.with_suffix(".en.srt").write_text(render_srt(cues))
+    sampled, whole = sampled_hearing(monkeypatch, words)
+    settings, db, job = queued_on(feature, tmp_path)
+    result = process(job, settings, db.path.parent, db, aligner=alignment_stub)
+    assert sampled and whole == []
+    assert result["state"] == "unchanged"
+
+
+def test_with_it_off_sampling_is_todays_three_windows(feature, tmp_path, monkeypatch):
+    words = damaged_subtitle(feature)
+    sampled, whole = sampled_hearing(monkeypatch, words)
+    settings, db, job = queued(feature, tmp_path)
+    result = process(job, settings, db.path.parent, db, aligner=alignment_stub)
+    assert len(sampled[0]) <= 3
+    assert "sample_speech" not in json.loads(result["report"])["audit"]["before"]

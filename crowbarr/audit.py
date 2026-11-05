@@ -69,6 +69,7 @@ SECTION_BAD_SHARE = 0.35
 SECTION_ACCOUNTED_SHARE = 0.5
 SECTION_RUN_MINUTES = 15.0
 SECTION_RUN_SHARE = 0.15
+SECTION_SAMPLE_WORDS = 12
 
 
 def blocking_structural_issues(issues: list[str], cue_count: int) -> list[str]:
@@ -142,13 +143,8 @@ def _fit_start(evidence: list[dict]) -> dict:
     }
 
 
-def section_coverage(cues: list[Cue], words: list[Word], duration: float) -> dict:
-    """Find long stretches of clear speech that the subtitle has no lines for.
-
-    Judged by runs of five-minute buckets, so one bad scene cannot veto a film. Words
-    the recognizer was unsure of are not evidence, and a recording with too little clear
-    speech cannot be judged at all, which is reported as such and never flagged.
-    """
+def _accounted_speech(cues: list[Cue], words: list[Word]) -> tuple[list[Word], set[int]]:
+    """Each heard token's word, and which heard tokens the subtitle has lines for."""
     written = [token for cue in cues for token in tokens(cue.text)]
     heard, owners = [], []
     for word in words:
@@ -165,6 +161,17 @@ def section_coverage(cues: list[Cue], words: list[Word], duration: float) -> dic
             for gram in (tuple(written[i : i + size]) for i in range(block.a, block.a + block.size - size + 1))
         ):
             accounted.update(range(block.b, block.b + block.size))
+    return owners, accounted
+
+
+def section_coverage(cues: list[Cue], words: list[Word], duration: float) -> dict:
+    """Find long stretches of clear speech that the subtitle has no lines for.
+
+    Judged by runs of five-minute buckets, so one bad scene cannot veto a film. Words
+    the recognizer was unsure of are not evidence, and a recording with too little clear
+    speech cannot be judged at all, which is reported as such and never flagged.
+    """
+    owners, accounted = _accounted_speech(cues, words)
     confident = [i for i, word in enumerate(owners) if word.probability >= SECTION_CONFIDENT_WORD]
     share = sum(i in accounted for i in confident) / len(confident) if confident else 0.0
     buckets: dict[int, list[int]] = {}
@@ -215,6 +222,33 @@ def section_coverage(cues: list[Cue], words: list[Word], duration: float) -> dic
         ],
         "section_checks": checks,
     }
+
+
+def sample_missing_speech(cues: list[Cue], words: list[Word], windows: list[tuple[float, float]]) -> list[dict]:
+    """Measure each sample for clear speech the subtitle has no lines for.
+
+    A bad sample only sends the film to a whole-film audit, which makes the decision. It
+    never sets a verdict, so one bad scene costs GPU time and cannot veto a subtitle.
+    """
+    owners, accounted = _accounted_speech(cues, words)
+    checks = []
+    for start, end in windows:
+        confident = [
+            i
+            for i, word in enumerate(owners)
+            if start <= word.start < end and word.probability >= SECTION_CONFIDENT_WORD
+        ]
+        found = sum(i in accounted for i in confident)
+        checks.append(
+            {
+                "start_seconds": start,
+                "end_seconds": end,
+                "confident_words": len(confident),
+                "accounted_share": found / len(confident) if confident else 0.0,
+                "bad": len(confident) >= SECTION_SAMPLE_WORDS and found / len(confident) < SECTION_BAD_SHARE,
+            }
+        )
+    return checks
 
 
 def with_section(verdict: dict, section: dict) -> dict:

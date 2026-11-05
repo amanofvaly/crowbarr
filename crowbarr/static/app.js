@@ -909,7 +909,7 @@ function settingsPage() {
       `English only. Multilingual small verifies the audio language on the CPU and downloads on first use if needed. Changing the model, device or precision re-checks ${recheckCount}.`,
       check(
         "high_accuracy",
-        `<span class="check-title">High Accuracy ${tip("Turns off the voice filter during full audits, so speech it would cut, such as dialogue over music, is heard too. Fewer good subtitles go to review, and a subtitle with a long missing or wrong section is replaced. Full audits take about twice as long and keep the GPU busy for longer. Retimed subtitles wait for your review. Turning this on re-checks your library.")}</span>`,
+        `<span class="check-title">High Accuracy ${tip("Turns off the voice filter during full audits, so speech it would cut, such as dialogue over music, is heard too. Fewer good subtitles go to review, and a subtitle with a long missing or wrong section is replaced. It samples more of each film, and full audits take about twice as long, so the GPU stays busy for longer. Retimed subtitles wait for your review. Turning this on re-checks your library.")}</span>`,
         "Slower full audits, and fewer good subtitles sent to review.",
       ) +
         modelChooser(settings.model, downloaded, fetching) +
