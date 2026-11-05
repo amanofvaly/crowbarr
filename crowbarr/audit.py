@@ -5,6 +5,8 @@ Unmatched dialogue is uncertainty, never evidence that the subtitle is synchroni
 """
 
 import math
+from collections import Counter
+from difflib import SequenceMatcher
 from statistics import median
 
 from .subtitles import Cue, Word, match_passages, tokens, validate_cues
@@ -55,6 +57,18 @@ SETTLED_OFFSET = ALIGNED_START_MEDIAN
 SETTLED_DRIFT = 1.5
 SETTLED_RESIDUAL_MEDIAN = 0.75
 SETTLED_OUTLIER_RATIO = 0.15
+# The text check above measures the subtitle against the audio, so a subtitle missing
+# a quarter of a film can still clear it. These measure the audio against the subtitle:
+# of what was clearly heard, how much does the subtitle account for, and for how long
+# does it account for almost none of it.
+SECTION_CONFIDENT_WORD = 0.8
+SECTION_MATCH_WORDS = 3
+SECTION_BUCKET_SECONDS = 300
+SECTION_BUCKET_WORDS = 30
+SECTION_BAD_SHARE = 0.35
+SECTION_ACCOUNTED_SHARE = 0.5
+SECTION_RUN_MINUTES = 15.0
+SECTION_RUN_SHARE = 0.15
 
 
 def blocking_structural_issues(issues: list[str], cue_count: int) -> list[str]:
@@ -126,6 +140,93 @@ def _fit_start(evidence: list[dict]) -> dict:
         # A handful of mismatched anchors is normal; a substantial minority is a fault.
         "residual_outlier_ratio": sum(value > 1.5 for value in residuals) / len(residuals),
     }
+
+
+def section_coverage(cues: list[Cue], words: list[Word], duration: float) -> dict:
+    """Find long stretches of clear speech that the subtitle has no lines for.
+
+    Judged by runs of five-minute buckets, so one bad scene cannot veto a film. Words
+    the recognizer was unsure of are not evidence, and a recording with too little clear
+    speech cannot be judged at all, which is reported as such and never flagged.
+    """
+    written = [token for cue in cues for token in tokens(cue.text)]
+    heard, owners = [], []
+    for word in words:
+        for token in tokens(word.text):
+            heard.append(token)
+            owners.append(word)
+    size = SECTION_MATCH_WORDS
+    written_counts = Counter(tuple(written[i : i + size]) for i in range(len(written) - size + 1))
+    heard_counts = Counter(tuple(heard[i : i + size]) for i in range(len(heard) - size + 1))
+    accounted = set()
+    for block in SequenceMatcher(None, written, heard, autojunk=False).get_matching_blocks():
+        if block.size >= size and any(
+            written_counts[gram] == 1 and heard_counts[gram] == 1
+            for gram in (tuple(written[i : i + size]) for i in range(block.a, block.a + block.size - size + 1))
+        ):
+            accounted.update(range(block.b, block.b + block.size))
+    confident = [i for i, word in enumerate(owners) if word.probability >= SECTION_CONFIDENT_WORD]
+    share = sum(i in accounted for i in confident) / len(confident) if confident else 0.0
+    buckets: dict[int, list[int]] = {}
+    for i in confident:
+        tally = buckets.setdefault(int(owners[i].start // SECTION_BUCKET_SECONDS), [0, 0])
+        tally[0] += i in accounted
+        tally[1] += 1
+    bad = sorted(
+        index
+        for index, (found, total) in buckets.items()
+        if total >= SECTION_BUCKET_WORDS and found / total < SECTION_BAD_SHARE
+    )
+    runs: list[list[int]] = []
+    for index in bad:
+        if runs and runs[-1][-1] == index - 1:
+            runs[-1].append(index)
+        else:
+            runs.append([index])
+    longest = max((len(run) for run in runs), default=0) * SECTION_BUCKET_SECONDS / 60
+    limit = min(SECTION_RUN_MINUTES, SECTION_RUN_SHARE * duration / 60)
+    measured = len(confident) >= SECTION_BUCKET_WORDS
+    checks = [
+        {
+            "name": "Clearly heard speech found in the subtitle",
+            "measured": f"{share:.1%}",
+            "limit": f"at least {SECTION_ACCOUNTED_SHARE:.0%}",
+            "passed": not measured or share >= SECTION_ACCOUNTED_SHARE,
+        },
+        {
+            "name": "Longest run with the subtitle missing",
+            "measured": f"{longest:g} min",
+            "limit": f"under {limit:g} min",
+            "passed": not measured or longest < limit,
+        },
+    ]
+    return {
+        "measured": measured,
+        "flagged": measured and not all(check["passed"] for check in checks),
+        "accounted_share": share,
+        "longest_bad_minutes": longest,
+        "limit_minutes": limit,
+        "bad_sections": [
+            {
+                "start_seconds": run[0] * SECTION_BUCKET_SECONDS,
+                "end_seconds": (run[-1] + 1) * SECTION_BUCKET_SECONDS,
+            }
+            for run in runs
+        ],
+        "section_checks": checks,
+    }
+
+
+def with_section(verdict: dict, section: dict) -> dict:
+    """Add the bad-section finding to an audit. It never overrules a stronger finding."""
+    result = {**verdict, "section": section, "section_checks": section["section_checks"]}
+    if section["flagged"] and verdict["decision"] not in ("mismatched", "different_cut"):
+        result["decision"] = "damaged"
+        result["reason"] = (
+            f"The subtitle has no lines for {section['longest_bad_minutes']:g} minutes of clear speech, "
+            f"and it accounts for {section['accounted_share']:.0%} of the speech heard overall"
+        )
+    return result
 
 
 def audit(cues: list[Cue], words: list[Word], duration: float) -> dict:

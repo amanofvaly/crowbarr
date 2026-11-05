@@ -2059,3 +2059,42 @@ a.stat:hover {
   font-size: 12px;
   white-space: pre-wrap;
 }
+
+.check-field .check-title {
+  display: block;
+}
+.check-field .tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  width: 1.25em;
+  height: 1.25em;
+  margin-left: 0.25em;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 0.8em;
+  font-weight: 600;
+  cursor: help;
+  vertical-align: middle;
+}
+.check-field .tip:hover::after,
+.check-field .tip:focus::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(360px, 70vw);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  box-shadow: var(--shadow);
+}

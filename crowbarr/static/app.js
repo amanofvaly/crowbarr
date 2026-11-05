@@ -605,6 +605,8 @@ const numeric = (name, label, min, max, help = "", step = 1) =>
   );
 const check = (name, label, help = "", disabled = false) =>
   `<label class="check-field wide"><input name="${name}" type="checkbox" ${settings[name] ? "checked" : ""} ${disabled ? "disabled" : ""}><span>${label}<small>${help}</small></span></label>`;
+// A hint people can reach by hovering, tabbing, or tapping.
+const tip = (text) => `<span class="tip" tabindex="0" role="note" aria-label="${esc(text)}" data-tip="${esc(text)}">?</span>`;
 const select = (name, label, options, help = "") =>
   `<label>${label}<select name="${name}" aria-describedby="${name}-hint">${options
     .map((value) => {
@@ -815,7 +817,7 @@ function refinementDownloads(software, alignment, available) {
   if (needSoftware) {
     const failed = software.status === "failed";
     rows.push([
-      "1. Software (PyTorch and WhisperX)",
+      "1. PyTorch and WhisperX",
       "About 240 MB",
       software.status === "running"
         ? button("Installing", "", "muted", "disabled")
@@ -828,7 +830,7 @@ function refinementDownloads(software, alignment, available) {
     needSoftware ? "2. Alignment model" : "Alignment model",
     size,
     needSoftware
-      ? button("After software", "", "muted", "disabled")
+      ? button("After step 1", "", "muted", "disabled")
       : ready
         ? button("Ready", "", "primary", "disabled")
         : alignment?.status === "running"
@@ -838,7 +840,7 @@ function refinementDownloads(software, alignment, available) {
   const note = software?.status === "failed" && needSoftware
     ? software.reason
     : needSoftware
-      ? "The software goes into Crowbarr's data folder and needs about 900 MB of disk space."
+      ? "PyTorch and WhisperX go into Crowbarr's data folder and need about 900 MB of disk space."
       : "";
   return assetTable("Downloads for refinement", rows, note);
 }
@@ -905,7 +907,12 @@ function settingsPage() {
     content = settingPanel(
       "Speech processing",
       `English only. Multilingual small verifies the audio language on the CPU and downloads on first use if needed. Changing the model, device or precision re-checks ${recheckCount}.`,
-      modelChooser(settings.model, downloaded, fetching) +
+      check(
+        "high_accuracy",
+        `<span class="check-title">High Accuracy ${tip("Turns off the voice filter during full audits, so speech it would cut, such as dialogue over music, is heard too. Fewer good subtitles go to review, and a subtitle with a long missing or wrong section is replaced. Full audits take about twice as long and keep the GPU busy for longer. Retimed subtitles wait for your review. Turning this on re-checks your library.")}</span>`,
+        "Slower full audits, and fewer good subtitles sent to review.",
+      ) +
+        modelChooser(settings.model, downloaded, fetching) +
         select("device", "Processing device", [
           ["cpu", cpuAvailable ? "CPU" : "CPU (unavailable)", !cpuAvailable],
           ["cuda", cudaAvailable ? "NVIDIA GPU · CUDA" : "NVIDIA GPU · CUDA (unavailable)", !cudaAvailable],
@@ -1460,7 +1467,9 @@ async function detail(id) {
               ? "Wrong content — this subtitle is not this recording"
               : before.decision === "different_cut"
                 ? "Different cut — written for a shorter version of this episode"
-                : "Inconclusive — review needed",
+                : before.decision === "damaged"
+                  ? "Damaged: a long section of speech has no subtitle lines"
+                  : "Inconclusive — review needed",
       ],
       ["Evidence", before.reason],
       ["Supported cues", `${before.supported_cues} / ${before.total_cues}`],
@@ -1523,6 +1532,10 @@ async function detail(id) {
           return `<section class="audit-explanation warning"><h3>Why the repair was withheld</h3><p>The subtitle was flagged because ${flagged}. ${anchors} Crowbarr built a corrected version and measured it against those same anchors, then discarded it${verdict ? ` because ${esc(verdict.reason)}` : " because it did not improve the timing enough to justify replacing the original"}. Your original subtitle is untouched.</p>${original}${verdict ? measureTable(verdict.checks, "The repair Crowbarr built and rejected") : ""}</section>`;
         if (result.decision === "repair")
           return `<section class="audit-explanation"><h3>Why Crowbarr repaired the timing</h3><p>${esc(result.reason)}. ${anchors} The authored text is preserved while its cue timing is adjusted.</p>${original}${verdict ? measureTable(verdict.checks, "The repair Crowbarr accepted") : ""}</section>`;
+        if (result.decision === "damaged") {
+          const replaced = report.replaced_source;
+          return `<section class="audit-explanation warning"><h3>${replaced ? "Why the subtitle was replaced" : "Why this subtitle cannot be repaired"}</h3><p>${esc(result.reason)}. A repair can move lines but cannot add lines that are missing. ${replaced ? `Crowbarr generated a fresh subtitle and published it alongside <code>${esc(String(replaced).split("/").pop())}</code>, which is untouched on disk.` : "Automatic replacement is switched off, so nothing was changed."}</p>${measureTable(result.section_checks, "What showed the section is missing")}</section>`;
+        }
         if (result.decision === "different_cut") {
           const replaced = report.replaced_source;
           const name = replaced ? esc(String(replaced).split("/").pop()) : "";
@@ -1879,6 +1892,11 @@ $("login-form").addEventListener("submit", async (event) => {
   }
 });
 document.addEventListener("click", (event) => {
+  // A hint sits inside a checkbox label, and reading it must not change the setting.
+  if (event.target.closest(".tip")) {
+    event.preventDefault();
+    return;
+  }
   const target = event.target.closest("[data-action]");
   if (target) perform(target);
 });

@@ -105,7 +105,9 @@ def verify_audio_language(audio: Path, settings: Settings, cache: Path) -> dict:
         gc.collect()
 
 
-def transcribe(audio: Path, settings: Settings, cache: Path) -> tuple[list[Word], list[str]]:
+def transcribe(
+    audio: Path, settings: Settings, cache: Path, speech_filter: bool = True
+) -> tuple[list[Word], list[str]]:
     from faster_whisper import WhisperModel
 
     global _resident, _resident_key, _resident_runtime
@@ -150,7 +152,11 @@ def transcribe(audio: Path, settings: Settings, cache: Path) -> tuple[list[Word]
     _resident, _resident_key = model, model_key
     # Automatic language detection is a guard against wrong/untagged audio; never translate for alignment.
     segments, info = model.transcribe(
-        str(audio), word_timestamps=True, vad_filter=True, condition_on_previous_text=False, beam_size=5
+        str(audio),
+        word_timestamps=True,
+        vad_filter=speech_filter,
+        condition_on_previous_text=False,
+        beam_size=5,
     )
     # This, not the container tag, is what establishes the spoken language. Report the
     # measurement: "not English" is a conclusion, and the user cannot check a conclusion.
@@ -335,7 +341,9 @@ def transcribe_windows(audio: Path, windows: list[tuple[float, float]], settings
     return result, issues
 
 
-def transcribe_bounded(audio: Path, settings: Settings, cache: Path, checkpoint: Path):
+def transcribe_bounded(
+    audio: Path, settings: Settings, cache: Path, checkpoint: Path, speech_filter: bool = True
+):
     """Bound decoder/VAD allocations and resume completed chunks after a restart."""
     import json
     import tempfile
@@ -392,7 +400,11 @@ def transcribe_bounded(audio: Path, settings: Settings, cache: Path, checkpoint:
                 )
                 try:
                     try:
-                        chunk, warnings = transcribe(clip, settings, cache)
+                        chunk, warnings = (
+                            transcribe(clip, settings, cache)
+                            if speech_filter
+                            else transcribe(clip, settings, cache, speech_filter=False)
+                        )
                     except ReviewRequired as error:
                         chunk, warnings = [], [str(error)]
                 finally:

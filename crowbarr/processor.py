@@ -7,7 +7,7 @@ import textwrap
 from bisect import bisect_left
 from pathlib import Path
 
-from .audit import audit, blocking_structural_issues
+from .audit import audit, blocking_structural_issues, section_coverage, with_section
 from .config import Settings, atomic_write
 from .db import Database
 from .library import allowed, signature, source_subtitle, subtitle_sources
@@ -228,7 +228,7 @@ def _sample_windows(cues: list[Cue], duration: float) -> list[tuple[float, float
 
 # Verdicts that leave nothing for a repair to correct, and that the full transcript
 # already in hand can answer by writing a subtitle of its own.
-UNUSABLE = ("mismatched", "different_cut")
+UNUSABLE = ("mismatched", "different_cut", "damaged")
 
 
 def _needs_full_audio(candidates) -> bool:
@@ -281,6 +281,7 @@ def _recognized_words(
     model_cache: Path,
     transcriber,
     windows=None,
+    speech_filter: bool = True,
 ) -> tuple[list[Word], list[str], bool]:
     stat = media.stat()
     transcript_key = hashlib.sha256(
@@ -296,6 +297,8 @@ def _recognized_words(
                 "compute_type": settings.compute_type,
                 "allow_untagged_audio": settings.allow_untagged_audio,
                 "windows": windows,
+                # Absent when on, so transcripts cached before this option stay valid.
+                **({} if speech_filter else {"speech_filter": False}),
             },
             sort_keys=True,
         ).encode()
@@ -322,7 +325,7 @@ def _recognized_words(
 
         if transcriber is transcribe:
             words, issues = transcribe_bounded(
-                audio, settings, model_cache, transcript_path.with_suffix(".parts")
+                audio, settings, model_cache, transcript_path.with_suffix(".parts"), speech_filter=speech_filter
             )
         else:
             words, issues = transcriber(audio, settings, model_cache)
@@ -528,7 +531,8 @@ def process(
         db.update(job["id"], stage=recognition_stage[0])
         if cache_transcript:
             words, transcription_issues, transcript_cache_hit = _recognized_words(
-                media, audio, settings, directory, cache, transcriber, windows=windows
+                media, audio, settings, directory, cache, transcriber, windows=windows,
+                speech_filter=not (settings.high_accuracy and candidates and not windows),
             )
             # Say so plainly: a reused transcript finishes in seconds, and that speed
             # must not be mistaken for what a file takes the first time.
@@ -575,7 +579,8 @@ def process(
             recognition_stage[0] = "Sample cannot settle a change; auditing against full dialogue"
             db.update(job["id"], stage=recognition_stage[0])
             words, transcription_issues, transcript_cache_hit = _recognized_words(
-                media, audio, settings, directory, cache, transcriber
+                media, audio, settings, directory, cache, transcriber,
+                speech_filter=not settings.high_accuracy,
             )
             warnings.extend(transcription_issues)
             windows = []
@@ -625,6 +630,9 @@ def process(
         if original:
             db.update(job["id"], stage="Auditing existing subtitle")
             before = selected["audit"]
+            if settings.high_accuracy and not windows:
+                before = with_section(before, section_coverage(selected["cues"], timeline_words, duration))
+                selected["audit"] = before
             report["audit"] = {"before": before, "after": None, "improved": False}
             # An authored replacement is the first recovery option, including for a
             # proven mismatch. A successful HTTP request is not a usable subtitle.
@@ -665,6 +673,14 @@ def process(
                     )
                 report["replaced_source"] = selected["label"]
                 db.update(job["id"], stage="Generating a fresh subtitle for mismatched content")
+                if settings.high_accuracy:
+                    # Only the audit is proven with the filter off. A subtitle people read
+                    # is still written from the filtered transcript.
+                    db.update(job["id"], stage="Recognizing speech for a fresh subtitle")
+                    if cache_transcript:
+                        words, *_ = _recognized_words(media, audio, settings, directory, cache, transcriber)
+                    else:
+                        words, _ = transcriber(audio, settings, cache)
                 original, selected = [], None
                 passages, rewritten = match_passages(original, words, settings.min_match_ratio)
                 report.update(rewritten, mode="generated")
@@ -849,6 +865,8 @@ def process(
                 )
             if not verdict["accepted"]:
                 issues.append(f"Retimed subtitle withheld because {verdict['reason']}")
+            if settings.high_accuracy:
+                issues.append("High Accuracy keeps retimed subtitles held for review")
         report.update(
             {
                 "mode": "authored_timing" if original else "generated",

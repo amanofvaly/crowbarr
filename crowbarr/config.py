@@ -113,6 +113,7 @@ FINGERPRINT_FIELDS = (
     "min_alignment_score",
     "max_generated_ratio",
     "sampled_audit",
+    "high_accuracy",
 )
 
 
@@ -143,6 +144,7 @@ class Settings(BaseModel):
     cpu_fallback: bool = True
     refine_generated: bool = False
     sampled_audit: bool = True
+    high_accuracy: bool = False
     bazarr_download_alternatives: bool = False
     # A proven mismatch is the one refusal Crowbarr can answer by itself, because the
     # transcript that proved it is the transcript a fresh subtitle is built from. Left
@@ -239,7 +241,10 @@ class Settings(BaseModel):
 
         return hashlib.sha256(
             json.dumps(
-                {k: getattr(self, k) for k in FINGERPRINT_FIELDS}, sort_keys=True
+                # Off hashes as it did before this setting existed, so upgrading does not
+                # re-check a library that never asked for it.
+                {k: getattr(self, k) for k in FINGERPRINT_FIELDS if k != "high_accuracy" or self.high_accuracy},
+                sort_keys=True,
             ).encode()
         ).hexdigest()
 
