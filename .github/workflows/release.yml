@@ -141,7 +141,9 @@ jobs:
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
   image:
-    if: needs.release-version.outputs.publish == 'true'
+    # `tests` is skipped when the Tests workflow already passed. A plain condition would
+    # inherit that skip from this job's ancestors, so every job here checks results itself.
+    if: ${{ !cancelled() && needs.release-version.result == 'success' && needs.release-version.outputs.publish == 'true' }}
     needs: release-version
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -213,7 +215,7 @@ jobs:
 
   native-linux:
     name: Build Linux x86_64 package
-    if: needs.release-version.outputs.publish == 'true'
+    if: ${{ !cancelled() && needs.release-version.result == 'success' && needs.release-version.outputs.publish == 'true' }}
     needs: release-version
     runs-on: ubuntu-22.04
     permissions:
@@ -281,7 +283,11 @@ jobs:
 
   publish:
     name: Publish verified assets
-    if: needs.release-version.outputs.publish == 'true' && github.ref == 'refs/heads/main' && inputs.verify_only != true
+    if: >-
+      ${{ !cancelled() && needs.release-version.result == 'success'
+      && needs.image.result == 'success' && needs.native-linux.result == 'success'
+      && needs.release-version.outputs.publish == 'true'
+      && github.ref == 'refs/heads/main' && inputs.verify_only != true }}
     needs: [release-version, image, native-linux]
     runs-on: ubuntu-latest
     permissions:
