@@ -1,4 +1,4 @@
-"""High Accuracy: off changes nothing, on hears everything and replaces damaged subtitles."""
+"""The bad-section check for everyone, and High Accuracy turning the voice filter off."""
 
 import json
 import shutil
@@ -126,15 +126,30 @@ def test_section_verdict_does_not_overrule_a_stronger_finding():
     assert with_section({"decision": "pass", "reason": "x"}, damaged)["decision"] == "damaged"
 
 
-def test_with_it_off_a_damaged_subtitle_gets_todays_verdict(feature, tmp_path):
+def test_with_it_off_a_damaged_subtitle_is_replaced_from_one_hearing(feature, tmp_path):
     words = damaged_subtitle(feature)
+    original = feature.with_suffix(".en.srt").read_text()
     transcriber, calls = hearing(words)
     settings, db, job = queued(feature, tmp_path)
     result = process(job, settings, db.path.parent, db, transcriber, alignment_stub)
-    before = json.loads(result["report"])["audit"]["before"]
-    assert before["decision"] != "damaged"
-    assert "section_checks" not in before
+    report = json.loads(result["report"])
+    assert report["audit"]["before"]["decision"] == "damaged"
+    assert report["audit"]["before"]["section_checks"]
+    assert result["state"] == "completed"
+    assert report["mode"] == "generated"
+    assert feature.with_suffix(".en.srt").read_text() == original
     assert len(calls) == 1
+
+
+def test_with_it_off_a_retimed_subtitle_is_still_published(feature, tmp_path):
+    cues, words = film(MINUTES)
+    late = [Cue(c.start + 5, c.end + 5, c.text) for c in cues]
+    feature.with_suffix(".en.srt").write_text(render_srt(late))
+    transcriber, _ = hearing(words)
+    settings, db, job = queued(feature, tmp_path)
+    result = process(job, settings, db.path.parent, db, transcriber, alignment_stub)
+    assert result["state"] != "review"
+    assert not any("held for review" in issue for issue in json.loads(result["report"])["issues"])
 
 
 def test_with_it_on_a_damaged_subtitle_is_replaced_not_sent_to_review(feature, tmp_path):
@@ -258,10 +273,24 @@ def test_with_it_on_a_complete_subtitle_is_settled_by_samples(feature, tmp_path,
     assert result["state"] == "unchanged"
 
 
-def test_with_it_off_sampling_is_todays_three_windows(feature, tmp_path, monkeypatch):
+def test_with_it_off_samples_find_a_hole_and_keep_the_voice_filter(feature, tmp_path, monkeypatch):
     words = damaged_subtitle(feature)
     sampled, whole = sampled_hearing(monkeypatch, words)
     settings, db, job = queued(feature, tmp_path)
     result = process(job, settings, db.path.parent, db, aligner=alignment_stub)
-    assert len(sampled[0]) <= 3
-    assert "sample_speech" not in json.loads(result["report"])["audit"]["before"]
+    report = json.loads(result["report"])
+    assert len(sampled[0]) > 3
+    assert whole == [True]
+    assert report["full_audit_escalation"] is True
+    assert report["audit"]["before"]["decision"] == "damaged"
+    assert result["state"] == "completed"
+
+
+def test_with_it_off_a_complete_subtitle_is_settled_by_samples(feature, tmp_path, monkeypatch):
+    cues, words = film(MINUTES)
+    feature.with_suffix(".en.srt").write_text(render_srt(cues))
+    sampled, whole = sampled_hearing(monkeypatch, words)
+    settings, db, job = queued(feature, tmp_path)
+    result = process(job, settings, db.path.parent, db, aligner=alignment_stub)
+    assert sampled and whole == []
+    assert result["state"] == "unchanged"

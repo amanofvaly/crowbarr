@@ -213,27 +213,6 @@ def _stabilize_authored(cues: list[Cue], minimum: float = 0.04) -> tuple[list[Cu
     return result, adjusted
 
 
-def _sample_windows(cues: list[Cue], duration: float) -> list[tuple[float, float]]:
-    from .subtitles import tokens
-
-    windows = []
-    for fraction in (0.12, 0.5, 0.85):
-        dialogue = [
-            cue
-            for cue in cues
-            if len(tokens(cue.text)) >= 4 and abs(cue.start - duration * fraction) < duration / 6
-        ]
-        if not dialogue:
-            continue
-        center = min(dialogue, key=lambda cue: abs(cue.start - duration * fraction)).start
-        start, end = max(0, center - 60), min(duration, center + 60)
-        if windows and start <= windows[-1][1]:
-            windows[-1] = (windows[-1][0], end)
-        else:
-            windows.append((start, end))
-    return windows
-
-
 SPACED_SAMPLE_SECONDS = 120
 
 
@@ -273,7 +252,7 @@ UNUSABLE = ("mismatched", "different_cut", "damaged")
 def _needs_full_audio(candidates) -> bool:
     """Whether a sampled verdict is enough to act on, or only enough to stand down.
 
-    Three two-minute windows see about a quarter of an episode. A sample that says the
+    Two-minute samples leave most of a recording unheard. A sample that says the
     subtitle is already correct settles the job, because the answer is to write nothing
     and the rest of the runtime cannot make "leave it alone" harmful. Every other answer
     ends in a file being rewritten, and the cues outside the windows were never matched
@@ -297,7 +276,7 @@ def _audit_source(cues, words, duration, windows, indices=None):
     ]
     result = audit([cue for _, cue in selected], words, duration)
     if result["decision"] in UNUSABLE:
-        # Three windows can land on music, a silent stretch, or the one scene the
+        # Samples can land on music, a silent stretch, or the one scene the
         # sampler chose badly, and they cannot show a staircase that only appears across
         # the whole runtime. Declaring either verdict from a sample is not a finding, it
         # is a guess -- so hand it back as inconclusive and let the escalation to the
@@ -552,13 +531,11 @@ def process(
                 raise ReviewRequired(
                     "Bazarr has authored alternatives. Enable provider upgrades or choose one in Bazarr before generation."
                 )
-        windows = []
-        if candidates and settings.sampled_audit and cache_transcript and duration > 600:
-            windows = (
-                _spaced_windows(duration)
-                if settings.high_accuracy
-                else _sample_windows(max(candidates, key=lambda c: len(c["cues"]))["cues"], duration)
-            )
+        windows = (
+            _spaced_windows(duration)
+            if candidates and settings.sampled_audit and cache_transcript and duration > 600
+            else []
+        )
         initial_sampling_windows = list(windows)
         full_audit_escalation = False
         if windows:
@@ -587,7 +564,7 @@ def process(
         arbitration = []
         for candidate in candidates:
             candidate_audit = _audit_source(candidate["cues"], timeline_words, duration, windows)
-            if windows and settings.high_accuracy:
+            if windows:
                 candidate_audit["sample_speech"] = sample_missing_speech(candidate["cues"], timeline_words, windows)
             candidate["audit"] = candidate_audit
             arbitration.append(
@@ -617,9 +594,7 @@ def process(
                 candidate_audit["dialogue_coverage"],
             )
 
-        if windows and (
-            _needs_full_audio(candidates) or (settings.high_accuracy and _samples_found_a_hole(candidates))
-        ):
+        if windows and (_needs_full_audio(candidates) or _samples_found_a_hole(candidates)):
             full_audit_escalation = True
             recognition_stage[0] = "Sample cannot settle a change; auditing against full dialogue"
             db.update(job["id"], stage=recognition_stage[0])
@@ -675,7 +650,7 @@ def process(
         if original:
             db.update(job["id"], stage="Auditing existing subtitle")
             before = selected["audit"]
-            if settings.high_accuracy and not windows:
+            if not windows:
                 before = with_section(before, section_coverage(selected["cues"], timeline_words, duration))
                 selected["audit"] = before
             report["audit"] = {"before": before, "after": None, "improved": False}

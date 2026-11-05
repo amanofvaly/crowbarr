@@ -13,6 +13,13 @@ results a person deliberately set aside.
 Read this section before upgrading: a bump means recognition work, and it can publish
 subtitles that the previous policy declined to.
 
+### 0.3.9
+
+- A subtitle with a long stretch of clear speech and no lines for it now gets the `damaged` verdict and is replaced, from Bazarr first and then by generation. The original file stays in place.
+- Sampling now listens to evenly spaced two-minute samples, about 8 to 18 per film. Any sample with clear speech and no subtitle lines sends the file to a full audit.
+- Recordings under about 27 minutes are always audited in full.
+- Reopens `review` and `failed` jobs.
+
 ### 0.3.8
 
 - Spoken-language checks listen to more of the file when fewer than two samples are confident, so quiet stretches no longer send English films to review. Reopens `review` and `failed` jobs.
@@ -88,6 +95,11 @@ release with split versioning requeues nothing.
 
 `APPLICATION_VERSION`. Identifies a published release. Changing it alone never
 re-audits anything.
+
+### 0.4.16
+
+- Adds High Accuracy at the top of Speech processing. It turns the voice filter off during full audits, which take about twice as long, and holds retimed subtitles for review. Off by default. Turning it on offers to re-check the library.
+- The refinement download now reads "PyTorch and WhisperX".
 
 ### 0.4.14
 
