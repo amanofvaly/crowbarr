@@ -491,7 +491,7 @@ class Database:
             return bool(
                 db.execute(
                     "SELECT 1 FROM managed_media m JOIN provider_sync s ON m.provider=s.provider "
-                    f"WHERE m.path=? AND m.provider IN ({marks}) "
+                    f"WHERE m.path=? AND +m.provider IN ({marks}) "
                     + ("AND s.healthy=1 " if healthy else "")
                     + "LIMIT 1",
                     (media, *providers),
@@ -525,9 +525,12 @@ class Database:
         scope, parameters = "", [now]
         if providers:
             marks = ",".join("?" for _ in providers)
+            # The unary + keeps SQLite from probing managed_media by provider for every
+            # queued job (~150s on a 20k library while holding the write lock); the
+            # path index makes this correlated check a single lookup.
             scope = (
                 "AND EXISTS (SELECT 1 FROM managed_media m JOIN provider_sync s ON m.provider=s.provider "
-                f"WHERE m.path=jobs.media AND m.provider IN ({marks}) AND s.healthy=1 "
+                f"WHERE m.path=jobs.media AND +m.provider IN ({marks}) AND s.healthy=1 "
                 + ("AND s.generation=? " if generation is not None else "")
                 + ") "
             )
