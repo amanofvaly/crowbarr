@@ -520,7 +520,13 @@ class Database:
         providers: list[str] | None = None,
         generation: str | None = None,
         background_allowed: bool = True,
+        max_processing: int = 1,
     ) -> dict | None:
+        """Start the next job while fewer than `max_processing` are running.
+
+        The count and the update share one BEGIN IMMEDIATE transaction, so concurrent
+        workers can neither exceed the limit nor take the same job.
+        """
         now = time.time()
         scope, parameters = "", [now]
         if providers:
@@ -543,7 +549,11 @@ class Database:
             try:
                 with self.connect() as db:
                     db.execute("BEGIN IMMEDIATE")
-                    if db.execute("SELECT 1 FROM jobs WHERE state='processing'").fetchone():
+                    running = db.execute(
+                        "SELECT COUNT(*) FROM (SELECT 1 FROM jobs WHERE state='processing' LIMIT ?)",
+                        (max(1, max_processing),),
+                    ).fetchone()[0]
+                    if running >= max(1, max_processing):
                         return None
                     if time.monotonic() - self.policy_refreshed >= POLICY_REFRESH_SECONDS:
                         from .catalog import refresh_policy
@@ -817,29 +827,45 @@ class Database:
             db.execute("INSERT INTO resource_usage VALUES (?,?)", (started, seconds))
             db.execute("DELETE FROM resource_usage WHERE started + seconds < ?", (time.time() - 7200,))
 
-    def background_seconds(self) -> float:
-        now = time.time()
-        with self.connect() as db:
-            return db.execute(
-                "SELECT COALESCE(SUM(MAX(0, MIN(started+seconds, ?) - MAX(started, ?))),0) FROM resource_usage",
-                (now, now - 3600),
-            ).fetchone()[0]
+    def _usage_intervals(self, now: float) -> list[tuple[float, float]]:
+        """Background activity in the last hour, overlapping jobs merged into one span.
 
-    def background_budget(self, minutes: int) -> dict:
-        """Describe rolling-hour background use and when a reached limit clears."""
-        now = time.time()
+        The budget limits how long the machine is busy, not the sum of job durations:
+        two jobs running side by side for ten minutes are ten minutes of background
+        work. Summing them would let two workers exhaust a 60-minute cap in 30.
+        """
         with self.connect() as db:
-            intervals = [
+            rows = sorted(
                 (row["started"], row["started"] + row["seconds"])
                 for row in db.execute(
                     "SELECT started,seconds FROM resource_usage WHERE started+seconds>?",
                     (now - 3600,),
                 )
-            ]
+            )
+        merged: list[tuple[float, float]] = []
+        for start, end in rows:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    @staticmethod
+    def _used(intervals: list[tuple[float, float]], at: float) -> float:
+        window_start = at - 3600
+        return sum(max(0, min(end, at) - max(start, window_start)) for start, end in intervals)
+
+    def background_seconds(self) -> float:
+        now = time.time()
+        return self._used(self._usage_intervals(now), now)
+
+    def background_budget(self, minutes: int) -> dict:
+        """Describe rolling-hour background use and when a reached limit clears."""
+        now = time.time()
+        intervals = self._usage_intervals(now)
 
         def used(at: float) -> float:
-            window_start = at - 3600
-            return sum(max(0, min(end, at) - max(start, window_start)) for start, end in intervals)
+            return self._used(intervals, at)
 
         limit = minutes * 60
         consumed = used(now)

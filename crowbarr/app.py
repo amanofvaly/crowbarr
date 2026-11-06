@@ -425,6 +425,18 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             raise HTTPException(422, "; ".join(details)) from None
         if settings.device == "cpu" and settings.compute_type in {"float16", "int8_float16"}:
             raise HTTPException(422, "CPU processing requires int8 or float32 compute")
+        if settings.device == "cpu" and settings.max_concurrent_jobs > 1:
+            # Asking for parallel CPU jobs is refused. A value carried over from CUDA by a
+            # device switch, including a client echoing the whole saved form, is not the
+            # user's request, so it quietly returns to one.
+            carried = previous.device == "cuda" and payload.get(
+                "max_concurrent_jobs", previous.max_concurrent_jobs
+            ) == previous.max_concurrent_jobs
+            if not carried:
+                raise HTTPException(
+                    422, "Parallel jobs need CUDA processing; CPU processing runs one job at a time"
+                )
+            settings = settings.model_copy(update={"max_concurrent_jobs": 1})
         # Only turning CUDA on needs the hardware answer, so only that change waits for
         # the probe. Saving anything else must not import the inference stack.
         if settings.device == "cuda" and previous.device != "cuda":

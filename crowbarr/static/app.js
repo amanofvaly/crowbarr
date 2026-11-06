@@ -288,12 +288,20 @@ function jobButtons(job) {
   return `${button("Details", "details", "small", id)}${["queued", "waiting", "retry"].includes(job.state) ? button("Run next", "promote", "small", id) : ""}${["queued", "waiting", "retry", "processing"].includes(job.state) ? button(job.cancel_requested ? "Cancelling…" : "Cancel", "cancel", "small danger", `${id} ${job.cancel_requested ? "disabled" : ""}`) : ["failed", "review", "skipped", "unchanged", "completed"].includes(job.state) ? button("Retry", "retry", "small", id) : ""}`;
 }
 function activeJob() {
-  const job = status?.jobs.find((j) => j.state === "processing");
+  // With parallel jobs more than one file can be processing; each gets its own band.
+  const running = (status?.jobs || []).filter((j) => j.state === "processing");
+  const job = running[0];
   if (!job && status?.scan_in_progress)
     return `<div class="worker-band idle">${icon("refresh")}<div class="idle-body"><strong>Syncing libraries</strong><span>Crowbarr is checking which files need work. Queue totals can change until this finishes.</span></div></div>`;
   if (!job)
     return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Nothing running"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${status?.wait_reason === "Hourly background budget reached" ? budgetMarkup() : cooldownMarkup()}</div></div>`;
-  return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library scan")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
+  const bands = running
+    .map(
+      (j) =>
+        `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(j))}</div><span class="hint">${esc(origins[j.origin] || "Library scan")} · ${j.started ? duration(Date.now() / 1000 - j.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(j)}</div><div class="actions">${jobButtons(j)}</div></div>`,
+    )
+    .join("");
+  return running.length > 1 ? `<div class="worker-stack">${bands}</div>` : bands;
 }
 
 function rows(items, compact = false) {
@@ -720,6 +728,15 @@ function updatesPanel() {
   );
   return settingPanel("Updates", "Check for a newer version and install it without leaving Crowbarr.", parts.join(""));
 }
+// Parallel jobs fill the GPU while another job runs its CPU stages. On the CPU two
+// transcriptions would only compete for cores, so the field is pinned to one there.
+const PARALLEL_HELP_GPU =
+  "Files processed at once on the graphics card. Each job holds about 1 GB of GPU memory; a job starts only while free GPU memory stays above the Resources minimum.";
+const PARALLEL_HELP_CPU = "CPU processing runs one job at a time. Choose the NVIDIA GPU to process files in parallel.";
+const parallelJobsField = (cpu) =>
+  `<label id="parallel-field">Parallel jobs (GPU)<input name="max_concurrent_jobs" type="number" min="1" max="4" step="1" value="${
+    cpu ? 1 : esc(settings.max_concurrent_jobs ?? 1)
+  }" ${cpu ? "disabled" : ""} required><small id="parallel-help">${cpu ? PARALLEL_HELP_CPU : PARALLEL_HELP_GPU}</small></label>`;
 function settingPanel(name, description, fields) {
   return `<section class="panel"><div class="panel-header"><div><h2>${name}</h2><p>${description}</p></div></div><div class="field-grid">${fields}</div></section>`;
 }
@@ -950,7 +967,9 @@ function settingsPage() {
             settings.device === "cpu" && type.includes("float16"),
           ]),
           '<span id="precision-help" aria-live="polite">Lower precision uses less memory and runs faster, with a small loss of accuracy. The CPU supports INT8 and FP32 only.</span>',
-        ) + numeric(
+        ) +
+        parallelJobsField(settings.device === "cpu") +
+        numeric(
           "cpu_threads",
           "CPU threads",
           1,
@@ -1957,6 +1976,17 @@ document.addEventListener("change", async (event) => {
     if (cpu && precision.value.includes("float16")) {
       precision.value = "int8";
       $("precision-help").textContent = "Precision changed to INT8 because the CPU cannot use FP16. Save changes to apply.";
+    }
+    const parallel = form.elements.max_concurrent_jobs;
+    if (parallel) {
+      if (cpu) {
+        if (!parallel.disabled) parallel.dataset.gpuValue = parallel.value;
+        parallel.value = "1";
+      } else if (parallel.disabled) {
+        parallel.value = parallel.dataset.gpuValue || String(savedSettings?.max_concurrent_jobs || 1);
+      }
+      parallel.disabled = cpu;
+      $("parallel-help").textContent = cpu ? PARALLEL_HELP_CPU : PARALLEL_HELP_GPU;
     }
     captureSettings();
     refreshSaveActions();

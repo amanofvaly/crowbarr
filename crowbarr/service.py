@@ -22,10 +22,36 @@ from .resources import snapshot as resource_snapshot
 
 log = logging.getLogger("crowbarr")
 
+# One supervisor thread per possible slot (Settings.max_concurrent_jobs allows up to 4);
+# slots above the effective limit idle, so the limit can change without a restart.
+WORKER_SLOTS = 4
+# A job's GPU memory appears in nvidia-smi only once its model loads, after the CPU
+# stages. Until then admission reserves this much for it, so a reading taken between
+# a start and its model load cannot admit a job the card will not have room for.
+STARTING_JOB_VRAM_MB = 1200
+STARTING_JOB_SECONDS = 180
+
+
+def fallback_marker(directory: Path, job_id: int) -> Path:
+    """Flag file a job drops when recognition fell back to the CPU.
+
+    It carries the job's work prefix, so the job's own cleanup removes it.
+    """
+    return directory / "work" / f"{job_id}-cpu-fallback"
+
 
 def run_job(directory: str, job: dict, settings_data: dict) -> None:
     os.setsid()  # Include FFmpeg descendants when a job is stopped or times out.
+    from . import inference
     from .processor import process
+
+    marker = fallback_marker(Path(directory), job["id"])
+
+    def report_cpu_fallback() -> None:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+
+    inference.cpu_fallback_hook = report_cpu_fallback
 
     settings = Settings.model_validate(settings_data)
     if job.get("origin", "backlog") not in {"manual", "import"}:
@@ -96,11 +122,23 @@ class Service:
         self.scan_in_progress = False
         self.resources = {}
         self.wait_reason = ""
+        # Most recent background job end across all slots; each slot cools down on its own.
         self.last_background_end = 0
+        self.slot_background_end: dict[int, float] = {}
         self.last_resource_check = 0
         self.plex_busy = False
         self.plex_unreachable = False
-        self.child_pid = None
+        self.child_pids: set[int] = set()
+        # Admission (gates, claim, bookkeeping) runs under this lock so two slots never
+        # judge free memory from the same reading. Supervision runs outside it.
+        self.state_lock = threading.Lock()
+        self.resource_lock = threading.Lock()
+        # job id -> {"slot", "started" (monotonic), "cpu_fallback"}
+        self.running: dict[int, dict] = {}
+        # slot -> (reason, wait_until, wait_total) for idle slots that may claim
+        self.slot_waits: dict[int, tuple[str, float | None, float | None]] = {}
+        self.cuda_available: bool | None = None
+        self.cuda_checked = float("-inf")
 
     def start(self):
         self.lock_file = (self.store.directory / "service.lock").open("a")
@@ -120,9 +158,11 @@ class Service:
         if reopened:
             log.info("Policy changed; %s media will be re-evaluated", reopened)
         self.db.invalidate_sync()
+        # No job runs yet, so everything left in the work folder is from a previous run.
         shutil.rmtree(self.store.directory / "work", ignore_errors=True)
-        for target in (self.scanner, self.worker):
-            thread = threading.Thread(target=target, daemon=True)
+        targets = [(self.scanner, ())] + [(self.worker, (slot,)) for slot in range(WORKER_SLOTS)]
+        for target, args in targets:
+            thread = threading.Thread(target=target, args=args, daemon=True)
             thread.start()
             self.threads.append(thread)
 
@@ -133,8 +173,9 @@ class Service:
         for thread in self.threads:
             thread.join(timeout=max(0, deadline - time.monotonic()))
         if any(thread.is_alive() for thread in self.threads):
-            child_pid = self.child_pid
-            if child_pid is not None:
+            with self.state_lock:
+                children = list(self.child_pids)
+            for child_pid in children:
                 try:
                     os.killpg(child_pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -224,168 +265,299 @@ class Service:
             return "Cannot reach Plex; background work deferred"
         return "Plex is playing; background work deferred"
 
-    def worker(self):
+    # ----- parallel admission -------------------------------------------------------
+
+    def parallel_limit(self, settings: Settings) -> int:
+        """How many jobs may run now: the saved value only on a GPU that works."""
+        if settings.device != "cuda" or settings.max_concurrent_jobs <= 1:
+            return 1
+        # The probe spawns a process that loads the CUDA runtime, so a definite answer
+        # is kept for an hour; an unknown one ("checking") is asked again in a minute.
+        age = time.monotonic() - self.cuda_checked
+        if age > (3600 if isinstance(self.cuda_available, bool) else 60):
+            from .capabilities import runtime_capabilities
+
+            try:
+                self.cuda_available = runtime_capabilities(block=False).get("cuda", {}).get("available")
+            except Exception:
+                self.cuda_available = None
+            self.cuda_checked = time.monotonic()
+        return settings.parallel_jobs(self.cuda_available)
+
+    def refresh_resources(self, settings: Settings | None = None, max_age: float = 10) -> None:
+        """Re-read host telemetry (and Plex, when given settings) if older than max_age."""
+        if time.monotonic() - self.last_resource_check <= max_age:
+            return
+        with self.resource_lock:
+            if time.monotonic() - self.last_resource_check <= max_age:
+                return
+            self.resources = resource_snapshot()
+            if settings is not None:
+                try:
+                    self.plex_busy = bool(plex_activity(settings.plex)) if settings.plex.url else False
+                    self.plex_unreachable = False
+                except Exception:
+                    # Unknown is treated as busy, so a Plex outage never slows playback.
+                    self.plex_busy = settings.defer_during_plex
+                    self.plex_unreachable = True
+            self.last_resource_check = time.monotonic()
+
+    def _admission_resources(self) -> dict:
+        """Telemetry with memory set aside for running jobs whose model has not loaded."""
+        metrics = dict(self.resources)
+        free = metrics.get("vram_free_mb")
+        if free is not None:
+            now = time.monotonic()
+            starting = sum(
+                1
+                for info in self.running.values()
+                if not info["cpu_fallback"] and now - info["started"] < STARTING_JOB_SECONDS
+            )
+            metrics["vram_free_mb"] = free - starting * STARTING_JOB_VRAM_MB
+        metrics.setdefault("ram_available_mb", None)
+        metrics.setdefault("vram_free_mb", None)
+        return metrics
+
+    def _note_cpu_fallbacks(self) -> bool:
+        for job_id, info in self.running.items():
+            if not info["cpu_fallback"] and fallback_marker(self.store.directory, job_id).exists():
+                info["cpu_fallback"] = True
+                log.info("Job %s fell back to CPU recognition; no new job starts until it ends", job_id)
+        return any(info["cpu_fallback"] for info in self.running.values())
+
+    def _publish_wait(self, slot: int, wait: tuple[str, float | None, float | None] | None) -> None:
+        """Show the dashboard the wait of the first idle slot, or nothing when none waits."""
+        if wait is None:
+            self.slot_waits.pop(slot, None)
+        else:
+            self.slot_waits[slot] = wait
+        if self.slot_waits:
+            self.wait_reason, self.wait_until, self.wait_total = self.slot_waits[min(self.slot_waits)]
+        else:
+            self.wait_reason, self.wait_until, self.wait_total = "", None, None
+
+    def _admit(self, slot: int, settings: Settings, limit: int) -> dict | None:
+        """Apply every gate and claim a job for this slot. Call with state_lock held."""
+        if settings.paused:
+            self._publish_wait(slot, ("Paused by user", None, None))
+            return None
+        if self.running:
+            # Another job is running, so the card's free memory may have moved since the
+            # last periodic reading; judge the second job by a current one.
+            self.refresh_resources(max_age=3)
+        reason = gate(settings, self._admission_resources())
+        if not reason and self.running and self._note_cpu_fallbacks():
+            reason = "A job fell back to CPU processing; the next job waits for it to finish"
+        if reason:
+            self._publish_wait(slot, (reason, None, None))
+            return None
+        last_end = self.slot_background_end.get(slot, 0)
+        background_reason = (
+            self.plex_reason()
+            if settings.defer_during_plex and self.plex_busy
+            else "Quiet hours"
+            if quiet(settings)
+            else "CPU is busy"
+            if self.resources.get("cpu_load", 0) > settings.max_cpu_load
+            else "Hourly background budget reached"
+            if self.db.background_seconds() >= settings.background_budget_minutes * 60
+            else "Background cooldown"
+            if time.time() - last_end < settings.backlog_cooldown_seconds
+            else ""
+        )
+        # Only the cooldown has a knowable end; other gates clear when the machine does.
+        until = last_end + settings.backlog_cooldown_seconds if background_reason == "Background cooldown" else None
+        self._publish_wait(
+            slot, (background_reason, until, settings.backlog_cooldown_seconds if until else None)
+        )
+        job = self.db.claim(
+            settings.providers(),
+            settings.discovery_fingerprint(),
+            background_allowed=not background_reason,
+            max_processing=limit,
+        )
+        if job:
+            self.running[job["id"]] = {"slot": slot, "started": time.monotonic(), "cpu_fallback": False}
+            self._publish_wait(slot, None)
+            # Free memory changes once this job loads its model; force a fresh reading.
+            self.last_resource_check = 0
+        return job
+
+    # ----- supervision --------------------------------------------------------------
+
+    def _clean_job_work(self, job_id: int) -> None:
+        """Remove only this job's leftovers; another job may be using the work folder."""
+        work = self.store.directory / "work"
+        prefix = f"{job_id}-"
+        try:
+            entries = [entry for entry in work.iterdir() if entry.name.startswith(prefix)]
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def worker(self, slot: int = 0):
         context = multiprocessing.get_context("spawn")
         while not self.stop_event.wait(1):
             try:
                 settings = self.store.get()
-                if time.monotonic() - self.last_resource_check > 10:
-                    self.resources = resource_snapshot()
-                    self.last_resource_check = time.monotonic()
-                    try:
-                        self.plex_busy = bool(plex_activity(settings.plex)) if settings.plex.url else False
-                        self.plex_unreachable = False
-                    except Exception:
-                        # Unknown is treated as busy, so a Plex outage never slows playback.
-                        self.plex_busy = settings.defer_during_plex
-                        self.plex_unreachable = True
-                self.wait_reason = "Paused by user" if settings.paused else gate(settings, self.resources)
-                if self.wait_reason:
+                limit = self.parallel_limit(settings)
+                if slot >= limit:
+                    with self.state_lock:
+                        self._publish_wait(slot, None)
                     continue
-                background_reason = (
-                    self.plex_reason()
-                    if settings.defer_during_plex and self.plex_busy
-                    else "Quiet hours"
-                    if quiet(settings)
-                    else "CPU is busy"
-                    if self.resources.get("cpu_load", 0) > settings.max_cpu_load
-                    else "Hourly background budget reached"
-                    if self.db.background_seconds() >= settings.background_budget_minutes * 60
-                    else "Background cooldown"
-                    if time.time() - self.last_background_end < settings.backlog_cooldown_seconds
-                    else ""
-                )
-                self.wait_reason = background_reason
-                # Only the cooldown has a knowable end; other gates clear when the machine does.
-                self.wait_until = (
-                    self.last_background_end + settings.backlog_cooldown_seconds
-                    if background_reason == "Background cooldown"
-                    else None
-                )
-                self.wait_total = settings.backlog_cooldown_seconds if self.wait_until else None
-                job = self.db.claim(
-                    settings.providers(),
-                    settings.discovery_fingerprint(),
-                    background_allowed=not background_reason,
-                )
+                self.refresh_resources(settings)
+                with self.state_lock:
+                    job = self._admit(slot, settings, limit)
                 if not job:
                     continue
-                if self.stop_event.is_set():
-                    try:
-                        self.db.update(
-                            job["id"], expected_generation=job["generation"], state="retry", stage="",
-                            attempts=max(0, job["attempts"] - 1), ready=time.time(),
-                        )
-                    except Exception:
-                        pass
-                    break
-                child = context.Process(
-                    target=run_job, args=(str(self.store.directory), job, settings.model_dump())
-                )
                 try:
-                    child.start()
-                    self.child_pid = child.pid
-                except Exception:
-                    try:
-                        self.db.update(
-                            job["id"], expected_generation=job["generation"],
-                            state="failed", stage="", error="Could not start the inference process"
-                        )
-                    except Exception:
-                        pass
-                    continue
-                started = time.monotonic()
-                wall_started = time.time()
-                self.wait_reason = ""
-                interrupted = None
-                while child.is_alive():
-                    child.join(timeout=1)
-                    current = self.store.get()
-                    try:
-                        latest = self.db.get(job["id"])
-                    except sqlite3.OperationalError:
-                        latest = None
-                    if not latest or latest["generation"] != job["generation"]:
-                        interrupted = "Job request replaced"
-                    elif latest.get("cancel_requested"):
-                        interrupted = "Cancelled by user"
-                    elif self.stop_event.is_set():
-                        interrupted = "Service stopping"
-                    elif (
-                        current.fingerprint() != settings.fingerprint()
-                        or current.discovery_fingerprint() != settings.discovery_fingerprint()
-                    ):
-                        interrupted = "Processing settings changed"
-                    else:
+                    if self.stop_event.is_set():
                         try:
-                            eligible = self.db.eligible(job["media"], current.providers(), healthy=False)
-                        except sqlite3.OperationalError:
-                            eligible = True
-                        if not eligible:
-                            interrupted = "Media is no longer eligible in the arr library"
-                        elif time.monotonic() - started > settings.job_timeout_minutes * 60:
-                            interrupted = "Job exceeded its configured time limit"
-                    if not interrupted and time.monotonic() - self.last_resource_check > 10:
-                        self.resources = resource_snapshot()
-                        self.last_resource_check = time.monotonic()
-                    if interrupted:
-                        try:
-                            os.killpg(child.pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            child.terminate()
-                        child.join(timeout=10)
-                        # The leader may exit before an FFmpeg descendant does.
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            if child.is_alive():
-                                child.kill()
-                        child.join(timeout=5)
+                            self.db.update(
+                                job["id"], expected_generation=job["generation"], state="retry", stage="",
+                                attempts=max(0, job["attempts"] - 1), ready=time.time(),
+                            )
+                        except Exception:
+                            pass
                         break
-                try:
-                    latest = self.db.get(job["id"])
-                except sqlite3.OperationalError:
-                    latest = None
-                if latest and latest["generation"] == job["generation"] and latest["state"] == "processing":
-                    administrative = interrupted in {"Service stopping", "Processing settings changed"}
-                    attempts = max(0, job["attempts"] - 1) if administrative else job["attempts"]
-                    retry = attempts < settings.max_attempts
-                    try:
-                        self.db.update(
-                            job["id"],
-                            expected_generation=job["generation"],
-                            state="superseded"
-                            if interrupted == "Media is no longer eligible in the arr library"
-                            else "skipped" if latest.get("library_blocked")
-                            else "cancelled" if interrupted == "Cancelled by user"
-                            else ("retry" if retry else "failed"),
-                            stage="Library preference" if latest.get("library_blocked") else "",
-                            error=latest.get("library_blocked") or interrupted or "Inference process exited unexpectedly; check available memory",
-                            ready=time.time() + (0 if interrupted in {"Service stopping", "Processing settings changed"} else 120),
-                            origin=job.get("origin", "backlog") if interrupted in {"Service stopping", "Processing settings changed"} else "retry",
-                            priority=job.get("priority", 0) if interrupted in {"Service stopping", "Processing settings changed"} else 40,
-                            attempts=attempts,
-                            started=None,
-                            cached=None,
-                        )
-                    except Exception:
-                        log.exception("Failed to update job %s after completion", job["id"])
-                elif latest and latest["state"] == "completed":
-                    self.scan_event.set()
-                # A job discarded because its inputs moved on did no inference, so it must not
-                # spend the background budget or start a cooldown. Otherwise a library-wide
-                # re-sign leaves the worker idling between jobs that never ran.
-                did_work = not (latest and latest["state"] == "superseded")
-                if did_work and job.get("origin", "backlog") not in {"manual", "import"}:
-                    self.last_background_end = time.time()
-                    try:
-                        self.db.record_usage(wall_started, time.monotonic() - started)
-                    except Exception:
-                        pass
-                self.child_pid = None
-                child.close()
-                shutil.rmtree(self.store.directory / "work", ignore_errors=True)
+                    self.supervise(slot, job, settings, context)
+                finally:
+                    with self.state_lock:
+                        self.running.pop(job["id"], None)
+                    self._clean_job_work(job["id"])
             except sqlite3.OperationalError as error:
                 log.warning("Database is busy (%s); worker will retry", error)
             except Exception:
                 log.exception("Worker encountered unexpected error; will retry")
+        with self.state_lock:
+            self._publish_wait(slot, None)
+
+    def supervise(self, slot: int, job: dict, settings: Settings, context) -> None:
+        """Run one claimed job in a child process and settle its row when it ends."""
+        child = context.Process(
+            target=run_job, args=(str(self.store.directory), job, settings.model_dump())
+        )
+        try:
+            child.start()
+        except Exception:
+            try:
+                self.db.update(
+                    job["id"], expected_generation=job["generation"],
+                    state="failed", stage="", error="Could not start the inference process"
+                )
+            except Exception:
+                pass
+            return
+        with self.state_lock:
+            self.child_pids.add(child.pid)
+        started = time.monotonic()
+        wall_started = time.time()
+        interrupted = None
+        try:
+            while child.is_alive():
+                child.join(timeout=1)
+                current = self.store.get()
+                try:
+                    latest = self.db.get(job["id"])
+                except sqlite3.OperationalError:
+                    latest = None
+                if not latest or latest["generation"] != job["generation"]:
+                    interrupted = "Job request replaced"
+                elif latest.get("cancel_requested"):
+                    interrupted = "Cancelled by user"
+                elif self.stop_event.is_set():
+                    interrupted = "Service stopping"
+                elif (
+                    current.fingerprint() != settings.fingerprint()
+                    or current.discovery_fingerprint() != settings.discovery_fingerprint()
+                ):
+                    interrupted = "Processing settings changed"
+                else:
+                    try:
+                        eligible = self.db.eligible(job["media"], current.providers(), healthy=False)
+                    except sqlite3.OperationalError:
+                        eligible = True
+                    if not eligible:
+                        interrupted = "Media is no longer eligible in the arr library"
+                    elif time.monotonic() - started > settings.job_timeout_minutes * 60:
+                        interrupted = "Job exceeded its configured time limit"
+                if not interrupted:
+                    self.refresh_resources()
+                if interrupted:
+                    try:
+                        os.killpg(child.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        child.terminate()
+                    child.join(timeout=10)
+                    # The leader may exit before an FFmpeg descendant does.
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        if child.is_alive():
+                            child.kill()
+                    child.join(timeout=5)
+                    break
+            try:
+                latest = self.db.get(job["id"])
+            except sqlite3.OperationalError:
+                latest = None
+            if latest and latest["generation"] == job["generation"] and latest["state"] == "processing":
+                administrative = interrupted in {"Service stopping", "Processing settings changed"}
+                attempts = max(0, job["attempts"] - 1) if administrative else job["attempts"]
+                retry = attempts < settings.max_attempts
+                try:
+                    self.db.update(
+                        job["id"],
+                        expected_generation=job["generation"],
+                        state="superseded"
+                        if interrupted == "Media is no longer eligible in the arr library"
+                        else "skipped" if latest.get("library_blocked")
+                        else "cancelled" if interrupted == "Cancelled by user"
+                        else ("retry" if retry else "failed"),
+                        stage="Library preference" if latest.get("library_blocked") else "",
+                        error=latest.get("library_blocked") or interrupted or "Inference process exited unexpectedly; check available memory",
+                        ready=time.time() + (0 if administrative else 120),
+                        origin=job.get("origin", "backlog") if administrative else "retry",
+                        priority=job.get("priority", 0) if administrative else 40,
+                        attempts=attempts,
+                        started=None,
+                        cached=None,
+                    )
+                except Exception:
+                    log.exception("Failed to update job %s after completion", job["id"])
+            elif latest and latest["state"] == "completed":
+                self.scan_event.set()
+            # A job discarded because its inputs moved on did no inference, so it must not
+            # spend the background budget or start a cooldown. Otherwise a library-wide
+            # re-sign leaves the worker idling between jobs that never ran.
+            did_work = not (latest and latest["state"] == "superseded")
+            if did_work and job.get("origin", "backlog") not in {"manual", "import"}:
+                ended = time.time()
+                with self.state_lock:
+                    self.slot_background_end[slot] = ended
+                    self.last_background_end = max(self.last_background_end, ended)
+                try:
+                    self.db.record_usage(wall_started, time.monotonic() - started)
+                except Exception:
+                    pass
+        finally:
+            if child.is_alive():
+                # Only reached when supervision itself failed; never leave the job orphaned.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    child.kill()
+                child.join(timeout=5)
+            with self.state_lock:
+                self.child_pids.discard(child.pid)
+            try:
+                child.close()
+            except ValueError:
+                pass

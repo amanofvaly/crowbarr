@@ -124,6 +124,10 @@ class Settings(BaseModel):
     device: str = "cpu"
     compute_type: str = "int8"
     cpu_threads: int = Field(default=2, ge=1, le=64)
+    # Parallel jobs only help while a job's CPU stages leave the GPU idle, so the value
+    # is honoured on CUDA alone; on CPU two transcriptions would just fight for cores.
+    # Not a fingerprint field: how many files run at once never changes a verdict.
+    max_concurrent_jobs: int = Field(default=1, ge=1, le=4)
     scan_seconds: int = Field(default=300, ge=10, le=86400)
     settle_seconds: int = Field(default=120, ge=0, le=86400)
     min_duration_minutes: int = Field(default=10, ge=0, le=600)
@@ -163,6 +167,10 @@ class Settings(BaseModel):
     bazarr: Connection = Field(default_factory=Connection)
     plex: Connection = Field(default_factory=Connection)
     plex_mappings: list[PathMapping] = Field(default_factory=list, max_length=32)
+
+    def parallel_jobs(self, cuda_available: bool | None) -> int:
+        """Jobs the worker may run at once: the saved value on a working GPU, else one."""
+        return self.max_concurrent_jobs if self.device == "cuda" and cuda_available is True else 1
 
     def providers(self) -> list[str]:
         return [name for name in ("sonarr", "radarr") if getattr(self, name).url]

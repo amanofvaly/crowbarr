@@ -18,6 +18,9 @@ log = logging.getLogger(__name__)
 _resident = None
 _resident_key = None
 _resident_runtime = {}
+# Set by the job process so the supervisor learns when recognition left the GPU: one
+# CPU-bound transcription already saturates the machine, so no second job may start.
+cpu_fallback_hook = None
 
 
 BASE_PROBES = (1 / 6, 1 / 2, 5 / 6)
@@ -150,6 +153,11 @@ def transcribe(
         transcribe.runtime = _resident_runtime.copy()
     _resident_runtime = transcribe.runtime.copy()
     _resident, _resident_key = model, model_key
+    if transcribe.runtime.get("fallback_reason") and cpu_fallback_hook is not None:
+        try:
+            cpu_fallback_hook()
+        except Exception:
+            log.warning("Could not report the CPU fallback to the worker", exc_info=True)
     # Automatic language detection is a guard against wrong/untagged audio; never translate for alignment.
     segments, info = model.transcribe(
         str(audio),
