@@ -232,8 +232,9 @@ def test_overlapping_jobs_spend_the_budget_once(tmp_path, monkeypatch):
     budget = db.background_budget(30)
     assert budget["used_seconds"] == pytest.approx(1_900)
     assert budget["remaining_seconds"] == 0
-    # Clears once the merged span starts to leave the rolling hour.
-    assert 10_000 < budget["resume_at"] <= 10_000 + 101
+    # Merged spans 7000-8800 and 9500-9600 hold 1900s; dropping under 1800s needs
+    # 100s of the first span to leave the rolling hour (summing would need 700s more).
+    assert budget["resume_at"] == pytest.approx(10_700, abs=1)
 
 
 def test_a_full_hour_cap_stays_reachable_only_after_a_full_hour_with_two_workers(tmp_path, monkeypatch):
