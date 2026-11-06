@@ -424,3 +424,190 @@ def test_settings_page_offers_parallel_jobs_only_for_the_gpu(client):
     assert "parallel.disabled = cpu" in script
     # The dashboard lists every processing job, not just the first.
     assert 'filter((j) => j.state === "processing")' in script
+
+
+# ----- one recognition at a time --------------------------------------------------------
+
+
+def test_recognition_slot_admits_one_holder_and_reports_the_wait(tmp_path):
+    from crowbarr.resources import recognition_slot
+
+    events = []
+    holding, release = threading.Event(), threading.Event()
+
+    def first():
+        with recognition_slot(tmp_path, waiting=lambda: events.append("first waited")):
+            events.append("first recognizing")
+            holding.set()
+            release.wait(5)
+            events.append("first done")
+
+    def second():
+        holding.wait(5)
+        with recognition_slot(
+            tmp_path, waiting=lambda: events.append("second waiting"), acquired=lambda: events.append("second acquired")
+        ):
+            events.append("second recognizing")
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    assert wait_for(lambda: "second waiting" in events, timeout=5)
+    time.sleep(0.2)
+    assert "second recognizing" not in events
+    release.set()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert events == [
+        "first recognizing", "second waiting", "first done", "second acquired", "second recognizing"
+    ]
+
+
+def test_a_killed_holder_frees_the_recognition_slot(tmp_path):
+    import multiprocessing
+
+    from crowbarr.resources import recognition_slot
+
+    context = multiprocessing.get_context("spawn")
+    child = context.Process(target=_hold_recognition_slot, args=(str(tmp_path),))
+    child.start()
+    assert wait_for(lambda: (tmp_path / "held").exists(), timeout=20)
+    waited = []
+    child.kill()
+    child.join(5)
+    with recognition_slot(tmp_path, waiting=lambda: waited.append(True)):
+        pass
+    assert child.exitcode is not None
+
+
+def _hold_recognition_slot(directory):
+    from pathlib import Path
+
+    from crowbarr.resources import recognition_slot
+
+    with recognition_slot(Path(directory)):
+        (Path(directory) / "held").touch()
+        time.sleep(60)
+
+
+@pytest.mark.parametrize("windows", [None, [(0, 2)]])
+def test_recognition_holds_the_slot_and_releases_the_model(tmp_path, monkeypatch, windows):
+    import fcntl
+
+    from crowbarr import inference, processor
+    from crowbarr.resources import recognition_slot
+    from crowbarr.subtitles import Word
+
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"video")
+    state = tmp_path / "state"
+    observed, released = [], []
+
+    def recognize(*args, **kwargs):
+        with (state / "recognition.lock").open("a") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append("free")
+                fcntl.flock(probe, fcntl.LOCK_UN)
+            except BlockingIOError:
+                observed.append("held")
+        return [Word(1, 2, "hello", 0.9)], []
+
+    monkeypatch.setattr(inference, "transcribe_bounded", recognize)
+    monkeypatch.setattr(inference, "transcribe_windows", recognize)
+    monkeypatch.setattr(inference, "release_model", lambda: released.append(True))
+    settings = Settings(device="cuda")
+    lock = lambda: recognition_slot(state)  # noqa: E731
+    first = processor._recognized_words(
+        media, tmp_path / "audio.wav", settings, state, tmp_path / "models", inference.transcribe, windows,
+        recognition_lock=lock,
+    )
+    assert observed == ["held"] and released == [True] and not first[2]
+    # A cached transcript is read without waiting for the GPU.
+    with recognition_slot(state):
+        again = processor._recognized_words(
+            media, tmp_path / "audio.wav", settings, state, tmp_path / "models", inference.transcribe, windows,
+            recognition_lock=lambda: pytest.fail("a cache hit must not take the recognition slot"),
+        )
+    assert again[2] and observed == ["held"]
+
+
+@pytest.fixture
+def video(tmp_path):
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is required for media integration tests")
+    path = tmp_path / "library" / "sample.mkv"
+    path.parent.mkdir()
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=160x90:d=8", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=8", "-c:v", "mpeg4", "-c:a", "pcm_s16le",
+         "-metadata:s:a:0", "language=eng", "-shortest", str(path)],
+        check=True,
+    )
+    return path
+
+
+class StopAtRecognition(Exception):
+    pass
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_a_job_waits_for_the_gpu_only_when_processing_on_cuda(video, tmp_path, monkeypatch, device):
+    from crowbarr import processor
+    from crowbarr.library import scan
+    from crowbarr.resources import recognition_slot
+
+    state = tmp_path / "state"
+    db = Database(state / "crowbarr.db")
+    settings = Settings(
+        roots=[str(video.parent)], settle_seconds=0, subtitle_wait_minutes=0, min_duration_minutes=0,
+        device=device,
+    )
+    scan(settings, db)
+    job = db.claim()
+    stages = []
+    original_update = db.update
+
+    def update(job_id, **values):
+        if "stage" in values:
+            stages.append(values["stage"])
+        return original_update(job_id, **values)
+
+    monkeypatch.setattr(db, "update", update)
+    entered = []
+
+    def recognized(*args, recognition_lock, **kwargs):
+        with recognition_lock():
+            entered.append(stages[-1])
+        raise StopAtRecognition
+
+    monkeypatch.setattr(processor, "_recognized_words", recognized)
+    release = threading.Event()
+    holding = threading.Event()
+
+    def other_job():
+        with recognition_slot(state):
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=other_job)
+    holder.start()
+    holding.wait(5)
+    worker = threading.Thread(target=lambda: pytest.raises(StopAtRecognition, processor.process, job, settings, state, db))
+    worker.start()
+    try:
+        if device == "cuda":
+            assert wait_for(lambda: "Waiting for the GPU; another job is recognizing speech" in stages)
+            assert not entered
+        else:
+            assert wait_for(lambda: entered)
+    finally:
+        release.set()
+        holder.join(5)
+        worker.join(30)
+    assert entered and entered[0] != "Waiting for the GPU; another job is recognizing speech"
+    if device == "cpu":
+        assert "Waiting for the GPU; another job is recognizing speech" not in stages

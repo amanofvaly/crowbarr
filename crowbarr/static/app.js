@@ -731,7 +731,7 @@ function updatesPanel() {
 // Parallel jobs fill the GPU while another job runs its CPU stages. On the CPU two
 // transcriptions would only compete for cores, so the field is pinned to one there.
 const PARALLEL_HELP_GPU =
-  "Files processed at once on the graphics card. Each job holds about 1 GB of GPU memory; a job starts only while free GPU memory stays above the Resources minimum.";
+  "Files processed at once on the graphics card. Only one job recognizes speech on the GPU at a time; the others prepare audio and match subtitles meanwhile. A job starts only while free GPU memory stays above the Resources minimum.";
 const PARALLEL_HELP_CPU = "CPU processing runs one job at a time. Choose the NVIDIA GPU to process files in parallel.";
 const parallelJobsField = (cpu) =>
   `<label id="parallel-field">Parallel jobs (GPU)<input name="max_concurrent_jobs" type="number" min="1" max="4" step="1" value="${

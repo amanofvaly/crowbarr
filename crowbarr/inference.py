@@ -69,6 +69,13 @@ def language_verdict(samples: list[dict], expected: str) -> dict:
     )
 
 
+def release_model() -> None:
+    """Drop the resident recognition model so its GPU memory returns to the card."""
+    global _resident, _resident_key
+    _resident, _resident_key = None, None
+    gc.collect()
+
+
 def verify_audio_language(audio: Path, settings: Settings, cache: Path) -> dict:
     """Use a multilingual model before .en recognition or provider side effects."""
     import numpy as np

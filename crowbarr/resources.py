@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import subprocess
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -75,3 +78,34 @@ def quiet(settings) -> bool:
     if start == end:
         return False
     return start <= hour < end if start < end else hour >= start or hour < end
+
+
+@contextmanager
+def recognition_slot(
+    directory: Path,
+    waiting: Callable[[], None] | None = None,
+    acquired: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Let one job at a time recognize speech on the GPU.
+
+    Parallel jobs pay off by overlapping one job's CPU stages with another's GPU
+    recognition; two recognitions at once add little and crowd the card that other
+    services (an LLM, other speech models) share. Job processes are separate, so the
+    lock is a file lock: the kernel drops it when a holder exits or is killed, and a
+    process blocked here still dies on SIGTERM, so cancel, timeout and shutdown work.
+    `waiting` runs only when the slot is taken, and `acquired` once it is granted.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "recognition.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if waiting:
+                waiting()
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            if acquired:
+                acquired()
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
