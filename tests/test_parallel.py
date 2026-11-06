@@ -111,6 +111,8 @@ def test_parallel_jobs_setting_defaults_to_one_and_is_bounded():
     from crowbarr.config import FINGERPRINT_FIELDS
 
     assert Settings().max_concurrent_jobs == 1
+    assert Settings().one_recognition_at_a_time is True
+    assert "one_recognition_at_a_time" not in FINGERPRINT_FIELDS
     assert "max_concurrent_jobs" not in FINGERPRINT_FIELDS
     assert Settings(max_concurrent_jobs=1).fingerprint() == Settings(max_concurrent_jobs=4).fingerprint()
     for value in (0, 5):
@@ -422,6 +424,8 @@ def test_settings_page_offers_parallel_jobs_only_for_the_gpu(client):
     assert "Parallel jobs (GPU)" in script
     assert 'name="max_concurrent_jobs"' in script
     assert "parallel.disabled = cpu" in script
+    assert "Wait for GPU processing (one speech recognition at a time)" in script
+    assert '"one_recognition_at_a_time"' in script
     # The dashboard lists every processing job, not just the first.
     assert 'filter((j) => j.state === "processing")' in script
 
@@ -554,8 +558,8 @@ class StopAtRecognition(Exception):
     pass
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_a_job_waits_for_the_gpu_only_when_processing_on_cuda(video, tmp_path, monkeypatch, device):
+@pytest.mark.parametrize("device,take_turns", [("cpu", True), ("cuda", True), ("cuda", False)])
+def test_a_job_waits_for_the_gpu_only_on_cuda_with_the_toggle_on(video, tmp_path, monkeypatch, device, take_turns):
     from crowbarr import processor
     from crowbarr.library import scan
     from crowbarr.resources import recognition_slot
@@ -564,7 +568,7 @@ def test_a_job_waits_for_the_gpu_only_when_processing_on_cuda(video, tmp_path, m
     db = Database(state / "crowbarr.db")
     settings = Settings(
         roots=[str(video.parent)], settle_seconds=0, subtitle_wait_minutes=0, min_duration_minutes=0,
-        device=device,
+        device=device, one_recognition_at_a_time=take_turns,
     )
     scan(settings, db)
     job = db.claim()
@@ -585,6 +589,12 @@ def test_a_job_waits_for_the_gpu_only_when_processing_on_cuda(video, tmp_path, m
         raise StopAtRecognition
 
     monkeypatch.setattr(processor, "_recognized_words", recognized)
+    # The language check runs first and would download a model; it is not under test.
+    from crowbarr import inference
+
+    monkeypatch.setattr(
+        inference, "verify_audio_language", lambda *args: {"language": "en", "samples": [], "model": "stub"}
+    )
     release = threading.Event()
     holding = threading.Event()
 
@@ -599,7 +609,7 @@ def test_a_job_waits_for_the_gpu_only_when_processing_on_cuda(video, tmp_path, m
     worker = threading.Thread(target=lambda: pytest.raises(StopAtRecognition, processor.process, job, settings, state, db))
     worker.start()
     try:
-        if device == "cuda":
+        if device == "cuda" and take_turns:
             assert wait_for(lambda: "Waiting for the GPU; another job is recognizing speech" in stages)
             assert not entered
         else:
@@ -609,5 +619,5 @@ def test_a_job_waits_for_the_gpu_only_when_processing_on_cuda(video, tmp_path, m
         holder.join(5)
         worker.join(30)
     assert entered and entered[0] != "Waiting for the GPU; another job is recognizing speech"
-    if device == "cpu":
+    if not (device == "cuda" and take_turns):
         assert "Waiting for the GPU; another job is recognizing speech" not in stages

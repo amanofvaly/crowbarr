@@ -128,6 +128,10 @@ class Settings(BaseModel):
     # is honoured on CUDA alone; on CPU two transcriptions would just fight for cores.
     # Not a fingerprint field: how many files run at once never changes a verdict.
     max_concurrent_jobs: int = Field(default=1, ge=1, le=4)
+    # With parallel jobs, let only one of them recognize speech on the GPU at a time.
+    # The others keep working through their CPU stages, so throughput barely changes,
+    # while the card (often shared with an LLM) never carries two recognitions at once.
+    one_recognition_at_a_time: bool = True
     scan_seconds: int = Field(default=300, ge=10, le=86400)
     settle_seconds: int = Field(default=120, ge=0, le=86400)
     min_duration_minutes: int = Field(default=10, ge=0, le=600)

@@ -421,7 +421,7 @@ def process(
 
     def recognition_lock():
         # Only the GPU is contended; CPU processing runs one job at a time anyway.
-        if settings.device != "cuda":
+        if settings.device != "cuda" or not settings.one_recognition_at_a_time:
             return contextlib.nullcontext()
         from .resources import recognition_slot
 
