@@ -985,7 +985,7 @@ function settingsPage() {
         "Processing budget per hour (minutes)",
         1,
         60,
-        "Background work stops for the rest of the hour once it has used this many minutes.",
+        "Background work stops for the rest of the hour once it has used this many minutes. Jobs running side by side count once, so 60 means no limit.",
       ) +
         quietHours() +
         check(
@@ -999,7 +999,7 @@ function settingsPage() {
             "Cooldown between jobs (seconds)",
             0,
             86400,
-            "Wait this long after a background job before starting the next one.",
+            "Wait this long after a background job before starting the next one. With more than one file in progress, each slot waits on its own.",
           ) +
             numeric(
               "min_free_ram_mb",
@@ -1013,7 +1013,7 @@ function settingsPage() {
               "Minimum free GPU memory (MB)",
               128,
               262144,
-              "Hold a job when the graphics card has less free memory than this. Ignored when processing on the CPU.",
+              "Hold a job when the graphics card has less free memory than this. While another job is still loading its model, about 1.2 GB is counted for it. Ignored when processing on the CPU.",
             ) +
             numeric(
               "max_cpu_load",
