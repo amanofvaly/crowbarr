@@ -731,13 +731,13 @@ function updatesPanel() {
 // Parallel jobs fill the GPU while another job runs its CPU stages. On the CPU two
 // transcriptions would only compete for cores, so the field is pinned to one there.
 const PARALLEL_HELP_GPU =
-  "How many files Crowbarr works on at once. A job spends much of its time on the CPU (extracting audio, matching subtitles, searching Bazarr), so a second job keeps the graphics card busy meanwhile. A job starts only while free GPU memory stays above the minimum under Resources & schedule.";
+  "How many files are in progress at once. Needs GPU processing. Much of a job runs on the CPU (extracting audio, matching subtitles, searching Bazarr), so a second file can prepare while the first uses the graphics card. With Wait for GPU processing on, only one of them uses the graphics card at a time. 2 suits most setups.";
+const PARALLEL_HELP_CPU = "CPU processing works on one file at a time. Choose the NVIDIA GPU to have more than one file in progress.";
 const RECOGNITION_HELP_GPU =
-  "On (recommended): parallel jobs take turns recognizing speech on the graphics card. A job that reaches recognition while another is using the GPU shows “Waiting for the GPU” until it is free; jobs still overlap their CPU work, so files finish nearly as fast and the card stays responsive for other apps that share it. Off: jobs may recognize speech at the same time, using more GPU memory for little extra speed. Only matters when Parallel jobs is 2 or more.";
-const RECOGNITION_HELP_CPU = "Only applies to parallel jobs on the graphics card.";
-const PARALLEL_HELP_CPU = "CPU processing runs one job at a time. Choose the NVIDIA GPU to process files in parallel.";
+  "On (recommended): files in progress take turns on the graphics card. A file that is ready for speech recognition while another is using the card shows “Waiting for the GPU” until it is free, so the card never runs two recognitions and stays responsive for other apps that share it. Files still finish nearly as fast, because the waiting one has already done its CPU work. Off: two files may use the graphics card at the same time, for more GPU memory and little extra speed. Only matters when Files in progress at once is 2 or more.";
+const RECOGNITION_HELP_CPU = "Only applies with GPU processing and more than one file in progress.";
 const parallelJobsField = (cpu) =>
-  `<label id="parallel-field">Parallel jobs (GPU)<input name="max_concurrent_jobs" type="number" min="1" max="4" step="1" value="${
+  `<label id="parallel-field">Files in progress at once<input name="max_concurrent_jobs" type="number" min="1" max="4" step="1" value="${
     cpu ? 1 : esc(settings.max_concurrent_jobs ?? 1)
   }" ${cpu ? "disabled" : ""} required><small id="parallel-help">${cpu ? PARALLEL_HELP_CPU : PARALLEL_HELP_GPU}</small></label>`;
 function settingPanel(name, description, fields) {

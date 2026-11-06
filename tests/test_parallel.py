@@ -421,7 +421,7 @@ def test_switching_to_cpu_resets_parallel_jobs(client, full_payload):
 
 def test_settings_page_offers_parallel_jobs_only_for_the_gpu(client):
     script = client.get("/static/app.js").text
-    assert "Parallel jobs (GPU)" in script
+    assert "Files in progress at once" in script
     assert 'name="max_concurrent_jobs"' in script
     assert "parallel.disabled = cpu" in script
     assert "Wait for GPU processing (one speech recognition at a time)" in script

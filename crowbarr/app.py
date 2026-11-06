@@ -434,7 +434,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             ) == previous.max_concurrent_jobs
             if not carried:
                 raise HTTPException(
-                    422, "Parallel jobs need CUDA processing; CPU processing runs one job at a time"
+                    422, "More than one file in progress needs GPU (CUDA) processing; CPU processing works on one file at a time"
                 )
             settings = settings.model_copy(update={"max_concurrent_jobs": 1})
         # Only turning CUDA on needs the hardware answer, so only that change waits for
