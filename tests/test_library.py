@@ -276,3 +276,19 @@ def test_validation_search_and_folder_identity(library_client):
     assert a["key"] == b["key"]
     assert b["episodes"] == [1, 2]
     assert language_codes("Hindi / English") == ["en", "hi"]
+
+
+def test_future_modification_time_does_not_hold_a_file_back(library_client):
+    import os
+    from pathlib import Path
+
+    from crowbarr.library import prepare_media
+
+    app = library_client.app
+    settings = app.state.store.get()
+    settings.settle_seconds = 120
+    media = Path(settings.roots[0]) / "Family Man S01E01.mkv"
+    os.utime(media, (2147483647, 2147483647))  # the 32-bit maximum, 2038-01-19
+    now = time.time()
+    _, _, _, ready = prepare_media(media, settings, app.state.db, now)
+    assert ready <= now + settings.settle_seconds + 1

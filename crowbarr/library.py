@@ -194,6 +194,10 @@ def prepare_media(media: Path, settings: Settings, db: Database, now: float) -> 
     sources = subtitle_sources(media, settings)
     source = next(iter(sources), None)
     latest_write = max([media.stat().st_mtime, *(candidate.stat().st_mtime for candidate in sources)])
+    # A modification time in the future (a wrong clock, a careless copy tool, or the 32-bit
+    # maximum 2038-01-19) says nothing about whether the file is still being written. Taken
+    # at face value it would hold the job back until that date, so count it as written now.
+    latest_write = min(latest_write, now)
     sig = signature(media, source, settings, sources=sources)
     first_seen = db.observe(str(media), sig, now)
     stable_at = max(first_seen, latest_write) + settings.settle_seconds
