@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 
 import httpx
 
 from .config import atomic_write
+
+# A Bazarr provider search asks every enabled provider and routinely runs for minutes.
+# A job waits this long for it; past that it hands its slot back and finds the result
+# cached on its next pass instead of keeping a worker idle.
+SEARCH_WAIT_SECONDS = 20
+SEARCH_CACHE_SECONDS = 6 * 3600
+SEARCH_FAILURE_CACHE_SECONDS = 3600
+# Bazarr's Whisper "provider" transcribes the same audio Crowbarr already transcribes, and
+# a download makes Bazarr run the whole transcription. It is not an authored alternative.
+GENERATED_PROVIDERS = {"whisperai"}
+
+_searches: dict[str, threading.Thread] = {}
+_searches_lock = threading.Lock()
 
 
 class BazarrClient:
@@ -87,6 +101,49 @@ def inspect_sources(settings, db, media, directory: Path, job_id: int):
     return payload
 
 
+def _search_cache(directory, key) -> Path:
+    return Path(directory) / "providers" / f"search-{key}.json"
+
+
+def cached_search(directory, key):
+    path = _search_cache(directory, key)
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    limit = SEARCH_FAILURE_CACHE_SECONDS if payload.get("state") == "failed" else SEARCH_CACHE_SECONDS
+    return payload if time.time() - payload.get("searched_at", 0) < limit else None
+
+
+def _run_search(settings, db, media, directory, job_id, key):
+    try:
+        payload = inspect_sources(settings, db, media, directory, job_id)
+    except Exception as error:  # recorded so the next attempt sees it without searching again
+        payload = {"state": "failed", "error": f"{type(error).__name__}: {error}"[:300]}
+    payload.setdefault("searched_at", time.time())
+    atomic_write(_search_cache(directory, key), json.dumps(payload))
+
+
+def search_sources(settings, db, media, directory, job_id, key, wait=None):
+    """Provider search results for this media, or None while a slow search still runs."""
+    payload = cached_search(directory, key)
+    if payload is not None:
+        return payload
+    with _searches_lock:
+        thread = _searches.get(key)
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(
+                target=_run_search, args=(settings, db, media, directory, job_id, key),
+                name=f"bazarr-search-{key[:8]}", daemon=True,
+            )
+            _searches[key] = thread
+            thread.start()
+    thread.join(SEARCH_WAIT_SECONDS if wait is None else wait)
+    if thread.is_alive():
+        return None
+    return cached_search(directory, key)
+
+
 def reject_source(directory, media, source, reason):
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     path = directory / "rejections" / f"{hashlib.sha256(media.encode()).hexdigest()}.json"
@@ -103,7 +160,11 @@ def try_alternative(settings, db, media, directory, job_id):
     key = hashlib.sha256(str(media).encode()).hexdigest()
     ledger_path = directory / "providers" / f"attempts-{key}.json"
     ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else []
-    payload = inspect_sources(settings, db, str(media), directory, job_id)
+    payload = search_sources(settings, db, str(media), directory, job_id, key)
+    if payload is None:
+        return {"state": "searching", "reason": "Bazarr is still searching its providers"}
+    if payload["state"] == "failed":
+        raise RuntimeError(f"Bazarr provider search failed ({payload.get('error', 'unknown error')})")
     if payload["state"] == "unmapped":
         return payload
     eligible = [
@@ -111,6 +172,7 @@ def try_alternative(settings, db, media, directory, job_id):
         for candidate in payload["candidates"]
         if candidate.get("language") == settings.language
         and str(candidate.get("forced", "False")).lower() == "false"
+        and candidate.get("provider") not in GENERATED_PROVIDERS
     ]
     remaining = [
         candidate

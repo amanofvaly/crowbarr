@@ -242,3 +242,82 @@ def test_a_short_recording_is_not_probed_more_than_three_times(monkeypatch, tmp_
         inference.verify_audio_language(audio, Settings(), tmp_path)
 
     assert len(heard) == 3
+
+
+def _client_recording(calls):
+    class Client:
+        def __init__(self, *args): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def download(self, kind, item, candidate, series):
+            calls.append(candidate["subtitle"])
+    return Client
+
+
+def test_a_slow_provider_search_frees_the_worker_and_is_reused(tmp_path, monkeypatch):
+    """Bazarr can search for minutes; the job must not hold a slot, and must not search twice."""
+    import threading
+    import time
+
+    media = tmp_path / "film.mkv"
+    media.touch()
+    media.with_suffix(".en.srt").write_text("original")
+    release = threading.Event()
+    searches = []
+
+    def slow_search(*args):
+        searches.append(1)
+        release.wait(5)
+        return {"state": "alternatives_available", "target": {"kind": "movies", "item_id": 1},
+                "candidates": [{"subtitle": "a", "provider": "test", "language": "en"}]}
+
+    monkeypatch.setattr(bazarr, "inspect_sources", slow_search)
+    monkeypatch.setattr(bazarr, "SEARCH_WAIT_SECONDS", 0.05)
+    calls = []
+    monkeypatch.setattr(bazarr, "BazarrClient", _client_recording(calls))
+    settings = Settings(bazarr_download_alternatives=True)
+
+    started = time.monotonic()
+    assert bazarr.try_alternative(settings, None, media, tmp_path, 1)["state"] == "searching"
+    assert time.monotonic() - started < 2
+    # A second pass while the search still runs joins it rather than starting another.
+    assert bazarr.try_alternative(settings, None, media, tmp_path, 1)["state"] == "searching"
+    release.set()
+    for _ in range(100):
+        if bazarr.cached_search(tmp_path, bazarr.hashlib.sha256(str(media).encode()).hexdigest()):
+            break
+        time.sleep(0.02)
+    assert bazarr.try_alternative(settings, None, media, tmp_path, 1)["state"] == "discarded"
+    assert searches == [1]
+    assert calls == ["a"]
+
+
+def test_bazarr_whisper_is_not_an_authored_alternative(tmp_path, monkeypatch):
+    media = tmp_path / "film.mkv"
+    media.touch()
+    monkeypatch.setattr(bazarr, "inspect_sources", lambda *a: {
+        "state": "alternatives_available", "target": {"kind": "movies", "item_id": 1},
+        "candidates": [{"subtitle": "w", "provider": "whisperai", "language": "en", "score": 999}],
+    })
+    calls = []
+    monkeypatch.setattr(bazarr, "BazarrClient", _client_recording(calls))
+    result = bazarr.try_alternative(Settings(bazarr_download_alternatives=True), None, media, tmp_path, 1)
+    assert result["state"] == "exhausted"
+    assert calls == []
+
+
+def test_a_failed_provider_search_is_remembered_not_repeated(tmp_path, monkeypatch):
+    media = tmp_path / "film.mkv"
+    media.touch()
+    searches = []
+
+    def broken(*args):
+        searches.append(1)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(bazarr, "inspect_sources", broken)
+    settings = Settings(bazarr_download_alternatives=True)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="search failed"):
+            bazarr.try_alternative(settings, None, media, tmp_path, 1)
+    assert searches == [1]
