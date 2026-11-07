@@ -618,6 +618,12 @@ main {
   margin-bottom: 22px;
   min-height: 95px;
 }
+.worker-stack {
+  margin-bottom: 22px;
+}
+.worker-stack .worker-band {
+  margin-bottom: 6px;
+}
 .worker-media {
   flex: 1;
   min-width: 0;

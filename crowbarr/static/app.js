@@ -288,12 +288,20 @@ function jobButtons(job) {
   return `${button("Details", "details", "small", id)}${["queued", "waiting", "retry"].includes(job.state) ? button("Run next", "promote", "small", id) : ""}${["queued", "waiting", "retry", "processing"].includes(job.state) ? button(job.cancel_requested ? "Cancelling…" : "Cancel", "cancel", "small danger", `${id} ${job.cancel_requested ? "disabled" : ""}`) : ["failed", "review", "skipped", "unchanged", "completed"].includes(job.state) ? button("Retry", "retry", "small", id) : ""}`;
 }
 function activeJob() {
-  const job = status?.jobs.find((j) => j.state === "processing");
+  // With parallel jobs more than one file can be processing; each gets its own band.
+  const running = (status?.jobs || []).filter((j) => j.state === "processing");
+  const job = running[0];
   if (!job && status?.scan_in_progress)
     return `<div class="worker-band idle">${icon("refresh")}<div class="idle-body"><strong>Syncing libraries</strong><span>Crowbarr is checking which files need work. Queue totals can change until this finishes.</span></div></div>`;
   if (!job)
     return `<div class="worker-band idle">${icon(status?.paused ? "pause" : status?.wait_reason ? "clock" : "check")}<div class="idle-body"><strong>${status?.paused ? "Queue paused" : status?.wait_reason ? "Waiting to process" : "Nothing running"}</strong><span>${esc(status?.wait_reason || "No job is currently processing.")}</span>${status?.wait_reason === "Hourly background budget reached" ? budgetMarkup() : cooldownMarkup()}</div></div>`;
-  return `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(job))}</div><span class="hint">${esc(origins[job.origin] || "Library scan")} · ${job.started ? duration(Date.now() / 1000 - job.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(job)}</div><div class="actions">${jobButtons(job)}</div></div>`;
+  const bands = running
+    .map(
+      (j) =>
+        `<div class="worker-band"><div class="worker-media">${badge("processing")}<div class="active-title">${esc(title(j))}</div><span class="hint">${esc(origins[j.origin] || "Library scan")} · ${j.started ? duration(Date.now() / 1000 - j.started) + " elapsed" : "Starting"}</span></div><div class="worker-progress">${progressMarkup(j)}</div><div class="actions">${jobButtons(j)}</div></div>`,
+    )
+    .join("");
+  return running.length > 1 ? `<div class="worker-stack">${bands}</div>` : bands;
 }
 
 function rows(items, compact = false) {
@@ -720,6 +728,18 @@ function updatesPanel() {
   );
   return settingPanel("Updates", "Check for a newer version and install it without leaving Crowbarr.", parts.join(""));
 }
+// Parallel jobs fill the GPU while another job runs its CPU stages. On the CPU two
+// transcriptions would only compete for cores, so the field is pinned to one there.
+const PARALLEL_HELP_GPU =
+  "How many files are in progress at once. Needs GPU processing. Much of a job runs on the CPU (extracting audio, matching subtitles, searching Bazarr), so a second file can prepare while the first uses the graphics card. With Wait for GPU processing on, only one of them uses the graphics card at a time. 2 suits most setups.";
+const PARALLEL_HELP_CPU = "CPU processing works on one file at a time. Choose the NVIDIA GPU to have more than one file in progress.";
+const RECOGNITION_HELP_GPU =
+  "On (recommended): files in progress take turns on the graphics card. A file that is ready for speech recognition while another is using the card shows “Waiting for the GPU” until it is free, so the card never runs two recognitions and stays responsive for other apps that share it. Files still finish nearly as fast, because the waiting one has already done its CPU work. Off: two files may use the graphics card at the same time, for more GPU memory and little extra speed. Only matters when Files in progress at once is 2 or more.";
+const RECOGNITION_HELP_CPU = "Only applies with GPU processing and more than one file in progress.";
+const parallelJobsField = (cpu) =>
+  `<label id="parallel-field">Files in progress at once<input name="max_concurrent_jobs" type="number" min="1" max="4" step="1" value="${
+    cpu ? 1 : esc(settings.max_concurrent_jobs ?? 1)
+  }" ${cpu ? "disabled" : ""} required><small id="parallel-help">${cpu ? PARALLEL_HELP_CPU : PARALLEL_HELP_GPU}</small></label>`;
 function settingPanel(name, description, fields) {
   return `<section class="panel"><div class="panel-header"><div><h2>${name}</h2><p>${description}</p></div></div><div class="field-grid">${fields}</div></section>`;
 }
@@ -950,7 +970,15 @@ function settingsPage() {
             settings.device === "cpu" && type.includes("float16"),
           ]),
           '<span id="precision-help" aria-live="polite">Lower precision uses less memory and runs faster, with a small loss of accuracy. The CPU supports INT8 and FP32 only.</span>',
-        ) + numeric(
+        ) +
+        parallelJobsField(settings.device === "cpu") +
+        check(
+          "one_recognition_at_a_time",
+          "Wait for GPU processing (one speech recognition at a time)",
+          `<span id="recognition-help">${settings.device === "cpu" ? RECOGNITION_HELP_CPU : RECOGNITION_HELP_GPU}</span>`,
+          settings.device === "cpu",
+        ) +
+        numeric(
           "cpu_threads",
           "CPU threads",
           1,
@@ -966,7 +994,7 @@ function settingsPage() {
         "Processing budget per hour (minutes)",
         1,
         60,
-        "Background work stops for the rest of the hour once it has used this many minutes.",
+        "Background work stops for the rest of the hour once it has used this many minutes. Jobs running side by side count once, so 60 means no limit.",
       ) +
         quietHours() +
         check(
@@ -980,7 +1008,7 @@ function settingsPage() {
             "Cooldown between jobs (seconds)",
             0,
             86400,
-            "Wait this long after a background job before starting the next one.",
+            "Wait this long after a background job before starting the next one. With more than one file in progress, each slot waits on its own.",
           ) +
             numeric(
               "min_free_ram_mb",
@@ -994,7 +1022,7 @@ function settingsPage() {
               "Minimum free GPU memory (MB)",
               128,
               262144,
-              "Hold a job when the graphics card has less free memory than this. Ignored when processing on the CPU.",
+              "Hold a job when the graphics card has less free memory than this. While another job is still loading its model, about 1.2 GB is counted for it. Ignored when processing on the CPU.",
             ) +
             numeric(
               "max_cpu_load",
@@ -1957,6 +1985,22 @@ document.addEventListener("change", async (event) => {
     if (cpu && precision.value.includes("float16")) {
       precision.value = "int8";
       $("precision-help").textContent = "Precision changed to INT8 because the CPU cannot use FP16. Save changes to apply.";
+    }
+    const parallel = form.elements.max_concurrent_jobs;
+    if (parallel) {
+      if (cpu) {
+        if (!parallel.disabled) parallel.dataset.gpuValue = parallel.value;
+        parallel.value = "1";
+      } else if (parallel.disabled) {
+        parallel.value = parallel.dataset.gpuValue || String(savedSettings?.max_concurrent_jobs || 1);
+      }
+      parallel.disabled = cpu;
+      $("parallel-help").textContent = cpu ? PARALLEL_HELP_CPU : PARALLEL_HELP_GPU;
+    }
+    const turns = form.elements.one_recognition_at_a_time;
+    if (turns) {
+      turns.disabled = cpu;
+      $("recognition-help").textContent = cpu ? RECOGNITION_HELP_CPU : RECOGNITION_HELP_GPU;
     }
     captureSettings();
     refreshSaveActions();

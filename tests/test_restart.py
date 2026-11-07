@@ -334,7 +334,7 @@ def test_active_worker_interruption_preserves_retry_and_new_request(tmp_path, mo
     job = db.get(identifier)
     assert not child.alive
     assert signals == [service.signal.SIGTERM, service.signal.SIGKILL]
-    assert instance.child_pid is None
+    assert not instance.child_pids
     if interruption == "replacement":
         assert job["state"] == "queued"
         assert job["directive"] == "generate"
