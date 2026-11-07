@@ -407,8 +407,20 @@ function dashboard() {
   );
 }
 
+// Offset of the first row on the last page of `total` rows, 25 rows to a page.
+function lastPageOffset() {
+  return Math.max(0, Math.floor((total - 1) / 25) * 25);
+}
+
 function pager() {
-  return `<div class="pagination"><span>${total ? `${fmt(pageOffset + 1)}–${fmt(Math.min(pageOffset + 25, total))} of ${fmt(total)}` : "0 results"}</span><div class="actions">${button("Previous", "previous", "small", pageOffset === 0 ? "disabled" : "")}${button("Next", "next", "small", pageOffset + 25 >= total ? "disabled" : "")}</div></div>`;
+  const atStart = pageOffset === 0;
+  const atEnd = pageOffset + 25 >= total;
+  const pages = Math.ceil(total / 25);
+  const range = total
+    ? `${fmt(pageOffset + 1)}–${fmt(Math.min(pageOffset + 25, total))} of ${fmt(total)}` +
+      (pages > 1 ? ` · page ${fmt(Math.floor(pageOffset / 25) + 1)} of ${fmt(pages)}` : "")
+    : "0 results";
+  return `<div class="pagination"><span>${range}</span><div class="actions">${button("First", "first", "small", atStart ? "disabled" : "")}${button("Previous", "previous", "small", atStart ? "disabled" : "")}${button("Next", "next", "small", atEnd ? "disabled" : "")}${button("Last", "last", "small", atEnd ? "disabled" : "")}</div></div>`;
 }
 function listShell() {
   const names = {
@@ -530,7 +542,7 @@ async function loadList(silent = false) {
     if (revision !== listRevision || view !== route || !session) return;
     total = result.total;
     if (pageOffset >= total && pageOffset > 0) {
-      pageOffset = Math.max(0, Math.floor((total - 1) / 25) * 25);
+      pageOffset = lastPageOffset();
       return loadList();
     }
     if (view === "library") {
@@ -1790,6 +1802,9 @@ async function perform(target) {
       );
     } else if (action === "previous" || action === "next") {
       pageOffset += action === "next" ? 25 : -25;
+      await loadList();
+    } else if (action === "first" || action === "last") {
+      pageOffset = action === "first" ? 0 : lastPageOffset();
       await loadList();
     } else if (action === "reload") await loadList();
     else if (action === "test") {

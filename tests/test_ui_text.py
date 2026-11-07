@@ -155,3 +155,32 @@ def test_the_updates_page_says_when_nothing_is_new_and_ties_automatic_installs_t
 
     unchecked = render_updates({**BASE, "available": False}, update_check=False)
     assert 'name="auto_update" disabled' in unchecked
+
+
+@needs_node
+def test_lists_page_to_the_first_and_last_page():
+    program = excerpt("// Offset of the first row on the last page", "function listShell()") + """
+const fmt = (n) => String(n);
+const button = (label, action, size, extra) => `[${label}${extra ? " off" : ""}]`;
+let total = 0, pageOffset = 0;
+const out = {};
+total = 101; pageOffset = 0; out.first = pager(); out.lastOffset = lastPageOffset();
+pageOffset = 100; out.last = pager();
+pageOffset = 50; out.middle = pager();
+total = 25; pageOffset = 0; out.single = pager(); out.singleLast = lastPageOffset();
+total = 0; out.empty = lastPageOffset();
+console.log(JSON.stringify(out));
+"""
+    result = run_node(program)
+    assert result["lastOffset"] == 100 and result["singleLast"] == 0 and result["empty"] == 0
+    assert "[First off][Previous off][Next][Last]" in result["first"]
+    assert "page 1 of 5" in result["first"]
+    assert "[First][Previous][Next off][Last off]" in result["last"]
+    assert "101–101 of 101" in result["last"] and "page 5 of 5" in result["last"]
+    assert "[First][Previous][Next][Last]" in result["middle"] and "page 3 of 5" in result["middle"]
+    assert "page" not in result["single"]
+
+
+def test_first_and_last_page_buttons_are_handled():
+    assert 'action === "first" || action === "last"' in SCRIPT
+    assert 'pageOffset = action === "first" ? 0 : lastPageOffset();' in SCRIPT
