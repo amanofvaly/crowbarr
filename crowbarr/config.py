@@ -124,6 +124,9 @@ class Settings(BaseModel):
     device: str = "cpu"
     compute_type: str = "int8"
     cpu_threads: int = Field(default=2, ge=1, le=64)
+    # A file Crowbarr has never seen that was written recently is a new download, the
+    # file most likely to be watched next, so it is queued ahead of the backlog.
+    prioritize_new_files: bool = True
     scan_seconds: int = Field(default=300, ge=10, le=86400)
     settle_seconds: int = Field(default=120, ge=0, le=86400)
     min_duration_minutes: int = Field(default=10, ge=0, le=600)

@@ -19,6 +19,23 @@ class StaleJob(RuntimeError):
     """The worker's request has been replaced since it was claimed."""
 
 
+# Manual requests and new imports form a tier that always runs first, ahead of the
+# ageing bonus. Ageing still keeps everything else from starving (a long-waiting
+# backlog file overtakes a fresh retry), but a 20,000-file backlog where every row
+# has reached the cap would otherwise put a just-downloaded episode, or a "Run
+# next", behind all of it. Every queue view must use this order, or the dashboard
+# shows a different "next up" than claim() runs.
+URGENT_PRIORITY = 80
+
+
+def queue_order(now: float) -> str:
+    return (
+        f"CASE WHEN priority>={URGENT_PRIORITY} THEN priority ELSE -1 END DESC,"
+        f"(priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,"
+        "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id"
+    )
+
+
 class Database:
     """A durable single-host queue. Transactions serialize claims across threads/processes."""
 
@@ -203,9 +220,19 @@ class Database:
             return dict(row) if row else None
 
     def enqueue(
-        self, media: str, signature: str, source: str | None, ready: float, origin: str = "backlog"
+        self,
+        media: str,
+        signature: str,
+        source: str | None,
+        ready: float,
+        origin: str = "backlog",
+        fresh: bool = False,
     ) -> int:
-        """Record what this file needs now. One row per file, updated in place."""
+        """Record what this file needs now. One row per file, updated in place.
+
+        `fresh` marks a recently written file. If Crowbarr has never seen it, it is a
+        new download and is queued as an import, however it was discovered.
+        """
         priority = {"manual": 100, "import": 80, "bazarr": 60, "retry": 40, "backlog": 0}[origin]
         pending = ("waiting", "queued", "retry", "processing")
         now = time.time()
@@ -213,6 +240,8 @@ class Database:
         with self.connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE media=?", (media,)).fetchone()
             if row is None:
+                if fresh and origin == "backlog":
+                    origin, priority = "import", 80
                 db.execute(
                     "INSERT INTO jobs(media,signature,source,state,created,updated,ready,origin,priority)"
                     " VALUES (?,?,?,?,?,?,?,?,?)",
@@ -553,8 +582,7 @@ class Database:
                         # `ready` gates eligibility only. Ordering by it would let the Bazarr
                         # wait permanently demote media that arrived without a subtitle behind
                         # every file that already had one, so order by arrival instead.
-                        + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,"
-                        "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id LIMIT 1",
+                        + f"ORDER BY {queue_order(now)} LIMIT 1",
                         parameters,
                     ).fetchone()
                     if not row:
@@ -911,8 +939,7 @@ class Database:
                     # dashboard shows a different "next up" than the queue will run.
                     select
                     + f"WHERE state IN {pending} "
-                    + f"ORDER BY (priority + MIN(120, CAST(({now}-created)/3600 AS INTEGER))) DESC,"
-                    "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id "
+                    + f"ORDER BY {queue_order(now)} "
                     + "LIMIT 25"
                 )
             ]

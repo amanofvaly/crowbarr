@@ -201,6 +201,18 @@ def prepare_media(media: Path, settings: Settings, db: Database, now: float) -> 
     return source, sources, sig, ready
 
 
+# Newly added folders hold old files; a download is written moments before discovery.
+# A week covers a scan that was paused or a server that was off for a few days.
+NEW_FILE_DAYS = 7
+
+
+def is_new_download(media: Path, now: float) -> bool:
+    try:
+        return now - media.stat().st_mtime < NEW_FILE_DAYS * 86400
+    except OSError:
+        return False
+
+
 def queue_media(
     media: Path,
     settings: Settings,
@@ -216,7 +228,10 @@ def queue_media(
     if carried:
         # Only the settings changed, and the user asked to keep what is already decided.
         db.restamp(str(media), signature(media, source, settings, carried, sources), sig)
-    job_id = db.enqueue(str(media), sig, str(source) if source else None, ready, origin=origin)
+    job_id = db.enqueue(
+        str(media), sig, str(source) if source else None, ready, origin=origin,
+        fresh=settings.prioritize_new_files and is_new_download(media, now),
+    )
     job = db.get(job_id)
     if job["state"] == "completed" and job["output"] and not Path(job["output"]).exists():
         db.update(job_id, state="queued", ready=now, attempts=0, error="Published subtitle is missing")
