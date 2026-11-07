@@ -186,7 +186,9 @@ def test_aged_backlog_eventually_runs(tmp_path):
     old = db.enqueue("/old", "a", None, 0)
     with db.connect() as connection:
         connection.execute("UPDATE jobs SET created=? WHERE id=?", (time.time() - 121 * 3600, old))
-    db.enqueue("/manual", "b", None, 0, origin="manual")
+    # Ageing overtakes retries and Bazarr upgrades; manual requests and new imports
+    # form a tier ahead of it (tests/test_next_round.py).
+    db.enqueue("/retry", "b", None, 0, origin="retry")
     assert db.claim()["id"] == old
 
 

@@ -309,6 +309,15 @@ def transcribe_windows(audio: Path, windows: list[tuple[float, float]], settings
     result, issues = [], []
     with wave.open(str(audio), "rb") as source, tempfile.TemporaryDirectory(dir=audio.parent) as work:
         rate = source.getframerate()
+        # Windows are placed from the container's duration, but the extracted audio
+        # can be shorter (an audio stream that ends before the video, or a start
+        # offset). Read only what exists; asking for a later position fails the job.
+        available = source.getnframes() / rate
+        usable = [(start, min(end, available)) for start, end in windows if start < available - 1]
+        for start, _ in windows:
+            if start >= available - 1:
+                issues.append(f"Sample near {start:.0f}s is past the end of the audio ({available:.0f}s) and was skipped")
+        windows = usable
         total = sum(end - start for start, end in windows)
         completed = 0.0
         for index, (start, end) in enumerate(windows):

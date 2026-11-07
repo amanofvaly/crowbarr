@@ -25,7 +25,7 @@ from .capabilities import (
     warm_up,
 )
 from .config import ConfigStore, Settings
-from .db import Database
+from .db import Database, queue_order
 from .integrations import check_connection
 from .service import Service
 from .version import AUDIT_POLICY_VERSION
@@ -282,8 +282,7 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         condition = " AND ".join(where) or "1"
         order = (
             f"CASE WHEN state='processing' THEN 0 WHEN ready<={time.time()} THEN 1 ELSE 2 END, "
-            f"(priority + MIN(120, CAST(({time.time()}-created)/3600 AS INTEGER))) DESC,"
-            "CASE WHEN origin='backlog' THEN library_order ELSE '' END,created,id"
+            + queue_order(time.time())
             if state == "queue"
             else "updated DESC,id DESC"
         )

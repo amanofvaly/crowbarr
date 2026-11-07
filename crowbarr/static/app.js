@@ -974,6 +974,11 @@ function settingsPage() {
           "Defer background processing during Plex playback",
           "Pauses background work while anyone is watching on Plex, so playback is not slowed down. Jobs you start yourself still run.",
         ) +
+        check(
+          "prioritize_new_files",
+          "Process new files first",
+          "On: a file Crowbarr has not seen before that was written in the last 7 days (a new download or upgrade) goes to the front of the queue, ahead of the backlog, since it is the most likely to be watched next. Files from a Sonarr or Radarr import webhook are always treated this way. Off: new files join the backlog in library order.",
+        ) +
         advanced(
           numeric(
             "backlog_cooldown_seconds",
