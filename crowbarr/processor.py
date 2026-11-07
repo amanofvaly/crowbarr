@@ -387,6 +387,23 @@ def current(job: dict, settings: Settings) -> bool:
     return signature(media, source, settings) == job["signature"]
 
 
+PROVIDER_SEARCH_RECHECK_SECONDS = 60
+
+
+def _await_provider_search(job, report):
+    """Free the worker while Bazarr searches; the claim that started this does not count."""
+    import time
+
+    return {
+        "state": "retry",
+        "stage": "",
+        "error": "Waiting for Bazarr's provider search; the worker moved on to other files",
+        "ready": time.time() + PROVIDER_SEARCH_RECHECK_SECONDS,
+        "attempts": max(0, job["attempts"] - 1),
+        "report": json.dumps(report),
+    }
+
+
 def process(
     job: dict, settings: Settings, directory: Path, db: Database, transcriber=None, aligner=None
 ) -> dict:
@@ -508,6 +525,8 @@ def process(
 
             db.update(job["id"], stage="Searching Bazarr providers")
             provider_result = try_alternative(settings, db, media, directory, job["id"])
+            if provider_result["state"] == "searching":
+                return _await_provider_search(job, {"bazarr": provider_result})
             if provider_result["state"] in ("downloaded", "discarded"):
                 if not current(job, settings):
                     return {
@@ -667,6 +686,8 @@ def process(
                 db.update(job["id"], stage="Searching Bazarr alternatives before generation")
                 report["bazarr"] = try_alternative(settings, db, media, directory, job["id"])
                 atomic_write(directory / "reports" / f"{job['id']}.json", json.dumps(report, indent=2))
+                if report["bazarr"]["state"] == "searching":
+                    return _await_provider_search(job, report)
                 if not current(job, settings):
                     return {"state": "superseded", "error": "Provider subtitle arrived; needs a new audit",
                             "report": json.dumps(report)}

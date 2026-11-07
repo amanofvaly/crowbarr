@@ -844,3 +844,31 @@ def test_an_unjudgeable_subtitle_is_still_retimed_when_its_lines_match(video, tm
     assert result["state"] == "completed", f"held by: {report['issues']}"
     output = parse_srt(video.with_suffix(".crowbarr.en.srt").read_text())
     assert output[0].start == pytest.approx(words[0].start, abs=0.05)
+
+
+def test_a_running_provider_search_hands_the_slot_back(video, tmp_path, monkeypatch):
+    """A slow Bazarr search must not keep a worker idle or spend the job's attempts."""
+    import time
+
+    from crowbarr import processor
+
+    monkeypatch.setattr("crowbarr.bazarr.try_alternative", lambda *args: {"state": "searching"})
+    monkeypatch.setattr("crowbarr.inference.verify_audio_language", lambda *args: {"language": "en"})
+    settings = Settings(
+        roots=[str(video.parent)],
+        min_duration_minutes=0,
+        bazarr={"url": "http://bazarr", "api_key": "k"},
+        sonarr={"url": "http://sonarr", "api_key": "k"},
+        bazarr_download_alternatives=True,
+    )
+    db = Database(tmp_path / "queue.db")
+    db.replace_catalog("sonarr", [{"file_id": 1, "item_id": 1, "path": str(video), "remote_path": str(video), "title": "t"}])
+    from crowbarr.library import signature
+
+    db.enqueue(str(video), signature(video, None, settings), None, 0)
+    job = db.claim()
+    result = processor.process(job, settings, tmp_path, db)
+    assert result["state"] == "retry"
+    assert result["attempts"] == job["attempts"] - 1
+    assert time.time() < result["ready"] <= time.time() + 120
+    assert "Bazarr" in result["error"]
