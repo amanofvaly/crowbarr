@@ -155,9 +155,24 @@ def unreadable_subtitles(metadata: dict) -> list[str]:
 EMBEDDED_TEXT_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
 
 
+# Extracting a subtitle stream means demuxing the whole file, because its packets are
+# interleaved through it. A 60-80 GB remux read from a spinning array, with another
+# job reading at the same time, does not finish in a fixed five minutes, so the
+# limit allows a slow 40 MB/s read of the file, bounded like audio extraction.
+SUBTITLE_EXTRACTION_MB_PER_SECOND = 40
+
+
+def extraction_timeout(media: Path) -> float:
+    try:
+        size = media.stat().st_size
+    except OSError:
+        return 300
+    return min(3600, max(300, size / (SUBTITLE_EXTRACTION_MB_PER_SECOND * 1024 * 1024)))
+
+
 def embedded_subtitles(media: Path, directory: Path, metadata: dict, settings: Settings) -> list[Path]:
     supported = EMBEDDED_TEXT_CODECS
-    results = []
+    streams = []
     for stream in metadata["streams"]:
         language = stream.get("tags", {}).get("language", "und").lower()
         if (
@@ -170,25 +185,15 @@ def embedded_subtitles(media: Path, directory: Path, metadata: dict, settings: S
             and not stream.get("disposition", {}).get("forced")
             and "forced" not in stream.get("tags", {}).get("title", "").lower()
         ):
-            destination = directory / f"embedded-{stream['index']}.srt"
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-nostdin",
-                    "-v",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(media),
-                    "-map",
-                    f"0:{stream['index']}",
-                    str(destination),
-                ],
-                check=True,
-                capture_output=True,
-                timeout=300,
-            )
-            results.append(destination)
+            streams.append(stream["index"])
+    if not streams:
+        return []
+    # One pass writes every selected track, so the file is read once, not once per track.
+    results = [directory / f"embedded-{index}.srt" for index in streams]
+    command = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(media)]
+    for index, destination in zip(streams, results, strict=True):
+        command += ["-map", f"0:{index}", str(destination)]
+    subprocess.run(command, check=True, capture_output=True, timeout=extraction_timeout(media))
     return results
 
 
