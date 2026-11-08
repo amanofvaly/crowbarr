@@ -39,12 +39,9 @@ def allowed(path: Path, settings: Settings) -> bool:
     return any(resolved.is_relative_to(Path(root).resolve()) for root in settings.media_roots())
 
 
-# Sidecar tags that mark a derived copy rather than an authored subtitle: Crowbarr's own output,
-# forced-only tracks, and ".default" copies that player-default tools (for example a script that
-# copies the preferred subtitle to "<name>.en.default.srt" so Emby/Jellyfin select it) write
-# beside the real file. Counting a ".default" copy as a source re-queues the video every time the
-# tool rewrites it and has Crowbarr re-sync a subtitle it already synced.
-DERIVED_SIDECAR_TAGS = ("crowbarr", "forced", "default")
+# Sidecar tags that mark a derived copy rather than an authored subtitle: Crowbarr's own output
+# and forced-only tracks.
+DERIVED_SIDECAR_TAGS = ("crowbarr", "forced")
 
 
 def subtitle_sources(media: Path, settings: Settings) -> list[Path]:
@@ -54,6 +51,8 @@ def subtitle_sources(media: Path, settings: Settings) -> list[Path]:
             continue
         suffix = path.name[len(media.stem) + 1 : -4].lower().split(".")
         if any(tag in suffix for tag in DERIVED_SIDECAR_TAGS) or path.is_symlink():
+            continue
+        if settings.ignore_default_subtitle_copies and "default" in suffix:
             continue
         tagged = any(tag in suffix for tag in ("en", "eng"))
         if tagged:

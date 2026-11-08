@@ -70,14 +70,25 @@ def test_own_output_and_forced_subtitles_are_not_sources(tmp_path):
     assert source_subtitle(media, settings) == authored
 
 
-def test_default_copies_are_not_sources(tmp_path):
-    """A ".default" copy written by a player-default tool is derived, not authored: it must not be a
-    source, and writing it must not change the video's signature (that would re-queue the video)."""
+def test_default_files_are_sources_unless_ignored(tmp_path):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    default = media.with_suffix(".en.default.srt")
+    default.write_text("the only subtitle")
+    assert source_subtitle(media, Settings(roots=[str(tmp_path)])) == default
+    ignoring = Settings(roots=[str(tmp_path)], ignore_default_subtitle_copies=True)
+    assert source_subtitle(media, ignoring) is None
+
+
+def test_ignored_default_copies_are_not_sources(tmp_path):
+    """With the setting on, a ".default" copy written by a player-default tool is derived, not
+    authored: it is not a source, and writing it does not change the video's signature (that
+    would re-queue the video)."""
     media = tmp_path / "movie.mkv"
     media.touch()
     authored = media.with_suffix(".en.srt")
     authored.write_text("authored")
-    settings = Settings(roots=[str(tmp_path)])
+    settings = Settings(roots=[str(tmp_path)], ignore_default_subtitle_copies=True)
     before = signature(media, source_subtitle(media, settings), settings)
     media.with_suffix(".en.default.srt").write_text("copy of the preferred subtitle")
     assert source_subtitle(media, settings) == authored

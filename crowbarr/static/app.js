@@ -1026,6 +1026,11 @@ function settingsPage() {
           "Crowbarr checks English subtitles. Files named Episode.srt, and tracks inside the video with no language tag, are skipped unless you turn this on. A subtitle that turns out to be another language will be checked against English audio and reported as not matching.",
         ) +
         check(
+          "ignore_default_subtitle_copies",
+          "Ignore .default subtitle copies",
+          "Skip files such as Episode.en.default.srt that another tool copied from a subtitle already here so the player picks it. Leave off if your .default files are the subtitles themselves.",
+        ) +
+        check(
           "bazarr_download_alternatives",
           "Download alternatives from Bazarr",
           "Ask Bazarr for other subtitle files when the current one does not match the audio.",
