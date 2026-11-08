@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from crowbarr.config import Settings
 from crowbarr.db import Database
-from crowbarr.library import scan, source_subtitle
+from crowbarr.library import scan, signature, source_subtitle, subtitle_sources
 
 
 def test_application_release_does_not_change_audit_policy(monkeypatch):
@@ -68,6 +68,32 @@ def test_own_output_and_forced_subtitles_are_not_sources(tmp_path):
     authored = media.with_suffix(".eng.srt")
     authored.write_text("authored")
     assert source_subtitle(media, settings) == authored
+
+
+def test_default_files_are_sources_unless_ignored(tmp_path):
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    default = media.with_suffix(".en.default.srt")
+    default.write_text("the only subtitle")
+    assert source_subtitle(media, Settings(roots=[str(tmp_path)])) == default
+    ignoring = Settings(roots=[str(tmp_path)], ignore_default_subtitle_copies=True)
+    assert source_subtitle(media, ignoring) is None
+
+
+def test_ignored_default_copies_are_not_sources(tmp_path):
+    """With the setting on, a ".default" copy written by a player-default tool is derived, not
+    authored: it is not a source, and writing it does not change the video's signature (that
+    would re-queue the video)."""
+    media = tmp_path / "movie.mkv"
+    media.touch()
+    authored = media.with_suffix(".en.srt")
+    authored.write_text("authored")
+    settings = Settings(roots=[str(tmp_path)], ignore_default_subtitle_copies=True)
+    before = signature(media, source_subtitle(media, settings), settings)
+    media.with_suffix(".en.default.srt").write_text("copy of the preferred subtitle")
+    assert source_subtitle(media, settings) == authored
+    assert subtitle_sources(media, settings) == [authored]
+    assert signature(media, source_subtitle(media, settings), settings) == before
 
 
 def test_symlink_escape_is_not_discovered(tmp_path):

@@ -155,6 +155,11 @@ class Settings(BaseModel):
     # Verify untagged audio by default; an explicit false still requires language tags.
     allow_untagged_audio: bool = True
     allow_untagged_subtitles: bool = False
+    # Some tools copy the preferred subtitle to "<name>.<lang>.default.srt" so that Emby or
+    # Jellyfin select it. When on, such ".default" files are treated as derived copies, not
+    # sources: rewriting one no longer re-queues the video or gets re-synced. Off by default,
+    # because in some libraries the ".default" file is the authored subtitle.
+    ignore_default_subtitle_copies: bool = False
     min_match_ratio: float = Field(default=0.75, ge=0.5, le=1)
     min_alignment_score: float = Field(default=0.4, ge=0, le=1)
     max_generated_ratio: float = Field(default=0.25, ge=0, le=1)
