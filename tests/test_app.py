@@ -1,4 +1,5 @@
 import base64
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -540,3 +541,70 @@ def test_activity_lists_ready_jobs_before_waiting_ones(client):
     results = client.get("/api/jobs", params={"state": "queue"}, headers=auth(client)).json()["results"]
 
     assert [job["id"] for job in results] == [ready, waiting]
+
+
+def _reviews(client):
+    db = client.app.state.db
+    errors = {
+        "a.mkv": "No discovered subtitle source could be read. a.en.srt: Invalid SRT timestamp",
+        "b.mkv": "Audio language is uncertain or mixed; cannot establish en dialogue safely",
+        "c.mkv": "Audio language is uncertain or mixed; cannot establish en dialogue safely",
+        "d.mkv": "Cue 1: invalid timing",
+        "e.mkv": "Repair remains unverified: authored text match is 62.7%, below the 75% repair requirement",
+        "f.mkv": "Retimed subtitle withheld because the retimed subtitle audits as repair",
+        "g.mkv": "could not decide",
+    }
+    ids = {}
+    for media, error in errors.items():
+        ids[media] = db.enqueue(media, f"inputs-{media}", None, 0)
+        db.update(ids[media], state="review", stage="Needs attention", error=error)
+    return db, ids
+
+
+def test_needs_review_says_why_and_counts_each_reason(client):
+    _reviews(client)
+    result = client.get("/api/jobs", headers=auth(client), params={"state": "review"}).json()
+    counts = {r["key"]: r["count"] for r in result["reasons"]}
+    assert counts == {"unreadable": 1, "language": 2, "timing": 1, "unverified": 1, "withheld": 1, "other": 1}
+    reasons = {Path(j["media"]).name: j["reason"] for j in result["results"]}
+    assert reasons["b.mkv"] == "language" and reasons["g.mkv"] == "other"
+    assert all(j["reason_label"] for j in result["results"])
+
+
+def test_needs_review_filters_by_reason_without_changing_the_counts(client):
+    _reviews(client)
+    result = client.get(
+        "/api/jobs", headers=auth(client), params={"state": "review", "reason": "language"}
+    ).json()
+    assert result["total"] == 2
+    assert {Path(j["media"]).name for j in result["results"]} == {"b.mkv", "c.mkv"}
+    assert sum(r["count"] for r in result["reasons"]) == 7
+    bad = client.get("/api/jobs", headers=auth(client), params={"state": "review", "reason": "nope"})
+    assert bad.status_code == 422
+
+
+def test_bulk_set_aside_acts_only_on_the_filtered_reason(client):
+    db, ids = _reviews(client)
+    response = client.post("/api/jobs/bulk", headers=auth(client), json={"action": "skip", "reason": "language"})
+    assert response.status_code == 200 and response.json()["count"] == 2
+    assert db.get(ids["b.mkv"])["state"] == db.get(ids["c.mkv"])["state"] == "skipped"
+    assert db.get(ids["d.mkv"])["state"] == "review"
+
+
+def test_bulk_generate_queues_behind_new_downloads(client):
+    """Hundreds of fresh generations are background work, not "run this next"."""
+    db, ids = _reviews(client)
+    response = client.post("/api/jobs/bulk", headers=auth(client), json={"action": "generate", "reason": "unverified"})
+    assert response.json()["count"] == 1
+    job = db.get(ids["e.mkv"])
+    assert (job["state"], job["directive"], job["priority"]) == ("queued", "generate", 40)
+    assert job["priority"] < 80  # new downloads
+
+
+def test_bulk_retry_respects_the_search_filter(client):
+    db, ids = _reviews(client)
+    response = client.post("/api/jobs/bulk", headers=auth(client), json={"action": "retry", "q": "d.mkv"})
+    assert response.json()["count"] == 1
+    assert db.get(ids["d.mkv"])["state"] == "queued"
+    assert db.get(ids["a.mkv"])["state"] == "review"
+    assert client.post("/api/jobs/bulk", headers=auth(client), json={"action": "delete"}).status_code == 422

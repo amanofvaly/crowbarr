@@ -101,6 +101,8 @@ let listQuery = "",
   libraryKind = "shows",
   libraryStatus = "all",
   historyFilter = "history",
+  reviewReason = "",
+  bulkArmed = "",
   routeRevision = 0,
   listRevision = 0,
   dirty = false,
@@ -301,7 +303,23 @@ function rows(items, compact = false) {
   const timeHeading = items.every((job) => FINISHED.includes(job.state))
     ? "Finished"
     : "Requested";
-  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${timeHeading}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${esc(origins[j.origin] || "Library scan")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Starts ${esc(startsAt(j.ready))}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Media</th><th>Status</th>${compact ? "" : `<th>${timeHeading}</th>`}<th>Actions</th></tr></thead><tbody>${items.map((j) => `<tr><td class="title-cell"><button class="title-link" data-action="details" data-id="${j.id}">${esc(title(j))}</button><small>${j.reason_label ? `<span class="reason-tag">${esc(j.reason_label)}</span>` : ""}${esc(origins[j.origin] || "Library scan")}${j.error ? ` · ${esc(j.error)}` : j.state === "waiting" ? ` · Starts ${esc(startsAt(j.ready))}` : ""}</small></td><td>${badge(j.state)}${j.state === "processing" ? progressMarkup(j, true) : ""}</td>${compact ? "" : `<td class="muted">${esc(ago(FINISHED.includes(j.state) ? j.updated : j.created))}</td>`}<td><div class="row-actions">${compact ? button("Details", "details", "small", `data-id="${j.id}"`) : jobButtons(j)}</div></td></tr>`).join("")}</tbody></table></div>`;
+}
+function reviewTriage(result) {
+  const reasons = result.reasons || [];
+  const all = reasons.reduce((sum, r) => sum + r.count, 0);
+  const chip = (key, label, count) =>
+    button(`${esc(label)} <span>${fmt(count)}</span>`, "review-reason", key === reviewReason ? "active" : "", `data-reason="${key}" aria-pressed="${key === reviewReason}"`);
+  const chips = `<div class="library-tabs reason-tabs" aria-label="Why these need review">${chip("", "All", all)}${reasons.map((r) => chip(r.key, r.label, r.count)).join("")}</div>`;
+  const scope = reviewReason ? `${reasons.find((r) => r.key === reviewReason)?.label || ""}` : "everything listed";
+  const count = result.total;
+  const files = `${fmt(count)} ${count === 1 ? "file" : "files"}`;
+  const bulk = (kind, label, confirmLabel, style = "") =>
+    bulkArmed === kind
+      ? button(confirmLabel, "bulk", `small danger`, `data-bulk="${kind}"`) + button("Cancel", "bulk-cancel", "small")
+      : button(label, "bulk", `small ${style}`, `data-bulk="${kind}"`);
+  const listFilter = listQuery ? ` matching "${esc(listQuery)}"` : "";
+  return `${chips}<div class="bulk-bar"><span>For ${esc(scope)}${listFilter} (${files}):</span>${bulk("generate", "Generate fresh subtitles", `Generate fresh subtitles for ${files}`, "primary")}${bulk("retry", "Retry", `Retry ${files}`)}${bulk("skip", "Set aside", `Set aside ${files}`)}</div>`;
 }
 function dashboardJobList(items, finished = false) {
   items.forEach((job) => jobs.set(job.id, job));
@@ -522,6 +540,7 @@ async function loadList(silent = false) {
                 : view === "history"
                   ? historyFilter
                   : "review",
+            ...(view === "review" && reviewReason ? { reason: reviewReason } : {}),
           }),
     });
     const result = await api(
@@ -550,8 +569,14 @@ async function loadList(silent = false) {
         select.value = select.querySelector("option[selected]")?.value || "auto";
       });
     } else {
+      if (view === "review" && reviewReason && !(result.reasons || []).some((r) => r.key === reviewReason)) {
+        reviewReason = "";
+        bulkArmed = "";
+        return loadList(silent);
+      }
+      const triage = view === "review" ? reviewTriage(result) : "";
       const listMarkup = result.results.length
-        ? rows(result.results) + pager()
+        ? triage + rows(result.results) + pager()
         : empty(
             listQuery
               ? "No matching jobs"
@@ -1649,7 +1674,27 @@ async function perform(target) {
     id = Number(target.dataset.id);
   target.disabled = true;
   try {
-    if (action === "library-kind") {
+    if (action === "review-reason") {
+      reviewReason = target.dataset.reason || "";
+      bulkArmed = "";
+      pageOffset = 0;
+      await loadList();
+    } else if (action === "bulk") {
+      const kind = target.dataset.bulk;
+      if (bulkArmed !== kind) {
+        // Two clicks instead of a browser dialog: the first shows exactly what will happen.
+        bulkArmed = kind;
+        await loadList(true);
+        return;
+      }
+      bulkArmed = "";
+      const response = await api("/jobs/bulk", "POST", { action: kind, reason: reviewReason, q: listQuery });
+      toast(response.message, false, "Done");
+      await loadList();
+    } else if (action === "bulk-cancel") {
+      bulkArmed = "";
+      await loadList(true);
+    } else if (action === "library-kind") {
       libraryKind = target.dataset.kind;
       pageOffset = 0;
       listRevision++;
