@@ -4,6 +4,7 @@ import html
 import math
 import re
 import unicodedata
+from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -87,21 +88,41 @@ def tokens(text: str) -> list[str]:
     return re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", spoken(text)).casefold().replace("’", "'"))
 
 
+def read_subtitle(path) -> str:
+    """Subtitle text, decoded as UTF-8 or, failing that, the Windows code page most older
+    English subtitles were saved in. A file that is neither is refused as before."""
+    data = Path(path).read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return data.decode("cp1252")
+        except UnicodeDecodeError:
+            raise ValueError("Subtitle is neither UTF-8 nor Windows-1252 text") from None
+
+
 def parse_srt(text: str) -> list[Cue]:
     cues = []
     impossible = 0
+    malformed = 0
+    problem = ""
     blocks = re.split(r"\n\s*\n", text.lstrip("\ufeff").replace("\r\n", "\n").strip())
     for block in blocks:
         lines = block.splitlines()
         timing_index = next((i for i, line in enumerate(lines[:2]) if "-->" in line), None)
         if timing_index is None:
-            raise ValueError("Invalid SRT block: no timing line")
+            malformed += 1
+            problem = problem or "Invalid SRT block: no timing line"
+            continue
         match = TIMING.fullmatch(lines[timing_index].strip())
-        if not match:
-            raise ValueError("Invalid SRT timestamp")
-        values = list(map(int, match.groups()))
-        if any(values[i] >= 60 for i in (1, 2, 5, 6)):
-            raise ValueError("Invalid SRT minutes or seconds")
+        values = list(map(int, match.groups())) if match else None
+        if not values or any(values[i] >= 60 for i in (1, 2, 5, 6)):
+            problem = problem or ("Invalid SRT timestamp" if not values else "Invalid SRT minutes or seconds")
+            # One damaged block -- a stray blank line splitting a cue, a typo such as
+            # "00:00:0,500" -- is skipped like an impossible cue below, rather than
+            # discarding every good cue around it.
+            malformed += 1
+            continue
         start = values[0] * 3600 + values[1] * 60 + values[2] + values[3] / 1000
         end = values[4] * 3600 + values[5] * 60 + values[6] + values[7] / 1000
         body = "\n".join(lines[timing_index + 1 :]).strip()
@@ -121,6 +142,10 @@ def parse_srt(text: str) -> list[Cue]:
     # measuring whatever survived would report a verdict about a file that has none.
     if impossible > max(3, len(blocks) * 0.05):
         raise ValueError(f"{impossible} of {len(blocks)} cues end before they start")
+    # A file that is mostly not SRT (another format saved as .srt, for example) is
+    # refused with the same tolerance.
+    if malformed > max(3, len(blocks) * 0.05) or (malformed and not cues):
+        raise ValueError(f"{problem} ({malformed} of {len(blocks)} blocks)")
     if not cues:
         raise ValueError("Subtitle has no cues")
     return cues

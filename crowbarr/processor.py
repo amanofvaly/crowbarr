@@ -29,7 +29,7 @@ from .media import (
     probe,
     unreadable_subtitles,
 )
-from .subtitles import Cue, Word, match_passages, parse_srt, render_srt, validate_cues
+from .subtitles import Cue, Word, match_passages, parse_srt, read_subtitle, render_srt, validate_cues
 from .version import RECOGNITION_POLICY_VERSION
 
 # How much of a retimed file has to come from its own matched speech. Cues with nothing
@@ -465,7 +465,7 @@ def process(
                         "kind": kind,
                         "path": source,
                         "label": label,
-                        "cues": parse_srt(source.read_text(encoding="utf-8-sig")),
+                        "cues": parse_srt(read_subtitle(source)),
                     }
                 )
             except (ValueError, UnicodeError) as error:

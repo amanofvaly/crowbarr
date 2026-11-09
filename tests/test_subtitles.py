@@ -149,3 +149,34 @@ def test_timestamps_broken_throughout_are_still_rejected():
     )
     with pytest.raises(ValueError):
         parse_srt(text)
+
+
+def _good_blocks(count=30):
+    return "".join(f"{i}\n00:00:{i:02},000 --> 00:00:{i:02},500\nLine {i}\n\n" for i in range(1, count + 1))
+
+
+def test_one_damaged_block_does_not_discard_the_whole_subtitle():
+    """Real provider files: a typo such as "00:00:0,500 --> 00:00:2,00", a negative
+    millisecond field, or a stray blank line splitting a cue. One block is skipped."""
+    damaged = "0\n00:00:0,500 --> 00:00:2,00\nTypo line\n\n" + _good_blocks()
+    assert [c.text for c in parse_srt(damaged)] == [f"Line {i}" for i in range(1, 31)]
+    split = _good_blocks(10) + "continued text after a stray blank line\n\n" + _good_blocks(10)
+    assert len(parse_srt(split)) == 20
+
+
+def test_another_format_saved_as_srt_is_still_rejected():
+    """MicroDVD ("{frame}{frame}text") saved with an .srt name is not SubRip."""
+    microdvd = "".join(f"{{{i * 100}}}{{{i * 100 + 50}}}Line {i}\n\n" for i in range(1, 40))
+    with pytest.raises(ValueError, match="no timing line"):
+        parse_srt(microdvd)
+
+
+def test_windows_1252_subtitles_are_read(tmp_path):
+    from crowbarr.subtitles import read_subtitle
+
+    path = tmp_path / "old.en.srt"
+    path.write_bytes("1\n00:00:01,000 --> 00:00:02,000\nIt’s café time\n".encode("cp1252"))
+    assert parse_srt(read_subtitle(path))[0].text == "It’s café time"
+    utf8 = tmp_path / "new.en.srt"
+    utf8.write_bytes("﻿1\n00:00:01,000 --> 00:00:02,000\nNaïve\n".encode())
+    assert read_subtitle(utf8).startswith("1\n")
