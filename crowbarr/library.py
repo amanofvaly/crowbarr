@@ -255,6 +255,8 @@ def scan_arr(settings: Settings, db: Database, client_factory=ArrClient) -> int:
             with client_factory(provider, getattr(settings, provider)) as client:
                 files = client.catalog()
             db.replace_catalog(provider, [file.record() for file in files], settings.discovery_fingerprint())
+            # Reachable again: say so now, not after the file pass over the whole library.
+            db.clear_sync_failure(provider)
         except Exception as error:
             message = f"{provider.title()} library sync failed ({type(error).__name__}). Check its URL, API key, and path mappings."
             db.sync_failed(provider, message)

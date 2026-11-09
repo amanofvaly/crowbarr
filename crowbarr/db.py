@@ -171,6 +171,16 @@ class Database:
             else:
                 db.execute("DELETE FROM notices WHERE name=?", (name,))
 
+    def clear_sync_failure(self, provider: str) -> None:
+        """Drop a provider's "library sync failed" banner once it is reachable again.
+
+        Other notices under the provider's name (per-file import problems) are left for the
+        scan that produced them to replace."""
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM notices WHERE name=? AND message LIKE ?", (provider, "% library sync failed (%")
+            )
+
     def clear_notice(self, name: str, updated: float) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM notices WHERE name=? AND updated=?", (name, updated))

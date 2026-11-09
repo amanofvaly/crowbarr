@@ -284,3 +284,24 @@ def test_connection_test_names_the_mapping_a_library_needs(tmp_path):
     assert "/data/tv" in result["message"]
     assert "path mapping" in result["message"]
     assert str(tmp_path / "tv") in result["message"]
+
+
+def test_a_recovered_provider_clears_its_banner_before_the_file_pass(catalog_library, monkeypatch):
+    """The banner goes when the provider answers, not after the whole library is walked."""
+    import crowbarr.library as library
+
+    video, settings, db, factory = catalog_library
+    factory.fail = True
+    scan_arr(settings, db, factory)
+    assert any("library sync failed" in n["message"] for n in db.snapshot()["notices"])
+    factory.fail = False
+    seen = {}
+    original = library.prepare_and_restore
+
+    def spy(*args, **kwargs):
+        seen["notices"] = [n["message"] for n in db.snapshot()["notices"]]
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(library, "prepare_and_restore", spy)
+    scan_arr(settings, db, factory)
+    assert not any("library sync failed" in message for message in seen["notices"])
