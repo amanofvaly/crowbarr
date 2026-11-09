@@ -4,7 +4,7 @@ import hashlib
 import json
 import tempfile
 import textwrap
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 
 from .audit import (
@@ -91,6 +91,58 @@ def placement_verdict(after: dict, timing_model: dict) -> dict:
     }
 
 
+def _ordered_anchors(matched: dict) -> list[int]:
+    """The largest set of matches whose times rise with authored order.
+
+    Authored lines are written in the order they are spoken, so a match that lands earlier
+    than a line written before it is a false match -- usually a short or repeated line found
+    in the wrong place. One such match near either end would otherwise drag every
+    unmatched line beyond it along with it, far outside the recording.
+    """
+    indices = sorted(matched)
+    tails: list[float] = []  # smallest end time of a rising run of each length
+    tail_at: list[int] = []  # position in `indices` of that run's last match
+    previous = [-1] * len(indices)
+    for position, index in enumerate(indices):
+        start = matched[index].start
+        length = bisect_right(tails, start)
+        previous[position] = tail_at[length - 1] if length else -1
+        if length == len(tails):
+            tails.append(start)
+            tail_at.append(position)
+        else:
+            tails[length] = start
+            tail_at[length] = position
+    kept, position = [], tail_at[-1] if tail_at else -1
+    while position >= 0:
+        kept.append(indices[position])
+        position = previous[position]
+    return kept[::-1]
+
+
+def _trim_outside_recording(cues: list[Cue], duration: float) -> tuple[list[Cue], int, int]:
+    """Leave out opening and closing lines that land wholly outside the recording.
+
+    A subtitle can carry lines this cut does not have -- a recap, a cold open, a longer
+    ending. Once placed, those lines sit before 0:00 or after the end. They are left out
+    rather than failing the whole file; a line that only overhangs an edge is clipped.
+    Only lines at the edges are touched: anything out of range in the middle still fails
+    validation.
+    """
+    lead = 0
+    while lead < len(cues) and cues[lead].end <= 0:
+        lead += 1
+    tail = 0
+    while tail < len(cues) - lead and cues[len(cues) - 1 - tail].start >= duration:
+        tail += 1
+    kept = list(cues[lead : len(cues) - tail])
+    if kept and kept[0].start < 0 < kept[0].end:
+        kept[0] = Cue(0.0, kept[0].end, kept[0].text)
+    if kept and duration > 0 and kept[-1].start < duration < kept[-1].end:
+        kept[-1] = Cue(kept[-1].start, duration, kept[-1].text)
+    return kept, lead, tail
+
+
 def _retime_from_transcript(original: list[Cue], passages: list) -> tuple[list[Cue], dict]:
     """Place every cue where its own words were spoken.
 
@@ -111,7 +163,9 @@ def _retime_from_transcript(original: list[Cue], passages: list) -> tuple[list[C
     }
     if not matched:
         return [], {"kind": "unsupported", "reason": "No authored line could be matched to the audio"}
-    anchors = sorted(matched)
+    anchors = _ordered_anchors(matched)
+    discarded = len(matched) - len(anchors)
+    matched = {index: matched[index] for index in anchors}
     placed = {index: matched[index].start for index in anchors}
     result = []
     for index, cue in enumerate(original):
@@ -142,6 +196,7 @@ def _retime_from_transcript(original: list[Cue], passages: list) -> tuple[list[C
         "anchor_points": len(matched),
         "placed_cues": len(matched),
         "interpolated_cues": len(original) - len(matched),
+        "discarded_matches": discarded,
     }
 
 
@@ -814,6 +869,26 @@ def process(
                     warnings.append(
                         f"Adjusted {adjusted_overlaps} repaired cue boundaries to prevent overlap"
                     )
+                if timing_model.get("discarded_matches"):
+                    warnings.append(
+                        f"Ignored {timing_model['discarded_matches']} matches that were out of order with "
+                        "the lines around them"
+                    )
+                aligned, left_out_lead, left_out_tail = _trim_outside_recording(aligned, duration)
+                if aligned and (left_out_lead or left_out_tail):
+                    timing_model["left_out_cues"] = left_out_lead + left_out_tail
+                    warnings.append(
+                        f"Left out {left_out_lead} opening and {left_out_tail} closing lines that fall "
+                        "outside this recording"
+                    )
+                    original = original[left_out_lead : len(original) - left_out_tail]
+                    if before.get("sample_cue_indices") is not None:
+                        before = dict(before)
+                        before["sample_cue_indices"] = [
+                            index - left_out_lead
+                            for index in before["sample_cue_indices"]
+                            if left_out_lead <= index < left_out_lead + len(original)
+                        ]
         else:
             timing_model = None
             baseline = _generated_baseline(passages)

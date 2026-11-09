@@ -844,3 +844,46 @@ def test_an_unjudgeable_subtitle_is_still_retimed_when_its_lines_match(video, tm
     assert result["state"] == "completed", f"held by: {report['issues']}"
     output = parse_srt(video.with_suffix(".crowbarr.en.srt").read_text())
     assert output[0].start == pytest.approx(words[0].start, abs=0.05)
+
+
+def _anchor(index, start):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(source_index=index, authored=True, start=start)
+
+
+def test_out_of_order_matches_do_not_drag_unmatched_lines():
+    """A false match near the start (a short line found an hour late) must not shift the
+    unmatched opening lines before it along with it."""
+    from crowbarr.processor import _retime_from_transcript
+
+    cues = [Cue(10.0 + 5 * i, 12.0 + 5 * i, f"line {i}") for i in range(40)]
+    true_offset = -3.0
+    passages = [_anchor(i, cues[i].start + true_offset) for i in range(5, 40)]
+    passages.insert(0, _anchor(3, 3600.0))  # the false match
+    placed, model = _retime_from_transcript(cues, passages)
+    assert model["discarded_matches"] == 1
+    for cue, original in zip(placed, cues, strict=True):
+        assert abs((cue.start - original.start) - true_offset) < 1e-6
+
+
+def test_lines_outside_the_recording_are_left_out_not_failed():
+    """A recap the recording does not have lands before 0:00 once placed. Those lines are
+    left out at the edges, an overhanging line is clipped, and nothing in the middle moves."""
+    from crowbarr.processor import _trim_outside_recording
+
+    cues = [Cue(-90.0, -88.0, "recap 1"), Cue(-50.0, -48.0, "recap 2"), Cue(-0.5, 1.5, "first"),
+            Cue(100.0, 102.0, "middle"), Cue(299.0, 301.0, "last"), Cue(305.0, 307.0, "after")]
+    kept, lead, tail = _trim_outside_recording(cues, 300.0)
+    assert (lead, tail) == (2, 1)
+    assert [c.text for c in kept] == ["first", "middle", "last"]
+    assert kept[0].start == 0.0 and kept[-1].end == 300.0
+    assert kept[1] == cues[3]
+
+
+def test_lines_are_never_trimmed_from_the_middle():
+    from crowbarr.processor import _trim_outside_recording
+
+    cues = [Cue(1.0, 2.0, "a"), Cue(-5.0, -4.0, "b"), Cue(3.0, 4.0, "c")]
+    kept, lead, tail = _trim_outside_recording(cues, 10.0)
+    assert (lead, tail) == (0, 0) and kept == cues
