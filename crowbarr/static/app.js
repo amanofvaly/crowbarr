@@ -1326,6 +1326,21 @@ function tick() {
   }
 }
 setInterval(tick, 250);
+function workerState(current) {
+  // A wait belongs to the next free slot, not to the worker: with several jobs at once,
+  // one idle slot waiting for GPU memory is normal while the others run. Only call the
+  // worker deferred when that wait is holding up everything.
+  const processing = current.jobs.filter((j) => j.state === "processing").length;
+  if (current.paused) return { text: "Queue paused", title: "", warning: true };
+  if (processing)
+    return {
+      text: `Processing ${processing} ${processing === 1 ? "job" : "jobs"}`,
+      title: current.wait_reason ? `Next job waits: ${current.wait_reason}` : "",
+      warning: false,
+    };
+  if (current.wait_reason) return { text: "Worker deferred", title: current.wait_reason, warning: true };
+  return { text: "Worker ready", title: "", warning: false };
+}
 function apply(next) {
   // Everything the shell shows is written value by value. The shell itself is rendered
   // once at sign-in and never rebuilt.
@@ -1333,17 +1348,10 @@ function apply(next) {
   status = next;
   status.jobs.forEach((j) => jobs.set(j.id, j));
   announce(status.jobs);
-  $("worker-state").textContent = status.paused
-    ? "Queue paused"
-    : status.wait_reason
-      ? "Worker deferred"
-      : status.jobs.some((j) => j.state === "processing")
-        ? "Worker processing"
-        : "Worker ready";
-  $("worker-dot").classList.toggle(
-    "warning",
-    status.paused || Boolean(status.wait_reason),
-  );
+  const worker = workerState(status);
+  $("worker-state").textContent = worker.text;
+  $("worker-state").title = worker.title;
+  $("worker-dot").classList.toggle("warning", worker.warning);
   $("version").textContent = `v${status.version}`;
   $("audit-policy-version").textContent =
     `v${status.audit_policy_version}`;
