@@ -553,6 +553,8 @@ def _reviews(client):
         "e.mkv": "Repair remains unverified: authored text match is 62.7%, below the 75% repair requirement",
         "f.mkv": "Retimed subtitle withheld because the retimed subtitle audits as repair",
         "g.mkv": "could not decide",
+        "h.mkv": "Audio language is ja, not en, across multiple speech samples. English processing stopped",
+        "i.mkv": "Not enough confident evidence to judge the timing: subtitle text matching was 40%",
     }
     ids = {}
     for media, error in errors.items():
@@ -565,7 +567,10 @@ def test_needs_review_says_why_and_counts_each_reason(client):
     _reviews(client)
     result = client.get("/api/jobs", headers=auth(client), params={"state": "review"}).json()
     counts = {r["key"]: r["count"] for r in result["reasons"]}
-    assert counts == {"unreadable": 1, "language": 2, "timing": 1, "unverified": 1, "withheld": 1, "other": 1}
+    assert counts == {
+        "unreadable": 1, "foreign": 1, "language": 2, "timing": 1, "unverified": 1, "withheld": 1,
+        "evidence": 1, "other": 1,
+    }
     reasons = {Path(j["media"]).name: j["reason"] for j in result["results"]}
     assert reasons["b.mkv"] == "language" and reasons["g.mkv"] == "other"
     assert all(j["reason_label"] for j in result["results"])
@@ -578,7 +583,7 @@ def test_needs_review_filters_by_reason_without_changing_the_counts(client):
     ).json()
     assert result["total"] == 2
     assert {Path(j["media"]).name for j in result["results"]} == {"b.mkv", "c.mkv"}
-    assert sum(r["count"] for r in result["reasons"]) == 7
+    assert sum(r["count"] for r in result["reasons"]) == 9
     bad = client.get("/api/jobs", headers=auth(client), params={"state": "review", "reason": "nope"})
     assert bad.status_code == 422
 
@@ -605,6 +610,6 @@ def test_bulk_retry_respects_the_search_filter(client):
     db, ids = _reviews(client)
     response = client.post("/api/jobs/bulk", headers=auth(client), json={"action": "retry", "q": "d.mkv"})
     assert response.json()["count"] == 1
-    assert db.get(ids["d.mkv"])["state"] == "queued"
+    assert (db.get(ids["d.mkv"])["state"], db.get(ids["d.mkv"])["priority"]) == ("queued", 40)
     assert db.get(ids["a.mkv"])["state"] == "review"
     assert client.post("/api/jobs/bulk", headers=auth(client), json={"action": "delete"}).status_code == 422

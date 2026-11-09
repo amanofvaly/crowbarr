@@ -68,7 +68,12 @@ class BodyLimitMiddleware:
 # wins. Kept as SQL so the Needs review list can be filtered and counted in the database.
 REVIEW_REASONS = (
     ("unreadable", "Subtitle can't be read", ("No discovered subtitle source could be read%",)),
-    ("language", "Mixed or uncertain audio language", ("Audio language is uncertain%",)),
+    ("foreign", "Audio isn't English", ("Audio language is % not en%",)),
+    (
+        "language",
+        "Mixed or uncertain audio language",
+        ("Audio language is uncertain%", "Too much of the audio lacks confidently identified%"),
+    ),
     (
         "timing",
         "Timing problems",
@@ -76,6 +81,7 @@ REVIEW_REASONS = (
     ),
     ("unverified", "Repair unverified", ("Repair remains unverified%",)),
     ("withheld", "Retimed subtitle withheld", ("Retimed subtitle withheld%",)),
+    ("evidence", "Not enough evidence", ("Not enough confident evidence%",)),
 )
 REVIEW_REASON_LABELS = {
     "failed": "Processing failed",
@@ -378,6 +384,8 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
         if action not in ("retry", "skip", "generate"):
             raise HTTPException(422, "Action must be retry, skip or generate")
         condition, args = review_condition(str(payload.get("q", "")), str(payload.get("reason", "")))
+        # Bulk work is queued behind new downloads and manual requests (priority 40): it is
+        # background work, not "run this next" for hundreds of files.
         if action == "retry":
             db.refresh_library_policy()
         with db.connect() as connection:
@@ -390,12 +398,10 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                 if row["library_blocked"]:
                     blocked += 1
                     continue
-                done += db.retry(row["id"])
+                done += db.retry(row["id"], origin="retry", priority=40)
             elif action == "skip":
                 done += db.skip(row["id"])
             else:
-                # Queued behind new downloads and manual requests: a bulk request is
-                # background work, not "run this next" for hundreds of files.
                 done += db.direct(row["id"], "generate", origin="retry", priority=40)
         verb = {"retry": "Queued again", "skip": "Set aside", "generate": "Fresh subtitles requested for"}[action]
         message = f"{verb} {done} {'file' if done == 1 else 'files'}"
