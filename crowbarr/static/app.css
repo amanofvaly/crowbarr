@@ -2098,3 +2098,9 @@ a.stat:hover {
   white-space: normal;
   box-shadow: var(--shadow);
 }
+
+.reason-tabs { flex-wrap: wrap; margin-top: 0; }
+.reason-tabs .button { padding: 8px 14px; }
+.bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; color: var(--muted); }
+.bulk-bar > span { margin-right: 4px; }
+.reason-tag { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px; background: var(--line); color: inherit; font-weight: 600; }

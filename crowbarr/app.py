@@ -64,6 +64,40 @@ class BodyLimitMiddleware:
         await self.app(scope, replay, send)
 
 
+# Why a job needs attention, read from its recorded error. Order matters: the first match
+# wins. Kept as SQL so the Needs review list can be filtered and counted in the database.
+REVIEW_REASONS = (
+    ("unreadable", "Subtitle can't be read", ("No discovered subtitle source could be read%",)),
+    ("foreign", "Audio isn't English", ("Audio language is % not en%",)),
+    (
+        "language",
+        "Mixed or uncertain audio language",
+        ("Audio language is uncertain%", "Too much of the audio lacks confidently identified%"),
+    ),
+    (
+        "timing",
+        "Timing problems",
+        ("Cue %: invalid timing%", "Cue %: ends after the video%", "Cue %: overlapping%", "Cue %: unsuitable%"),
+    ),
+    ("unverified", "Repair unverified", ("Repair remains unverified%",)),
+    ("withheld", "Retimed subtitle withheld", ("Retimed subtitle withheld%",)),
+    ("evidence", "Not enough evidence", ("Not enough confident evidence%",)),
+)
+REVIEW_REASON_LABELS = {
+    "failed": "Processing failed",
+    **{key: label for key, label, _ in REVIEW_REASONS},
+    "other": "Other",
+}
+
+
+def review_reason_sql() -> tuple[str, list]:
+    clauses, args = ["WHEN state='failed' THEN 'failed'"], []
+    for key, _, patterns in REVIEW_REASONS:
+        clauses.append("WHEN " + " OR ".join("error LIKE ?" for _ in patterns) + f" THEN '{key}'")
+        args.extend(patterns)
+    return "(CASE " + " ".join(clauses) + " ELSE 'other' END)", args
+
+
 def create_app(directory: Path | None = None, background: bool = True) -> FastAPI:
     store = ConfigStore((directory or Path(os.environ.get("CROWBARR_DATA", "data"))).resolve())
     # Processes this one starts inherit it, and look for installed add-ons there.
@@ -224,9 +258,26 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
                         operation["security"] = [{"ApiKey": []}, {"Bearer": []}]
         return schema
 
+    def review_condition(q: str, reason: str = "") -> tuple[str, list]:
+        where, args = ["state IN ('review','failed')"], []
+        for word in q.split():
+            where.append("media LIKE ? ESCAPE '!'")
+            args.append("%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
+        if reason:
+            if reason not in REVIEW_REASON_LABELS:
+                raise HTTPException(422, "Unknown review reason")
+            reason_sql, reason_args = review_reason_sql()
+            where.append(f"{reason_sql}=?")
+            args.extend([*reason_args, reason])
+        return " AND ".join(where), args
+
     @app.get("/api/jobs", dependencies=[Depends(authenticate)])
     def jobs(
-        state: str = "queue", q: str = "", offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100)
+        state: str = "queue",
+        q: str = "",
+        offset: int = Query(0, ge=0),
+        limit: int = Query(25, ge=1, le=100),
+        reason: str = "",
     ):
         import time
 
@@ -280,6 +331,23 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             where.append("media LIKE ? ESCAPE '!'")
             args.append("%" + word.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
         condition = " AND ".join(where) or "1"
+        reasons = None
+        if state == "review":
+            reason_sql, reason_args = review_reason_sql()
+            with db.connect() as connection:
+                counted = dict(
+                    connection.execute(
+                        f"SELECT {reason_sql} AS reason, COUNT(*) FROM jobs WHERE {condition} GROUP BY reason",
+                        (*reason_args, *args),
+                    ).fetchall()
+                )
+            reasons = [
+                {"key": key, "label": label, "count": counted[key]}
+                for key, label in REVIEW_REASON_LABELS.items()
+                if counted.get(key)
+            ]
+            if reason:
+                condition, args = review_condition(q, reason)
         order = (
             f"CASE WHEN state='processing' THEN 0 WHEN ready<={time.time()} THEN 1 ELSE 2 END, "
             f"(priority + MIN(120, CAST(({time.time()}-created)/3600 AS INTEGER))) DESC,"
@@ -287,19 +355,59 @@ def create_app(directory: Path | None = None, background: bool = True) -> FastAP
             if state == "queue"
             else "updated DESC,id DESC"
         )
+        reason_sql, reason_args = review_reason_sql()
         with db.connect() as connection:
             total = connection.execute(f"SELECT COUNT(*) FROM jobs WHERE {condition}", args).fetchone()[0]
             rows = connection.execute(
-                f"SELECT * FROM jobs WHERE {condition} ORDER BY {order} LIMIT ? OFFSET ?",
-                (*args, limit, offset),
+                f"SELECT *, {reason_sql} AS reason FROM jobs WHERE {condition} ORDER BY {order} LIMIT ? OFFSET ?",
+                (*reason_args, *args, limit, offset),
             ).fetchall()
         result = []
         for row in rows:
             job = dict(row)
             # Same reason as the status payload: the list shows none of it.
             job.update(title=Path(job["media"]).stem, has_report=bool(job.pop("report", None)))
+            if job["state"] in ("review", "failed"):
+                job["reason_label"] = REVIEW_REASON_LABELS.get(job["reason"], "")
+            else:
+                job.pop("reason")
             result.append(job)
-        return {"results": result, "total": total, "offset": offset, "limit": limit}
+        payload = {"results": result, "total": total, "offset": offset, "limit": limit}
+        if reasons is not None:
+            payload["reasons"] = reasons
+        return payload
+
+    @app.post("/api/jobs/bulk", dependencies=[Depends(authenticate)])
+    def bulk(payload: dict):
+        """Act on every attention-needed job matching the Needs review filter at once."""
+        action = payload.get("action")
+        if action not in ("retry", "skip", "generate"):
+            raise HTTPException(422, "Action must be retry, skip or generate")
+        condition, args = review_condition(str(payload.get("q", "")), str(payload.get("reason", "")))
+        # Bulk work is queued behind new downloads and manual requests (priority 40): it is
+        # background work, not "run this next" for hundreds of files.
+        if action == "retry":
+            db.refresh_library_policy()
+        with db.connect() as connection:
+            selected = connection.execute(
+                f"SELECT id, library_blocked FROM jobs WHERE {condition}", args
+            ).fetchall()
+        done = blocked = 0
+        for row in selected:
+            if action == "retry":
+                if row["library_blocked"]:
+                    blocked += 1
+                    continue
+                done += db.retry(row["id"], origin="retry", priority=40)
+            elif action == "skip":
+                done += db.skip(row["id"])
+            else:
+                done += db.direct(row["id"], "generate", origin="retry", priority=40)
+        verb = {"retry": "Queued again", "skip": "Set aside", "generate": "Fresh subtitles requested for"}[action]
+        message = f"{verb} {done} {'file' if done == 1 else 'files'}"
+        if blocked:
+            message += f"; {blocked} skipped in Library were left alone"
+        return {"message": message, "count": done, "blocked": blocked}
 
     @app.get("/api/jobs/{job_id}", dependencies=[Depends(authenticate)])
     def job_detail(job_id: int):

@@ -735,12 +735,12 @@ class Database:
                 ).rowcount
             )
 
-    def retry(self, job_id: int) -> bool:
+    def retry(self, job_id: int, origin: str = "manual", priority: int = 100) -> bool:
         with self.connect() as db:
             result = db.execute(
-                "UPDATE jobs SET state='queued',origin='manual',priority=100,cancel_requested=0,ready=?,updated=?,attempts=0,error=NULL "
+                "UPDATE jobs SET state='queued',origin=?,priority=?,cancel_requested=0,ready=?,updated=?,attempts=0,error=NULL "
                 "WHERE id=? AND state IN ('failed','review','skipped')",
-                (time.time(), time.time(), job_id),
+                (origin, priority, time.time(), time.time(), job_id),
             )
             return bool(result.rowcount)
 
@@ -773,7 +773,7 @@ class Database:
                 )
             return bool(result.rowcount)
 
-    def direct(self, job_id: int, directive: str) -> bool:
+    def direct(self, job_id: int, directive: str, origin: str = "manual", priority: int = 100) -> bool:
         """Re-open a job with an explicit instruction, whatever its previous verdict.
 
         A forced regeneration must run even when nothing about the media or its
@@ -782,10 +782,10 @@ class Database:
         with self.connect() as db:
             return bool(
                 db.execute(
-                    "UPDATE jobs SET directive=?,state='queued',stage='',origin='manual',priority=100,"
+                    "UPDATE jobs SET directive=?,state='queued',stage='',origin=?,priority=?,"
                     "cancel_requested=0,ready=?,updated=?,attempts=0,error=NULL,"
                     "generation=generation+1,progress_current=NULL,progress_total=NULL,started=NULL,cached=NULL WHERE id=?",
-                    (directive, time.time(), time.time(), job_id),
+                    (directive, origin, priority, time.time(), time.time(), job_id),
                 ).rowcount
             )
 
