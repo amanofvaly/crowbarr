@@ -155,3 +155,30 @@ def test_the_updates_page_says_when_nothing_is_new_and_ties_automatic_installs_t
 
     unchecked = render_updates({**BASE, "available": False}, update_check=False)
     assert 'name="auto_update" disabled' in unchecked
+
+
+def worker_state(status: dict):
+    program = excerpt("function workerState", "function apply(next)")
+    program += f"\nconsole.log(JSON.stringify(workerState({json.dumps(status)})));"
+    return run_node(program)
+
+
+@needs_node
+def test_a_waiting_slot_does_not_hide_jobs_that_are_running():
+    """With parallel jobs, an idle slot waiting for GPU memory is routine; the worker is busy."""
+    running = [{"state": "processing"}] * 3 + [{"state": "queued"}]
+    state = worker_state({"paused": False, "wait_reason": "Waiting for 2048 MB free GPU memory", "jobs": running})
+    assert state == {
+        "text": "Processing 3 jobs",
+        "title": "Next job waits: Waiting for 2048 MB free GPU memory",
+        "warning": False,
+    }
+    assert worker_state({"paused": False, "wait_reason": "", "jobs": running[:1]})["text"] == "Processing 1 job"
+
+
+@needs_node
+def test_the_worker_is_deferred_only_when_nothing_runs():
+    idle = {"paused": False, "wait_reason": "Plex is playing; background work deferred", "jobs": [{"state": "queued"}]}
+    assert worker_state(idle) == {"text": "Worker deferred", "title": idle["wait_reason"], "warning": True}
+    assert worker_state({**idle, "wait_reason": ""})["text"] == "Worker ready"
+    assert worker_state({**idle, "paused": True, "jobs": [{"state": "processing"}]})["text"] == "Queue paused"
