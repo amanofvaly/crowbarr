@@ -14,6 +14,23 @@ from .media import ReviewRequired, duration_seconds, probe
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".webm"}
 
+# Subtitle digests keyed by (path, size, mtime_ns). Every library scan signs every
+# media file, and signing used to read and hash every sidecar each time, which woke
+# every array disk on each scan. An unchanged stat means unchanged bytes for our
+# purposes (Sonarr, Radarr, Bazarr and Crowbarr all replace files, updating mtime).
+_DIGESTS: dict[str, tuple[int, int, str]] = {}
+
+
+def subtitle_digest(path: Path, stat: os.stat_result | None = None) -> str:
+    stat = stat or path.stat()
+    key = str(path)
+    cached = _DIGESTS.get(key)
+    if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
+        return cached[2]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    _DIGESTS[key] = (stat.st_size, stat.st_mtime_ns, digest)
+    return digest
+
 
 def skip_short_pending(settings: Settings, db: Database) -> int:
     minimum = settings.min_duration_minutes * 60
@@ -74,9 +91,10 @@ def signature(
     if source and source not in sources:
         sources.append(source)
     for candidate in sources:
-        if candidate.stat().st_size > 8 * 1024 * 1024:
+        candidate_stat = candidate.stat()
+        if candidate_stat.st_size > 8 * 1024 * 1024:
             raise ValueError("Subtitle exceeds 8 MiB limit")
-        data.extend([str(candidate), hashlib.sha256(candidate.read_bytes()).hexdigest()])
+        data.extend([str(candidate), subtitle_digest(candidate, candidate_stat)])
     return hashlib.sha256(json.dumps(data).encode()).hexdigest()
 
 
