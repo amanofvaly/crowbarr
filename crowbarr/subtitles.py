@@ -4,10 +4,10 @@ import html
 import math
 import re
 import unicodedata
-from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from pathlib import Path
 
 
 @dataclass
