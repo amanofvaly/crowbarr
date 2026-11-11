@@ -370,8 +370,11 @@ class Service:
                         )
                     except Exception:
                         log.exception("Failed to update job %s after completion", job["id"])
-                elif latest and latest["state"] == "completed":
-                    self.scan_event.set()
+                # A completed job used to request a full library scan here. Its output is a
+                # .crowbarr. sidecar, which subtitle_sources() ignores, so no signature changes
+                # and the scan found nothing new -- but it re-read every subtitle in the library
+                # after every job, which kept every array disk spinning while a queue drained.
+                # Imports and Bazarr upgrades arrive by webhook; the periodic scan handles the rest.
                 # A job discarded because its inputs moved on did no inference, so it must not
                 # spend the background budget or start a cooldown. Otherwise a library-wide
                 # re-sign leaves the worker idling between jobs that never ran.

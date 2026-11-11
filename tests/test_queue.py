@@ -664,6 +664,54 @@ def test_scan_hashes_each_signature_once(tmp_path, monkeypatch):
     assert calls == 1
 
 
+def test_repeat_scans_do_not_reread_unchanged_subtitles(tmp_path, monkeypatch):
+    # Re-reading every sidecar on every scan woke every array disk each time.
+    from pathlib import Path
+
+    from crowbarr import library
+
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
+    (tmp_path / "show.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    db = Database(tmp_path / "state" / "crowbarr.db")
+    settings = Settings(roots=[str(tmp_path)], settle_seconds=0, subtitle_wait_minutes=0)
+    monkeypatch.setattr(library, "_DIGESTS", {})
+    reads = []
+    original = Path.read_bytes
+
+    def counted(self):
+        if self.suffix == ".srt":
+            reads.append(self.name)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counted)
+    library.scan(settings, db)
+    library.scan(settings, db)
+    library.scan(settings, db)
+
+    assert reads == ["show.en.srt"]
+
+
+def test_changed_subtitle_still_changes_the_signature(tmp_path, monkeypatch):
+    import os
+
+    from crowbarr import library
+
+    media = tmp_path / "show.mkv"
+    media.write_bytes(b"video")
+    subtitle = tmp_path / "show.en.srt"
+    subtitle.write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+    settings = Settings(roots=[str(tmp_path)])
+    monkeypatch.setattr(library, "_DIGESTS", {})
+    before = library.signature(media, subtitle, settings)
+    stat = subtitle.stat()
+    subtitle.write_text("1\n00:00:01,000 --> 00:00:02,000\nHo\n")
+    # Same size; only the replacement's newer mtime marks it changed.
+    os.utime(subtitle, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    assert library.signature(media, subtitle, settings) != before
+
+
 def test_one_unreadable_file_does_not_leave_keep_results_pending(tmp_path, monkeypatch):
     from crowbarr import library
     from crowbarr.config import Settings
